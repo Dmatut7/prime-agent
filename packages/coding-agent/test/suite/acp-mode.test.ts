@@ -62,6 +62,7 @@ function fakeAcpConnection(
 			return snapshot;
 		},
 		promptAndWait: async () => {},
+		waitForIdle: async () => {},
 		waitForHeadlessCompletion: async () => ({
 			enabled: false,
 			continuationsUsed: 0,
@@ -294,4 +295,42 @@ describe("ACP mode end to end", () => {
 		expect(quiescence.update._meta[PRIME_AGENT_META_NAMESPACE].quiescence.outstandingSubagents).toBe(1);
 		close();
 	});
+	it("answers a prompt only once the session admits the next turn", async () => {
+		const harness = await createHarness();
+		harness.setResponses([fauxAssistantMessage("First reply."), fauxAssistantMessage("Second reply.")]);
+		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+
+		// The prompt response is the client's signal that the next prompt is
+		// admissible, so it must be ordered after the session's admission gate.
+		let idleAwaited = false;
+		const waitForIdle = connection.waitForIdle.bind(connection);
+		connection.waitForIdle = async () => {
+			await waitForIdle();
+			idleAwaited = true;
+		};
+
+		const { client } = connectAcpClient(connection);
+		await client.request("initialize", {
+			protocolVersion: acp.PROTOCOL_VERSION,
+			clientCapabilities: {},
+		});
+		const session = await client.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
+
+		const first = await client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "First turn" }],
+		});
+		expect(first.stopReason).toBe("end_turn");
+		expect(idleAwaited).toBe(true);
+
+		// A client that prompts immediately after end_turn must never be refused
+		// as "Agent is already processing".
+		const second = await client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "Second turn" }],
+		});
+		expect(second.stopReason).toBe("end_turn");
+
+		harness.cleanup();
+	}, 30_000);
 });

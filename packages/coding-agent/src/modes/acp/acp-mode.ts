@@ -408,6 +408,9 @@ export async function runAcpModeWithConnection(
 					})
 					.catch(() => undefined);
 
+				// The response is the client's signal that the next prompt is admissible.
+				// Work may have restarted the session after headless completion observed idle.
+				await connection.waitForIdle();
 				// A turn that failed (provider error, auth, no usable model) must not be
 				// reported as a clean end_turn. Print mode surfaces
 				// `stopReason: "error"` with its errorMessage; ACP previously dropped
