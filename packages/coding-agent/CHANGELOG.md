@@ -4,6 +4,7 @@
 
 - Added ACP `_meta.quiescence` to report outstanding subagents and remaining autonomous continuations; `session/prompt` rejects if its live child-roster read fails.
 - Fixed ACP rejecting an immediate follow-up prompt with "Agent is already processing" when injected work (subagent replies, heartbeats) restarted the session after the previous turn; the follow-up now queues behind the in-flight work instead of failing, and `session/cancel` drops a queued follow-up that has not started.
+- Fixed ACP returning a silent `end_turn` before a requested compaction resumed the agent.
 - Fixed resident daemon workers retaining their permitted launch environment across supervisor restarts while keeping client-owned credentials out of descriptor files.
 - Added a configurable copy action to login dialogs so raw sign-in URLs can be copied without selecting wrapped text ([#643](https://github.com/PrimeIntellect-ai/prime-agent/issues/643)).
 - Added privacy-safe pseudonymous product analytics for onboarding, command use, execution modes, run outcomes, TTFT, latency, usage, tools, retries, and compactions, with disclosure and opt-out controls ([ENG-4682](https://linear.app/primeintellect/issue/ENG-4682/add-privacy-safe-posthog-analytics-to-prime-agent)).

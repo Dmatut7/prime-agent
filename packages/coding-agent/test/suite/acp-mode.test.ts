@@ -1,6 +1,7 @@
 import * as acp from "@agentclientprotocol/sdk";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
+
 import type { AgentSessionRuntime } from "../../src/core/agent-session-runtime.js";
 import { PRIME_AGENT_META_NAMESPACE } from "../../src/modes/acp/acp-meta.js";
 import { runAcpModeWithConnection } from "../../src/modes/acp/index.js";
@@ -121,6 +122,31 @@ function connectAcpClient(connection: any): ClientHarness {
 
 	// connect() yields a handle whose `agent` proxy is the outbound call surface.
 	return { client: handle.agent, updates, close: () => handle.close() };
+}
+
+function compactTool(schedule: () => Record<string, unknown>) {
+	return {
+		name: "ipython",
+		description: "Schedule compaction",
+		parameters: { type: "object" as const, properties: {} },
+		execute: async () => ({
+			content: [{ type: "text" as const, text: JSON.stringify(schedule()) }],
+			details: {},
+		}),
+	};
+}
+
+function extensionCompaction() {
+	return (pi: any) => {
+		pi.on("session_before_compact", async (event: any) => ({
+			compaction: {
+				summary: "requested summary",
+				firstKeptEntryId: event.preparation.firstKeptEntryId,
+				tokensBefore: event.preparation.tokensBefore,
+				details: {},
+			},
+		}));
+	};
 }
 
 describe("ACP mode end to end", () => {
@@ -518,4 +544,40 @@ describe("ACP mode end to end", () => {
 		expect(texts().join("|")).not.toContain("queued turn done");
 		harness.cleanup();
 	}, 5_000);
+	it("awaits compact.run continuation and returns its visible completion", async () => {
+		let harness: Awaited<ReturnType<typeof createHarness>>;
+		harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [extensionCompaction()],
+			tools: [compactTool(() => harness.session.handleCompactHostRequest("compact.run")) as never],
+		});
+		// A requested compaction needs enough prior history to be eligible.
+		harness.setResponses([fauxAssistantMessage("seed one"), fauxAssistantMessage("seed two")]);
+		await harness.session.prompt("seed one");
+		await harness.session.prompt("seed two");
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("ipython", {})], { stopReason: "toolUse" }),
+			fauxAssistantMessage("continued after compaction"),
+		]);
+		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+		const { client, updates } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
+
+		const result = await client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "compact now" }],
+		});
+		expect(result.stopReason).toBe("end_turn");
+		expect(updates.filter((u) => u.update?.sessionUpdate === "tool_call_update").at(-1)?.update.status).toBe(
+			"completed",
+		);
+		const text = updates
+			.filter((u) => u.update?.sessionUpdate === "agent_message_chunk")
+			.map((u) => u.update.content.text)
+			.join("");
+		expect(text).toContain("continued after compaction");
+		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({ reason: "requested" });
+		harness.cleanup();
+	}, 30_000);
 });

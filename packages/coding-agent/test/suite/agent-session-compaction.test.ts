@@ -1003,6 +1003,8 @@ describe("AgentSession compaction characterization", () => {
 		expect(harness.session.getFollowUpMessages()).toHaveLength(1);
 
 		await harness.session.prompt("/autonomous off");
+		// waitForIdle now owns the timer-scheduled post-compaction continuation.
+		await vi.advanceTimersByTimeAsync(100);
 		await harness.session.waitForIdle();
 		expect(harness.session.getAutonomousStatus().enabled).toBe(false);
 		expect(harness.session.getFollowUpMessages()).toEqual([]);
