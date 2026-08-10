@@ -76,6 +76,31 @@ function fakeAcpConnection(
 	};
 }
 
+/**
+ * Real injected work with production timing: after the first headless-completion
+ * idle observation, this starts a genuine session turn (a subagent reply has the
+ * same shape) and blocks until the session is streaming it. Returns a checker
+ * for whether the injection has happened.
+ */
+function injectWorkAfterHeadlessCompletion(connection: any, session: any, text: string): () => boolean {
+	const waitForHeadlessCompletion = connection.waitForHeadlessCompletion.bind(connection);
+	let injected = false;
+	connection.waitForHeadlessCompletion = async () => {
+		const status = await waitForHeadlessCompletion();
+		if (!injected) {
+			injected = true;
+			void session.prompt(text);
+			const deadline = Date.now() + 5_000;
+			while (!session.isStreaming && Date.now() < deadline) {
+				await new Promise((resolve) => setTimeout(resolve, 1));
+			}
+			expect(session.isStreaming).toBe(true);
+		}
+		return status;
+	};
+	return () => injected;
+}
+
 function connectAcpClient(connection: any): ClientHarness {
 	// Two web streams crossed over: agent's stdout is the client's stdin.
 	const toAgent = new TransformStream<Uint8Array, Uint8Array>();
@@ -295,25 +320,27 @@ describe("ACP mode end to end", () => {
 		expect(quiescence.update._meta[PRIME_AGENT_META_NAMESPACE].quiescence.outstandingSubagents).toBe(1);
 		close();
 	});
-	it("answers a prompt only once the session admits the next turn", async () => {
+	// Production race: after ACP reported a completed turn, injected work (a
+	// subagent reply, heartbeat, goal message) restarted the resident session, so
+	// the client's next prompt was rejected with "Agent is already processing".
+	// Each regression injects real work after the first idle observation and
+	// drives a real ACP client, rather than asserting call ordering.
+
+	it("queues a follow-up prompt behind injected work instead of rejecting it", async () => {
 		const harness = await createHarness();
-		harness.setResponses([fauxAssistantMessage("First reply."), fauxAssistantMessage("Second reply.")]);
-		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
-
-		// The prompt response is the client's signal that the next prompt is
-		// admissible, so it must be ordered after the session's admission gate.
-		let idleAwaited = false;
-		const waitForIdle = connection.waitForIdle.bind(connection);
-		connection.waitForIdle = async () => {
-			await waitForIdle();
-			idleAwaited = true;
-		};
-
-		const { client } = connectAcpClient(connection);
-		await client.request("initialize", {
-			protocolVersion: acp.PROTOCOL_VERSION,
-			clientCapabilities: {},
+		let releaseInjected!: () => void;
+		const injectedHeld = new Promise<any>((resolve) => {
+			releaseInjected = () => resolve(fauxAssistantMessage("injected work done"));
 		});
+		harness.setResponses([
+			fauxAssistantMessage("turn one done"),
+			() => injectedHeld,
+			fauxAssistantMessage("turn two done"),
+		]);
+		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+		const injected = injectWorkAfterHeadlessCompletion(connection, harness.session, "injected work");
+		const { client, updates } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
 		const session = await client.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
 
 		const first = await client.request("session/prompt", {
@@ -321,16 +348,122 @@ describe("ACP mode end to end", () => {
 			prompt: [{ type: "text", text: "First turn" }],
 		});
 		expect(first.stopReason).toBe("end_turn");
-		expect(idleAwaited).toBe(true);
+		expect(injected()).toBe(true);
+		// The injected turn is still streaming, so the session is busy when the
+		// follow-up prompt arrives, exactly as in the production campaign.
+		expect(harness.session.isStreaming).toBe(true);
 
-		// A client that prompts immediately after end_turn must never be refused
-		// as "Agent is already processing".
-		const second = await client.request("session/prompt", {
+		let secondSettled = false;
+		const second = client
+			.request("session/prompt", {
+				sessionId: session.sessionId,
+				prompt: [{ type: "text", text: "Second turn" }],
+			})
+			.finally(() => {
+				secondSettled = true;
+			});
+		// The queued turn must neither resolve early nor reject with
+		// "Agent is already processing".
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(secondSettled).toBe(false);
+		expect(harness.session.isStreaming).toBe(true);
+		releaseInjected();
+		await expect(second).resolves.toMatchObject({ stopReason: "end_turn" });
+		expect(harness.session.isStreaming).toBe(false);
+
+		const text = updates
+			.filter((u) => u.update?.sessionUpdate === "agent_message_chunk")
+			.map((u) => u.update.content.text)
+			.join("");
+		expect(text).toContain("turn two done");
+
+		harness.cleanup();
+	}, 5_000);
+
+	it("reports the queued turn's stop reason from a fresh autonomous status", async () => {
+		const harness = await createHarness({
+			autonomous: {
+				enabled: true,
+				maxTurns: 2,
+				maxContinuations: 3,
+				maxTokens: 80_000,
+				gates: { commands: ["true"], maxRetries: 3 },
+			},
+		});
+		let releaseInjected!: () => void;
+		const injectedHeld = new Promise<any>((resolve) => {
+			releaseInjected = () => resolve(fauxAssistantMessage("injected work done"));
+		});
+		harness.setResponses([
+			fauxAssistantMessage("turn one done"),
+			() => injectedHeld,
+			fauxAssistantMessage("turn two done"),
+		]);
+		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+		injectWorkAfterHeadlessCompletion(connection, harness.session, "injected work");
+		const { client } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
+
+		const first = await client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "First turn" }],
+		});
+		expect(first.stopReason).toBe("end_turn");
+		expect(harness.session.getAutonomousStatus().turnsUsed).toBe(1);
+
+		const second = client.request("session/prompt", {
 			sessionId: session.sessionId,
 			prompt: [{ type: "text", text: "Second turn" }],
 		});
-		expect(second.stopReason).toBe("end_turn");
-
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(harness.session.isStreaming).toBe(true);
+		releaseInjected();
+		// The second prompt's response gates its own queued turn, so the stop
+		// reason comes from the status captured after that turn ran, not from a
+		// snapshot taken before the injected work consumed the autonomous budget.
+		await expect(second).resolves.toMatchObject({ stopReason: "max_turn_requests" });
+		expect(harness.session.getAutonomousStatus().turnsUsed).toBeGreaterThanOrEqual(
+			harness.session.getAutonomousStatus().limits.maxTurns,
+		);
 		harness.cleanup();
-	}, 30_000);
+	}, 5_000);
+
+	it("does not hold the prompt response open for detached work", async () => {
+		const harness = await createHarness();
+		let releaseInjected!: () => void;
+		const injectedHeld = new Promise<any>((resolve) => {
+			releaseInjected = () => resolve(fauxAssistantMessage("injected work done"));
+		});
+		harness.setResponses([fauxAssistantMessage("turn one done"), () => injectedHeld]);
+		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+		const injected = injectWorkAfterHeadlessCompletion(connection, harness.session, "injected work");
+		const { client } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
+
+		let settled = false;
+		const prompt = client
+			.request("session/prompt", {
+				sessionId: session.sessionId,
+				prompt: [{ type: "text", text: "First turn" }],
+			})
+			.finally(() => {
+				settled = true;
+			});
+		const deadline = Date.now() + 5_000;
+		while (!injected() && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 1));
+		}
+		expect(injected()).toBe(true);
+		// The response boundary reports quiescence rather than waiting for it:
+		// detached work must not hold the session/prompt response open, which is
+		// exactly the quiescence-blocking #806 rejected.
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(settled).toBe(true);
+		expect(harness.session.isStreaming).toBe(true);
+		releaseInjected();
+		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
+		harness.cleanup();
+	}, 5_000);
 });

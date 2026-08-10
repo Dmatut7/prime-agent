@@ -387,7 +387,18 @@ export async function runAcpModeWithConnection(
 				// rebuild the transcript mid-turn, so record the pre-turn messages
 				// themselves rather than how many there were.
 				const priorMessages = turnBoundary(await connection.getMessages());
-				await connection.promptAndWait(text, images.length > 0 ? { images } : undefined);
+				// A follow-up prompt can arrive while injected work (subagent replies,
+				// heartbeats) keeps the resident session busy. ACP has no native queue
+				// field, so queue the host turn behind that work with follow-up
+				// semantics instead of rejecting it as "Agent is already processing".
+				// promptAndWait then resolves once the queued turn has actually run,
+				// which is also what keeps the stop reason below attributed to the
+				// turn this prompt gates.
+				await connection.promptAndWait(text, {
+					...(images.length > 0 ? { images } : {}),
+					streamingBehavior: "followUp",
+					queueIfBusy: true,
+				});
 				// Autonomous gates continue inside this same prompt turn: the turn is
 				// only over once the gate loop settles.
 				const status = await connection.waitForHeadlessCompletion();
@@ -408,9 +419,6 @@ export async function runAcpModeWithConnection(
 					})
 					.catch(() => undefined);
 
-				// The response is the client's signal that the next prompt is admissible.
-				// Work may have restarted the session after headless completion observed idle.
-				await connection.waitForIdle();
 				// A turn that failed (provider error, auth, no usable model) must not be
 				// reported as a clean end_turn. Print mode surfaces
 				// `stopReason: "error"` with its errorMessage; ACP previously dropped
