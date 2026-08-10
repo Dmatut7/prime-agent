@@ -398,6 +398,9 @@ export async function runAcpModeWithConnection(
 					...(images.length > 0 ? { images } : {}),
 					streamingBehavior: "followUp",
 					queueIfBusy: true,
+					// session/cancel must drop a prompt that is still waiting in the
+					// queue, not just the turn currently streaming.
+					signal: abort.signal,
 				});
 				// Autonomous gates continue inside this same prompt turn: the turn is
 				// only over once the gate loop settles.

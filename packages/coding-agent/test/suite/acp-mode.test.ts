@@ -466,4 +466,56 @@ describe("ACP mode end to end", () => {
 		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
 		harness.cleanup();
 	}, 5_000);
+	it("cancels a prompt that is still queued behind busy work", async () => {
+		const harness = await createHarness();
+		let releaseInjected!: () => void;
+		const injectedHeld = new Promise<any>((resolve) => {
+			releaseInjected = () => resolve(fauxAssistantMessage("injected work done"));
+		});
+		harness.setResponses([
+			fauxAssistantMessage("turn one done"),
+			() => injectedHeld,
+			fauxAssistantMessage("queued turn done"),
+		]);
+		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+		const injected = injectWorkAfterHeadlessCompletion(connection, harness.session, "injected work");
+		const { client } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
+
+		const first = await client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "First turn" }],
+		});
+		expect(first.stopReason).toBe("end_turn");
+		expect(injected()).toBe(true);
+		expect(harness.session.isStreaming).toBe(true);
+
+		const queued = client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "Second turn" }],
+		});
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(harness.session.isStreaming).toBe(true);
+
+		// session/cancel must drop the queued prompt, not leave it to run once
+		// the busy turn finishes. The notification handler may wait on the
+		// in-flight turn, so do not await it here.
+		void client.notify("session/cancel", { sessionId: session.sessionId });
+		await expect(queued).resolves.toMatchObject({ stopReason: "cancelled" });
+		const texts = () =>
+			harness.session.messages
+				.filter((m) => m.role === "assistant")
+				.map((m: any) =>
+					Array.isArray(m.content)
+						? m.content.map((p: any) => (p.type === "text" ? p.text : p.type)).join(" ")
+						: String(m.content),
+				);
+		expect(texts().join("|")).not.toContain("queued turn done");
+		// Releasing the busy turn must not let the cancelled prompt execute.
+		releaseInjected();
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(texts().join("|")).not.toContain("queued turn done");
+		harness.cleanup();
+	}, 5_000);
 });

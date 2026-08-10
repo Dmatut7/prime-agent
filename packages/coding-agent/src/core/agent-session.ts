@@ -4464,12 +4464,41 @@ export class AgentSession {
 		const outcome = this._agentMessageOutcome(agentMessageId);
 		outcome.completion = createAgentMessageDeferred();
 		const completion = outcome.completion.promise;
+		// Admission-time signal checks cannot see an abort that lands once a
+		// followUp prompt is already queued behind busy work. Cancel the not-yet-
+		// started action here so promptAndWait rejects and the caller can report
+		// the cancellation instead of leaving the queued prompt to run later.
+		const signal = options?.signal;
+		let cancelQueuedPrompt: (() => void) | undefined;
+		const detachCancelQueuedPrompt = () => {
+			if (signal && cancelQueuedPrompt) {
+				signal.removeEventListener("abort", cancelQueuedPrompt);
+			}
+		};
 		try {
 			await this.promptUntilAccepted(text, { ...options, agentMessageId });
+			if (signal && !signal.aborted) {
+				cancelQueuedPrompt = () => {
+					const error = new Error("Prompt was cancelled before it started.");
+					const cancelled = this._cancelSessionActions(
+						(action) =>
+							action.agentMessageId === agentMessageId &&
+							action.payload.kind === "turn" &&
+							(action.lifecycle.state === "queued" || action.lifecycle.state === "selected"),
+						error,
+					);
+					if (cancelled.length > 0) {
+						this._settleAgentMessage(agentMessageId, "completion", error);
+					}
+				};
+				signal.addEventListener("abort", cancelQueuedPrompt, { once: true });
+			}
 			await completion;
 		} catch (error) {
 			this._settleAgentMessage(agentMessageId, "completion", this._asError(error));
 			throw error;
+		} finally {
+			detachCancelQueuedPrompt();
 		}
 	}
 

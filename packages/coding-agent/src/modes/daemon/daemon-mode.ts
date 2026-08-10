@@ -3742,6 +3742,9 @@ export class AgentDaemon {
 					});
 				}
 				if (admission.status === "owned") {
+					// The prompt is session-owned; still propagate the cancel so a
+					// queued not-yet-started prompt is dropped rather than run later.
+					admission.controller?.abort();
 					return success(command.id, command.type, {
 						status: "owned" as const,
 					});
