@@ -4477,7 +4477,7 @@ export class AgentSession {
 		};
 		try {
 			await this.promptUntilAccepted(text, { ...options, agentMessageId });
-			if (signal && !signal.aborted) {
+			if (signal) {
 				cancelQueuedPrompt = () => {
 					const error = new Error("Prompt was cancelled before it started.");
 					const cancelled = this._cancelSessionActions(
@@ -4491,7 +4491,10 @@ export class AgentSession {
 						this._settleAgentMessage(agentMessageId, "completion", error);
 					}
 				};
+				// Register before re-checking aborted: an abort between the check
+				// and registration would otherwise never invoke the listener.
 				signal.addEventListener("abort", cancelQueuedPrompt, { once: true });
+				if (signal.aborted) cancelQueuedPrompt();
 			}
 			await completion;
 		} catch (error) {
