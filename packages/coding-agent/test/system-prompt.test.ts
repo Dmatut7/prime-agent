@@ -76,6 +76,8 @@ describe("buildRlmPrompt", () => {
 				"",
 				"Python state in the kernel, by contrast, persists across cells: named variables, helper functions, classes, imports, notes, parsed outputs, and helper data structures all remain available in every later turn. Tool calls are themselves Python `await` expressions, so their return values can be bound to variables and composed into program logic just like any other call.",
 				"",
+				"Do not block the kernel or shell waiting on slow external work. Never poll with `time.sleep()` loops or long blocking sleeps in Python, and never use `sleep` in `%%bash` cells or the bash tool to wait for a background run, sandbox, sub-agent, or remote job to progress. A blocked cell or command holds the turn open, wastes wall-clock, and stops the user from interacting. Instead kick off the work, record its handle or output location, end your turn, and check the result on a later turn (or when a reply arrives). If you must poll, use short intervals (a few seconds) and only as a last resort.",
+				"",
 				"Continual harness state is available as `rlm.harness` and `rlm.get_harness_state()`. CRUD calls are local to this Prime Agent session by default: `rlm.harness.create_memory(...)`, `rlm.harness.update_memory(...)`, `rlm.harness.delete_memory(...)`, `rlm.harness.create_skill(...)`, `rlm.harness.update_skill(...)`, `rlm.harness.delete_skill(...)`, `rlm.harness.create_subagent(...)`, `rlm.harness.update_subagent(...)`, `rlm.harness.delete_subagent(...)`, `rlm.harness.create_prompt_note(...)`, `rlm.harness.update_prompt_note(...)`, `rlm.harness.delete_prompt_note(...)`, plus `rlm.harness.record_refinement(...)` and `rlm.harness.overview()`. Use `global_=True` only for stable cross-session lessons; Python reserves `global`, so literal `global=True` is invalid syntax.",
 				"",
 				"Terminology: continual harness names the persisted prompt, memory, skill, and subagent layer; RLM names the runtime, IPython kernel, and native call interface exposed to the model.",
@@ -98,6 +100,7 @@ describe("buildRlmPrompt", () => {
 		expect(prompt).toContain("A callable `rlm` is already in your global namespace");
 		expect(prompt).toContain("IPython is the agent's long-lived notebook");
 		expect(prompt).toContain("Each `%%bash` cell runs in a throw-away subshell");
+		expect(prompt).toContain("never use `sleep` in `%%bash` cells or the bash tool");
 	});
 
 	test("discovers requested models through a bounded authenticated host search", () => {
