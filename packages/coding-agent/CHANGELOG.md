@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added guidance for running long shell commands as persistent async tasks without blocking the kernel or agent turn.
 - Added an async `bash()` function to the IPython kernel so `await bash("...")` runs shell commands without blocking the kernel event loop.
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
