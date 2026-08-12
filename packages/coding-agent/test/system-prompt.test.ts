@@ -66,11 +66,9 @@ describe("buildRlmPrompt", () => {
 				"",
 				"Do not assume IPython is the native runtime of the external thing being investigated. A repository, package, service, dataset, paper, website, benchmark, or API may have its own environment and normal interface. Evaluate external systems through their own interface, then use IPython to coordinate the process and analyze what comes back.",
 				"",
-				'When running shell commands from IPython, prefer `await bash("...", timeout=<seconds>)` over `%%bash` cells for commands expected to finish within the current turn: it keeps the kernel event loop responsive to interrupts, cleans up its managed process group on interruption, and bounds captured stdout/stderr. The `bash()` timeout is an execution deadline that stops the command. `%%bash` cells block the kernel until the command finishes. If you do use `%%bash`, it must be the first line of the code cell: no comments, spaces, blank lines, imports, or Python statements before it. Avoid `!cmd` shell escapes for project commands so shell behavior is explicit and multi-line commands share one shell context.',
+				'When running shell commands from IPython, prefer `await bash("...")` over `%%bash` cells: it keeps the kernel event loop responsive to interrupts, cleans up its managed process group on interruption, and bounds captured stdout/stderr. `%%bash` cells block the kernel until the command finishes. If you do use `%%bash`, it must be the first line of the code cell: no comments, spaces, blank lines, imports, or Python statements before it. Avoid `!cmd` shell escapes for project commands so shell behavior is explicit and multi-line commands share one shell context.',
 				"",
-				'For a command that may outlive the current cell or turn, start a persistent named task instead of directly awaiting it: `job = asyncio.create_task(bash("...", timeout=<finite execution deadline>))`. The task and variable persist across cells in the current kernel, so end the cell or turn and inspect it later with `job.done()`; when it is done, use `job.result()` and inspect its return code, stdout, and stderr. For one short non-destructive wait, use `await asyncio.wait({job}, timeout=<a few seconds>)`; do not use `asyncio.wait_for(job, ...)`, because its timeout cancels the underlying task. To stop the command, call `job.cancel()` and then await it while handling `asyncio.CancelledError`. Never use shell `&`, `nohup`, blocking sleep loops, or tight polling to manage background work. These tasks do not survive a kernel restart or application shutdown.',
-				"",
-				"Do not keep a tool call or turn open solely to idle or poll while slow external work progresses. Never poll with `time.sleep()` or use `sleep` in `%%bash` cells or the bash tool to wait for a background run, sandbox, sub-agent, or remote job. A single bounded wait of a few seconds is fine when completion is imminent; otherwise record the handle or output location, end your turn, and check on a later turn or when a reply arrives. Sleeps inside the actual workload, tests, or required backoff are allowed.",
+				'For a long command, start it as an asyncio task so it can keep running without holding the turn open. For example: `check = asyncio.create_task(bash("npm run check", timeout=1800))`. End your turn, then inspect `check.done()` in a later cell and call `check.result()` once it completes instead of waiting with sleep loops.',
 				"",
 				"Important: do not install dependencies into the IPython kernel just to make an external project import or run there. If a project import, test, script, CLI, or dependency check is needed, run it through that project's own environment and normal command interface. For example, in a Python repo use its documented commands, `uv run ...`, `.venv/bin/python ...`, or the active project interpreter from the repo root. Treat failures from that native environment as the relevant result.",
 				"",
@@ -103,10 +101,7 @@ describe("buildRlmPrompt", () => {
 		expect(prompt).toContain("IPython is the agent's long-lived notebook");
 		expect(prompt).toContain("Each `%%bash` cell runs in a throw-away subshell");
 		expect(prompt).toContain("prefer `await bash");
-		expect(prompt).toContain("job = asyncio.create_task(bash");
-		expect(prompt).toContain("await asyncio.wait({job}");
-		expect(prompt).toContain("do not use `asyncio.wait_for(job, ...)`");
-		expect(prompt).toContain("Never poll with `time.sleep()`");
+		expect(prompt).toContain('check = asyncio.create_task(bash("npm run check", timeout=1800))');
 	});
 
 	test("discovers requested models through a bounded authenticated host search", () => {
