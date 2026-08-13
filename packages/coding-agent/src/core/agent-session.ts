@@ -1383,6 +1383,32 @@ export class AgentSession {
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}
 
+	replaceTemporarySkills(skillPaths: string[], source: string): void {
+		if (this.isStreaming) {
+			throw new Error("Cannot replace temporary skills while the agent is running");
+		}
+		const resources = skillPaths.map((path) => ({
+			path,
+			metadata: {
+				source,
+				scope: "temporary" as const,
+				origin: "top-level" as const,
+				baseDir: dirname(path),
+			},
+		}));
+		if (this._resourceLoader.replaceSkillResources) {
+			this._resourceLoader.replaceSkillResources(resources, source);
+		} else if (resources.length > 0) {
+			this._resourceLoader.extendResources({ skillPaths: resources });
+		}
+		this._buildRuntime({
+			activeToolNames: this.getActiveToolNames(),
+			includeAllExtensionTools: true,
+		});
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
+	}
+
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this._modelRegistry;

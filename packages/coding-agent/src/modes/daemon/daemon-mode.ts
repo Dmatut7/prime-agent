@@ -277,6 +277,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"get_context_tree",
 	"get_commands",
 	"get_resource_snapshot",
+	"replace_temporary_skills",
 	"get_model_catalog",
 	"get_available_models",
 	"get_queue",
@@ -4156,6 +4157,14 @@ export class AgentDaemon {
 					"get_resource_snapshot",
 					createAgentConnectionResourceSnapshot(state.runtime.session),
 				);
+			}
+
+			case "replace_temporary_skills": {
+				const state = this.getSessionState(command.activeSessionId);
+				await withClientEnv(state.clientEnv, async () =>
+					state.runtime.session.replaceTemporarySkills(command.skillPaths, command.source),
+				);
+				return success(command.id, "replace_temporary_skills");
 			}
 
 			case "get_available_models": {

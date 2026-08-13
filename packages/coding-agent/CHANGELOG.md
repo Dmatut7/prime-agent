@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added ACP MCP server support: HTTP and stdio tools supplied by `session/new` are exposed as session-scoped Python programs in the RLM kernel.
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
 ## [0.7.2] - 2026-08-11

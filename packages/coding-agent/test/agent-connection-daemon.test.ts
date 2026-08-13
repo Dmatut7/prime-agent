@@ -180,6 +180,8 @@ class FakeDaemonClient {
 						},
 					},
 				};
+			case "replace_temporary_skills":
+				return { type: "response", command: command.type, success: true };
 			case "get_model_catalog":
 				return {
 					type: "response",
@@ -957,6 +959,26 @@ describe("DaemonAgentConnection", () => {
 			(command): command is Extract<DaemonCommand, { type: "execute_bash" }> => command.type === "execute_bash",
 		);
 		expect(sent).toMatchObject({ command: "ls", excludeFromContext: true, transient: true, runId: "side-run-1" });
+	});
+
+	it("capability-gates temporary ACP skills on old daemons", async () => {
+		const oldDaemonClient = new FakeDaemonClient();
+		const oldConnection = new DaemonAgentConnection(asDaemonClient(oldDaemonClient), "active-original");
+		await expect(oldConnection.replaceTemporarySkills(["/tmp/task/SKILL.md"], "acp:mcp")).rejects.toThrow(
+			"does not support temporary_skills",
+		);
+		expect(oldDaemonClient.requests).toEqual([]);
+
+		const newDaemonClient = new FakeDaemonClient();
+		newDaemonClient.serverCapabilities.add("temporary_skills");
+		const newConnection = new DaemonAgentConnection(asDaemonClient(newDaemonClient), "active-original");
+		await newConnection.replaceTemporarySkills(["/tmp/task/SKILL.md"], "acp:mcp");
+		expect(newDaemonClient.requests.at(-1)).toMatchObject({
+			type: "replace_temporary_skills",
+			activeSessionId: "active-original",
+			skillPaths: ["/tmp/task/SKILL.md"],
+			source: "acp:mcp",
+		});
 	});
 
 	it("degrades an unavailable heartbeat catalog without sending an unsupported command", async () => {

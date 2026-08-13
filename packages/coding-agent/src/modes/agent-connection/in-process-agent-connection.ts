@@ -106,6 +106,10 @@ export class InProcessAgentConnection implements AgentConnection {
 		await this.bindCurrentSessionExtensions();
 	}
 
+	async replaceTemporarySkills(skillPaths: string[], source: string): Promise<void> {
+		this.runtimeHost.session.replaceTemporarySkills(skillPaths, source);
+	}
+
 	subscribe(listener: AgentConnectionEventListener): () => void {
 		this.listeners.add(listener);
 		return () => {

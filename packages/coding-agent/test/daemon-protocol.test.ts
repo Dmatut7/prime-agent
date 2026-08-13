@@ -93,6 +93,15 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("queue_message_mutation");
 	});
 
+	it("capability- and schema-gates temporary skill replacement", () => {
+		expect(DAEMON_COMMAND_COMPATIBILITY.replace_temporary_skills).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 17,
+			capability: "temporary_skills",
+		});
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("temporary_skills");
+	});
+
 	it("schema-gates the RLM max depth commands at their introducing revision", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.get_rlm_max_depth_status).toEqual({ minProtocol: 7, minSchemaRevision: 11 });
 		expect(DAEMON_COMMAND_COMPATIBILITY.set_rlm_max_depth).toEqual({ minProtocol: 7, minSchemaRevision: 11 });

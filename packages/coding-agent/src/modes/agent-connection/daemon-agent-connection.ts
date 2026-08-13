@@ -456,6 +456,18 @@ export class DaemonAgentConnection implements AgentConnection {
 		});
 	}
 
+	async replaceTemporarySkills(skillPaths: string[], source: string): Promise<void> {
+		if (!this.client.supportsServerCapability("temporary_skills")) {
+			throw new DaemonCapabilityUnavailableError("replace_temporary_skills", "temporary_skills");
+		}
+		await this.requestOk({
+			type: "replace_temporary_skills",
+			activeSessionId: this.activeSessionId,
+			skillPaths,
+			source,
+		});
+	}
+
 	async getAvailableModels(): Promise<AgentConnectionModel[]> {
 		const data = await this.requestData<{ models: AgentConnectionModel[] }>({
 			type: "get_available_models",

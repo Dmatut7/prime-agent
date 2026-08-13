@@ -60,8 +60,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
 // Revision 15 adds the mutate_queued_message command and queue_message_mutation capability.
 // Revision 16 adds the "stopping" workerState and stops reporting disconnected workers as "ready".
-export const DAEMON_SCHEMA_REVISION = 16;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-16-1bcb9e7f1a49";
+// Revision 17 adds capability-gated replacement of process-local Python skills.
+export const DAEMON_SCHEMA_REVISION = 17;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-17-e19a3f12dc03";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -100,7 +101,8 @@ export type DaemonServerCapability =
 	| "transient_bash"
 	| "session_input_admission"
 	| "prompt_admission_cancellation"
-	| "queue_message_mutation";
+	| "queue_message_mutation"
+	| "temporary_skills";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -139,6 +141,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"session_input_admission",
 	"prompt_admission_cancellation",
 	"queue_message_mutation",
+	"temporary_skills",
 ];
 
 export interface DaemonRuntimeIdentity {
@@ -510,6 +513,13 @@ export type DaemonCommand =
 	| { id?: string; type: "get_context_tree"; activeSessionId: string }
 	| { id?: string; type: "get_commands"; activeSessionId: string }
 	| { id?: string; type: "get_resource_snapshot"; activeSessionId: string }
+	| {
+			id?: string;
+			type: "replace_temporary_skills";
+			activeSessionId: string;
+			skillPaths: string[];
+			source: string;
+	  }
 	| { id?: string; type: "get_model_catalog"; activeSessionId: string }
 	| { id?: string; type: "get_available_models"; activeSessionId: string }
 	| { id?: string; type: "get_queue"; activeSessionId: string }
@@ -693,6 +703,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	get_context_tree: LEGACY_DAEMON_COMMAND,
 	get_commands: LEGACY_DAEMON_COMMAND,
 	get_resource_snapshot: LEGACY_DAEMON_COMMAND,
+	replace_temporary_skills: { minProtocol: 7, minSchemaRevision: 17, capability: "temporary_skills" },
 	get_model_catalog: { minProtocol: 7, capability: "model_catalog" },
 	get_available_models: LEGACY_DAEMON_COMMAND,
 	get_queue: LEGACY_DAEMON_COMMAND,

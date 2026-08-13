@@ -689,6 +689,8 @@ export interface AgentConnection {
 	getToolDefinition(name: string): Promise<AgentConnectionToolDefinition | undefined>;
 	setSessionEntryLabel(entryId: string, label: string | undefined): Promise<void>;
 	respondToExtensionUiRequest(requestId: string, response: AgentConnectionExtensionUiResponse): Promise<void>;
+	/** Replace one source's process-local Python skills before a headless turn starts. */
+	replaceTemporarySkills?(skillPaths: string[], source: string): Promise<void>;
 
 	prompt(message: string, options?: AgentConnectionPromptOptions): Promise<void>;
 	promptAndWait(message: string, options?: AgentConnectionPromptOptions): Promise<void>;
