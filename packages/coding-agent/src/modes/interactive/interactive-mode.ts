@@ -4230,7 +4230,7 @@ export class InteractiveMode {
 
 	private stashDraftForAgentsView(): void {
 		const text = this.editor.getText();
-		if (!text) return;
+		if (!text.trim()) return;
 		// Head of the durable queue so it restores first on return; an existing
 		// manual stash stays queued behind it and keeps its manual-stash semantics.
 		const existing = [this.promptStashState.stash, ...(this.promptStashState.queuedStashes ?? [])].filter(

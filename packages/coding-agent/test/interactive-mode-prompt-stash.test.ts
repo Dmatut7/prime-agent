@@ -372,6 +372,30 @@ describe("InteractiveMode prompt stash", () => {
 		expect(state.queuedStashes).toBeUndefined();
 	});
 
+	it("skips the agents-view auto-stash for whitespace-only drafts", () => {
+		const store = new ClientPromptStashStore();
+		const state = store.forSession("session-a");
+		state.stash = { text: "manual draft" };
+		const mode = createSharedPromptStashHarness(store, "session-a", { text: "   \n\t" });
+
+		interactiveModeMethods.stashDraftForAgentsView.call(mode);
+
+		expect(state.stash).toEqual({ text: "manual draft" });
+		expect(state.queuedStashes).toBeUndefined();
+	});
+
+	it("preserves surrounding whitespace in a real auto-stashed draft", () => {
+		const store = new ClientPromptStashStore();
+		const mode = createSharedPromptStashHarness(store, "session-a", { text: "  spaced draft  " });
+
+		interactiveModeMethods.stashDraftForAgentsView.call(mode);
+
+		const reopenedMode = createSharedPromptStashHarness(store, "session-a");
+		interactiveModeMethods.restorePromptStashOnOpen.call(reopenedMode);
+
+		expect(reopenedMode.editor.getText()).toBe("  spaced draft  ");
+	});
+
 	it("does not auto-restore a manual stash on reopen", () => {
 		const store = new ClientPromptStashStore();
 		store.forSession("session-a").stash = { text: "manual draft" };
