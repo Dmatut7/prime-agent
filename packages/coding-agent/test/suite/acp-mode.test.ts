@@ -1,6 +1,6 @@
 import * as acp from "@agentclientprotocol/sdk";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionRuntime } from "../../src/core/agent-session-runtime.js";
 import { PRIME_AGENT_META_NAMESPACE } from "../../src/modes/acp/acp-meta.js";
 import { runAcpModeWithConnection } from "../../src/modes/acp/index.js";
@@ -29,7 +29,72 @@ interface ClientHarness {
 	close: () => void;
 }
 
-function connectAcpClient(connection: any): ClientHarness {
+function fakeAcpConnection(
+	options: {
+		initialSnapshot?: () => Promise<any>;
+		finalSnapshot?: () => Promise<any>;
+		onPromptAndWait?: () => void | Promise<void>;
+		onWaitForHeadlessCompletion?: () => void | Promise<void>;
+		headlessStatus?: Record<string, unknown>;
+		onFinalSnapshot?: () => void | Promise<void>;
+		onUnsubscribe?: () => void;
+		onAbort?: () => void | Promise<void>;
+	} = {},
+): any {
+	let listener: ((event: any) => void) | undefined;
+	const messages: any[] = [];
+	const snapshot = { state: { cwd: process.cwd() }, messages, children: [] };
+	return {
+		subscribe(callback: (event: any) => void) {
+			listener = callback;
+			return () => {
+				listener = undefined;
+				options.onUnsubscribe?.();
+			};
+		},
+		getState: async () => snapshot.state,
+		getMessages: async () => messages,
+		getInitialSnapshot: async () => {
+			if (options.initialSnapshot) {
+				const result = await options.initialSnapshot();
+				options.initialSnapshot = undefined;
+				return result;
+			}
+			if (options.finalSnapshot) {
+				await options.onFinalSnapshot?.();
+				return options.finalSnapshot();
+			}
+			return snapshot;
+		},
+		promptAndWait: async () => {
+			await options.onPromptAndWait?.();
+		},
+		dispose: async () => {},
+		abort: async () => {
+			await options.onAbort?.();
+		},
+		waitForHeadlessCompletion: async () => {
+			await options.onWaitForHeadlessCompletion?.();
+			return {
+				enabled: false,
+				continuationsUsed: 0,
+				turnsUsed: 0,
+				tokensUsed: 0,
+				limits: { maxContinuations: 0 },
+				...options.headlessStatus,
+			};
+		},
+		emitChild(child: any) {
+			listener?.({ type: "session_event", event: { type: "rlm_child_update", child } });
+		},
+		emitHeartbeat() {
+			listener?.({ type: "heartbeats_changed" });
+		},
+		messages,
+	};
+}
+
+function connectAcpClient(connection: any, options: Record<string, unknown> = {}): ClientHarness {
 	// Two web streams crossed over: agent's stdout is the client's stdin.
 	const toAgent = new TransformStream<Uint8Array, Uint8Array>();
 	const toClient = new TransformStream<Uint8Array, Uint8Array>();
@@ -38,7 +103,7 @@ function connectAcpClient(connection: any): ClientHarness {
 	const clientStream = acp.ndJsonStream(toAgent.writable, toClient.readable);
 
 	const updates: any[] = [];
-	void runAcpModeWithConnection(connection, { stream: agentStream } as any);
+	void runAcpModeWithConnection(connection, { stream: agentStream, ...options } as any);
 
 	const handle = acp
 		.client({ name: "test-client" })
@@ -84,4 +149,506 @@ describe("ACP mode end to end", () => {
 
 		harness.cleanup();
 	}, 30_000);
+
+	it("emits score-safe quiescence metadata with outstanding work and budget", async () => {
+		const harness = await createHarness();
+		harness.setResponses([fauxAssistantMessage("done")]);
+		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+		const { client, updates } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
+		await client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "finish" }],
+		});
+		const correlated = updates
+			.map((update) => update.update?._meta?.[PRIME_AGENT_META_NAMESPACE])
+			.filter((meta) => meta?.promptTurnId === 1);
+		expect(correlated.map((meta) => meta.eventSequence)).toEqual(
+			[...correlated.map((meta) => meta.eventSequence)].sort((a, b) => a - b),
+		);
+		expect(new Set(correlated.map((meta) => meta.eventSequence)).size).toBe(correlated.length);
+		expect(correlated.filter((meta) => meta.phase === "responseBoundary")).toEqual([
+			expect.objectContaining({ outcome: "result" }),
+		]);
+		const terminalIndex = correlated.findIndex((meta) => meta.phase === "terminalQuiescence");
+		expect(terminalIndex).toBeGreaterThan(correlated.findIndex((meta) => meta.phase === "responseBoundary"));
+		expect(correlated[terminalIndex].quiescence).toEqual({
+			outstandingSubagents: 0,
+			remainingAutonomousContinuations: 0,
+		});
+		harness.cleanup();
+	}, 30_000);
+
+	it("treats unused autonomous capacity as terminal lifecycle telemetry", async () => {
+		const connection = fakeAcpConnection({
+			headlessStatus: {
+				enabled: true,
+				continuationsUsed: 1,
+				gateAttempts: {},
+				limits: { maxContinuations: 3 },
+			},
+		});
+		const { client, updates, close } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		await client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "finish" }],
+		});
+		const meta = updates.map((item) => item.update?._meta?.[PRIME_AGENT_META_NAMESPACE]).filter(Boolean);
+		expect(meta.filter((item) => item.phase === "responseBoundary")).toHaveLength(1);
+		expect(meta.filter((item) => item.phase === "terminalQuiescence")).toEqual([
+			expect.objectContaining({
+				quiescence: { outstandingSubagents: 0, remainingAutonomousContinuations: 2 },
+			}),
+		]);
+		close();
+	});
+
+	it("does not emit terminal quiescence when a lifecycle-filtered parent leaves a live grandchild", async () => {
+		const connection = fakeAcpConnection({
+			finalSnapshot: async () => ({
+				state: { cwd: process.cwd() },
+				messages: [],
+				children: [
+					{
+						id: "live-grandchild",
+						parentId: "deleted-parent",
+						sessionName: "live-grandchild",
+						label: "still working",
+						status: "running",
+						sessionDir: "/tmp/live-grandchild",
+					},
+				],
+			}),
+		});
+		const { client, updates, close } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		await client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "finish" }],
+		});
+		const metadata = updates.map((update) => update.update?._meta?.[PRIME_AGENT_META_NAMESPACE]).filter(Boolean);
+		expect(metadata.some((meta) => meta.phase === "terminalQuiescence")).toBe(false);
+		expect(metadata.find((meta) => meta.quiescence)?.quiescence.outstandingSubagents).toBe(1);
+		close();
+	});
+
+	it("releases the subscription when the initial roster snapshot fails", async () => {
+		let unsubscribeCount = 0;
+		const connection = fakeAcpConnection({
+			initialSnapshot: async () => {
+				throw new Error("snapshot unavailable");
+			},
+			onUnsubscribe: () => {
+				unsubscribeCount += 1;
+			},
+		});
+		const { client, close } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		await expect(client.request("session/new", { cwd: process.cwd(), mcpServers: [] })).rejects.toThrow();
+		expect(unsubscribeCount).toBe(1);
+		close();
+	});
+
+	it("buffers subscription updates until the session/new response commits", async () => {
+		let emitChild: (child: any) => void = () => {};
+		let releaseSnapshot!: () => void;
+		let snapshotEventEmitted!: () => void;
+		const snapshotReleased = new Promise<void>((resolve) => {
+			releaseSnapshot = resolve;
+		});
+		const snapshotEvent = new Promise<void>((resolve) => {
+			snapshotEventEmitted = resolve;
+		});
+		const connection = fakeAcpConnection({
+			initialSnapshot: async () => {
+				emitChild({ id: "during-snapshot", label: "during snapshot", status: "running", sessionDir: "/tmp/child" });
+				snapshotEventEmitted();
+				await snapshotReleased;
+				return {
+					state: { cwd: process.cwd() },
+					messages: [],
+					children: [
+						{ id: "during-snapshot", label: "during snapshot", status: "running", sessionDir: "/tmp/child" },
+					],
+				};
+			},
+		});
+		const originalSubscribe = connection.subscribe.bind(connection);
+		connection.subscribe = (listener: (event: any) => void) => {
+			emitChild = (child) => listener({ type: "session_event", event: { type: "rlm_child_update", child } });
+			return originalSubscribe(listener);
+		};
+		const { client, updates, close } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const pending = client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		await snapshotEvent;
+		expect(updates).toHaveLength(0);
+		releaseSnapshot();
+		const session = await pending;
+		await vi.waitFor(() => expect(updates).toHaveLength(1));
+		expect(updates[0]).toMatchObject({
+			sessionId: session.sessionId,
+			update: { _meta: { [PRIME_AGENT_META_NAMESPACE]: { eventSequence: 1, promptTurnId: 0 } } },
+		});
+		close();
+	});
+
+	it("publishes and seeds the authoritative initial child roster at turn zero", async () => {
+		const child = { id: "resident-child", label: "resident child", status: "running", sessionDir: "/tmp/child" };
+		let connection: any;
+		connection = fakeAcpConnection({
+			initialSnapshot: async () => ({ state: { cwd: process.cwd() }, messages: [], children: [child] }),
+			onPromptAndWait: () => connection.emitChild({ ...child, status: "done" }),
+		});
+		const { client, updates, close } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		await client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "continue" }],
+		});
+		const childMeta = updates
+			.map((item) => item.update?._meta?.[PRIME_AGENT_META_NAMESPACE])
+			.filter((meta) => meta?.subagents);
+		expect(childMeta.map((meta) => meta.promptTurnId)).toEqual([0, 0]);
+		close();
+	});
+
+	it("propagates a failed roster read at quiescence emission", async () => {
+		const connection = fakeAcpConnection({
+			initialSnapshot: async () => ({ state: { cwd: process.cwd() }, messages: [], children: [] }),
+			finalSnapshot: async () => {
+				throw new Error("roster unavailable");
+			},
+		});
+		const { client, updates, close } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		await expect(
+			client.request("session/prompt", {
+				sessionId: session.sessionId,
+				prompt: [{ type: "text", text: "finish" }],
+			}),
+		).rejects.toThrow();
+		const metadata = updates.map((u) => u.update?._meta?.[PRIME_AGENT_META_NAMESPACE]).filter(Boolean);
+		expect(metadata).toContainEqual(
+			expect.objectContaining({
+				promptTurnId: 1,
+				phase: "responseBoundary",
+				outcome: "error",
+			}),
+		);
+		expect(metadata.find((meta) => meta.phase === "terminalQuiescence")).toBeUndefined();
+		close();
+	});
+
+	it("keeps global sequences and causal turn ids across sequential prompts", async () => {
+		const connection = fakeAcpConnection();
+		const { client, updates, close } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		await client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "first" }],
+		});
+		await client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "second" }],
+		});
+		const metadata = updates.map((u) => u.update?._meta?.[PRIME_AGENT_META_NAMESPACE]).filter(Boolean);
+		const sequences = metadata.map((meta) => meta.eventSequence);
+		expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
+		expect(metadata.filter((meta) => meta.phase === "responseBoundary").map((meta) => meta.promptTurnId)).toEqual([
+			1, 2,
+		]);
+		expect(metadata.filter((meta) => meta.phase === "terminalQuiescence").map((meta) => meta.promptTurnId)).toEqual([
+			1, 2,
+		]);
+		close();
+	});
+
+	it("moves a retained child update after terminal to safe turn zero", async () => {
+		const child = { id: "child-1", label: "child", status: "running", sessionDir: "/tmp/child" };
+		let connection: any;
+		connection = fakeAcpConnection({
+			onPromptAndWait: () => connection.emitChild(child),
+		});
+		const { client, updates, close } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		await client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "first" }],
+		});
+		await client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "second" }],
+		});
+		connection.emitChild({ ...child, status: "done" });
+		await vi.waitFor(() =>
+			expect(
+				updates.some(
+					(u) =>
+						u.update?.sessionUpdate === "session_info_update" &&
+						u.update?._meta?.[PRIME_AGENT_META_NAMESPACE]?.subagents,
+				),
+			).toBe(true),
+		);
+		const childUpdates = updates
+			.map((u) => u.update?._meta?.[PRIME_AGENT_META_NAMESPACE])
+			.filter((meta) => meta?.subagents);
+		expect(childUpdates.map((meta) => meta.promptTurnId)).toEqual([1, 0]);
+		expect(childUpdates.map((meta) => meta.phase)).toEqual(["event", "event"]);
+		close();
+	});
+
+	it("recovers the update queue after a failed publish hook", async () => {
+		let rejectOnce = true;
+		const connection = fakeAcpConnection();
+		const { client, updates, close } = connectAcpClient(connection, {
+			beforeAcpUpdatePublish: () => {
+				if (!rejectOnce) return;
+				rejectOnce = false;
+				throw new Error("publish hook failed");
+			},
+		});
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		connection.emitHeartbeat();
+		connection.emitHeartbeat();
+		await vi.waitFor(() => expect(updates).toHaveLength(1));
+		expect(updates[0].update?._meta?.[PRIME_AGENT_META_NAMESPACE]).toMatchObject({ eventSequence: 2 });
+		await expect(client.request("session/close", { sessionId: session.sessionId })).resolves.toEqual({});
+		close();
+	});
+
+	it("settles queued updates before close resolves without a post-close notification", async () => {
+		let entered!: () => void;
+		let release!: () => void;
+		const enteredPublish = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const releasePublish = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const connection = fakeAcpConnection();
+		const { client, updates, close } = connectAcpClient(connection, {
+			beforeAcpUpdatePublish: async () => {
+				entered();
+				await releasePublish;
+			},
+		});
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		connection.emitHeartbeat();
+		await enteredPublish;
+		const closing = client.request("session/close", { sessionId: session.sessionId });
+		await Promise.resolve();
+		let closed = false;
+		void closing.then(() => {
+			closed = true;
+		});
+		await Promise.resolve();
+		expect(closed).toBe(false);
+		await expect(
+			client.request("session/prompt", {
+				sessionId: session.sessionId,
+				prompt: [{ type: "text", text: "must not start while closing" }],
+			}),
+		).rejects.toThrow();
+		release();
+		await closing;
+		expect(updates).toHaveLength(1);
+		await Promise.resolve();
+		expect(updates).toHaveLength(1);
+		close();
+	});
+
+	it("keeps the session slot reserved until close finishes aborting", async () => {
+		let promptStarted!: () => void;
+		let releasePrompt!: () => void;
+		let abortStarted!: () => void;
+		let releaseAbort!: () => void;
+		const promptStart = new Promise<void>((resolve) => {
+			promptStarted = resolve;
+		});
+		const promptRelease = new Promise<void>((resolve) => {
+			releasePrompt = resolve;
+		});
+		const abortStart = new Promise<void>((resolve) => {
+			abortStarted = resolve;
+		});
+		const abortRelease = new Promise<void>((resolve) => {
+			releaseAbort = resolve;
+		});
+		const connection = fakeAcpConnection({
+			onPromptAndWait: async () => {
+				promptStarted();
+				await promptRelease;
+			},
+			onAbort: async () => {
+				abortStarted();
+				await abortRelease;
+			},
+		});
+		const { client, close } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		const prompt = client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "wait" }],
+		});
+		await promptStart;
+		const closing = client.request("session/close", { sessionId: session.sessionId });
+		await abortStart;
+		await expect(client.request("session/new", { cwd: process.cwd(), mcpServers: [] })).rejects.toThrow();
+		releaseAbort();
+		releasePrompt();
+		await expect(prompt).resolves.toMatchObject({ stopReason: "cancelled" });
+		await expect(closing).resolves.toEqual({});
+		close();
+	});
+
+	it("drains queued updates before returning cancellation at the final snapshot cut", async () => {
+		let enteredUpdate!: () => void;
+		let releaseUpdate!: () => void;
+		let enteredSnapshot!: () => void;
+		let releaseSnapshot!: () => void;
+		const updateStarted = new Promise<void>((resolve) => {
+			enteredUpdate = resolve;
+		});
+		const updateRelease = new Promise<void>((resolve) => {
+			releaseUpdate = resolve;
+		});
+		const snapshotStarted = new Promise<void>((resolve) => {
+			enteredSnapshot = resolve;
+		});
+		const snapshotRelease = new Promise<void>((resolve) => {
+			releaseSnapshot = resolve;
+		});
+		const connection = fakeAcpConnection({
+			initialSnapshot: async () => ({ state: { cwd: process.cwd() }, messages: [], children: [] }),
+			finalSnapshot: async () => ({ state: { cwd: process.cwd() }, messages: [], children: [] }),
+			onFinalSnapshot: async () => {
+				enteredSnapshot();
+				await snapshotRelease;
+			},
+		});
+		const { client, updates, close } = connectAcpClient(connection, {
+			beforeAcpUpdatePublish: async () => {
+				enteredUpdate();
+				await updateRelease;
+			},
+		});
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		connection.emitHeartbeat();
+		await updateStarted;
+		const pending = client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "cancel after final snapshot" }],
+		});
+		await snapshotStarted;
+		await client.notify("session/cancel", { sessionId: session.sessionId });
+		releaseSnapshot();
+		await Promise.resolve();
+		let settled = false;
+		void pending.then(() => {
+			settled = true;
+		});
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		releaseUpdate();
+		await expect(pending).resolves.toMatchObject({ stopReason: "cancelled" });
+		expect(updates).toHaveLength(1);
+		close();
+	});
+
+	it("does not relabel a nonterminal completion when cancellation races its boundary", async () => {
+		let entered!: () => void;
+		let release!: () => void;
+		const enteredBoundary = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const releaseBoundary = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const connection = fakeAcpConnection({
+			finalSnapshot: async () => ({
+				state: { cwd: process.cwd() },
+				messages: [],
+				children: [{ id: "live-child", label: "live", status: "running", sessionDir: "/tmp/child" }],
+			}),
+		});
+		const { client, updates, close } = connectAcpClient(connection, {
+			beforeAcpUpdatePublish: async (update: any) => {
+				if (update._meta?.[PRIME_AGENT_META_NAMESPACE]?.phase === "responseBoundary") {
+					entered();
+					await releaseBoundary;
+				}
+			},
+		});
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		const pending = client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "gate nonterminal boundary" }],
+		});
+		await enteredBoundary;
+		await client.notify("session/cancel", { sessionId: session.sessionId });
+		release();
+		await expect(pending).resolves.not.toMatchObject({ stopReason: "cancelled" });
+		const meta = updates.map((item) => item.update?._meta?.[PRIME_AGENT_META_NAMESPACE]).filter(Boolean);
+		expect(meta).toContainEqual(expect.objectContaining({ phase: "responseBoundary", outcome: "result" }));
+		expect(meta).toContainEqual(
+			expect.objectContaining({ phase: "event", quiescence: expect.objectContaining({ outstandingSubagents: 1 }) }),
+		);
+		close();
+	});
+
+	it("linearizes a cancellation during the response-boundary publish as a completed pair", async () => {
+		let entered!: () => void;
+		let release!: () => void;
+		const enteredBoundary = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const releaseBoundary = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const connection = fakeAcpConnection();
+		const { client, updates, close } = connectAcpClient(connection, {
+			beforeAcpUpdatePublish: async (update: any) => {
+				if (update._meta?.[PRIME_AGENT_META_NAMESPACE]?.phase === "responseBoundary") {
+					entered();
+					await releaseBoundary;
+				}
+			},
+		});
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		const pending = client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "gate boundary" }],
+		});
+		await enteredBoundary;
+		await client.notify("session/cancel", { sessionId: session.sessionId });
+		release();
+		const result = await pending;
+		expect(result.stopReason).not.toBe("cancelled");
+		const meta = updates.map((u) => u.update?._meta?.[PRIME_AGENT_META_NAMESPACE]).filter(Boolean);
+		expect(meta.filter((item) => item.phase === "responseBoundary")).toEqual([
+			expect.objectContaining({ outcome: "result" }),
+		]);
+		expect(meta.filter((item) => item.phase === "terminalQuiescence")).toEqual([
+			expect.objectContaining({
+				outcome: "result",
+				quiescence: { outstandingSubagents: 0, remainingAutonomousContinuations: 0 },
+			}),
+		]);
+		close();
+	});
 });

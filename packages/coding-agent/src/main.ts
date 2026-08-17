@@ -193,6 +193,10 @@ function toPrintOutputMode(appMode: AppMode): Exclude<Mode, "rpc" | "acp" | "dae
 	return appMode === "json" ? "json" : "text";
 }
 
+export function isClientOwnedDaemonSession(appMode: AppMode, noSession?: boolean): boolean {
+	return appMode !== "acp" || noSession === true;
+}
+
 // `prime-agent agents` opens the agents view directly.
 export function parseAgentsViewCommand(args: string[]): { explicitAgentsView: boolean; args: string[] } {
 	if (args[0] === "agents") {
@@ -981,7 +985,7 @@ async function createDaemonClientConnection(options: {
 				await listActiveDaemonSessionSummaries(client),
 				options.sessionPath,
 			);
-			if (activeSummary) {
+			if (activeSummary && activeSummary.workerState !== "failed") {
 				return await attach(activeSummary);
 			}
 		}
@@ -1000,7 +1004,7 @@ async function createDaemonClientConnection(options: {
 			noSession: options.noSession,
 			env: collectDaemonClientEnv(),
 			lifecycle: options.clientOwned ? "client_owned" : "resident",
-			launchEnv: options.clientOwned ? collectDaemonLaunchEnv() : undefined,
+			launchEnv: collectDaemonLaunchEnv(),
 		});
 		if (!response.success) {
 			throw deserializeDaemonError(response);
@@ -1532,7 +1536,7 @@ export async function main(args: string[], options?: MainOptions) {
 				config: defaultSessionConfig,
 				sessionPath: parsed.noSession ? undefined : sessionManager.getSessionFile(),
 				continueRecent: parsed.continue,
-				clientOwned: true,
+				clientOwned: isClientOwnedDaemonSession(appMode, parsed.noSession),
 				noSession: parsed.noSession,
 				supportsExtensionUi: appMode === "rpc",
 			}));

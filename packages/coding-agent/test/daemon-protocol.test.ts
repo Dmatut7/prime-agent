@@ -21,8 +21,59 @@ import {
 	isDaemonMutatingCommand,
 	salvageDaemonCommandId,
 } from "../src/modes/daemon/daemon-protocol.js";
+import {
+	type DaemonWorkerDescriptor,
+	durableDaemonWorkerDescriptor,
+} from "../src/modes/daemon/daemon-worker-protocol.js";
 
 describe("daemon protocol helpers", () => {
+	it("serializes worker descriptors as identity-only version 2 state", () => {
+		const descriptor = {
+			version: 1,
+			workerId: "worker",
+			pid: 123,
+			processStartId: "process-start",
+			socketPath: "/tmp/worker.sock",
+			recoveryJournalPath: "/state/recovery.jsonl",
+			orphanProcessJournalPath: "/state/orphans.jsonl",
+			supervisorSocketPath: "/tmp/supervisor.sock",
+			authenticationToken: "local-worker-token",
+			rootActiveSessionId: "active",
+			sessionFile: "/sessions/root.jsonl",
+			createdAt: "2026-01-01T00:00:00.000Z",
+			updatedAt: "2026-01-01T00:00:00.000Z",
+			lifecycle: "ready",
+			createCommand: {
+				type: "create",
+				sessionPath: "/sessions/root.jsonl",
+				config: {
+					sessionDir: "/legacy/sessions",
+					telemetryDisabled: true,
+					apiKey: "secret-api-key",
+					extensionFlagValues: { providerSecretKey: "secret-extension" },
+				},
+				env: { PROVIDER_TOKEN: "secret-client-env" },
+				launchEnv: { PROVIDER_TOKEN: "secret-launch-env" },
+				runtimeMetadata: { parentActiveSessionId: "secret-runtime" },
+			},
+			launchEnv: { PROVIDER_TOKEN: "secret-top-level-env" },
+			consecutiveFailures: 0,
+			lastError: "secret-error",
+		} as unknown as DaemonWorkerDescriptor;
+
+		const durable = durableDaemonWorkerDescriptor(descriptor);
+
+		expect(durable.version).toBe(2);
+		expect(durable.createCommand).toEqual({ type: "create", sessionPath: "/sessions/root.jsonl" });
+		expect(durable).toMatchObject({
+			workerId: "worker",
+			sessionFile: "/sessions/root.jsonl",
+			sessionDir: "/legacy/sessions",
+			telemetryDisabled: true,
+		});
+		expect(JSON.stringify(durable)).not.toContain("secret-");
+	});
+
 	it("keeps the advertised schema identity synchronized with wire type shapes", () => {
 		const source = readFileSync(resolve(__dirname, "../src/modes/daemon/daemon-protocol.ts"), "utf8");
 		const commandSource = source.slice(

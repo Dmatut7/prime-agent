@@ -22,7 +22,12 @@ import {
 	formatAgentSessionNameUnavailable,
 	sessionNameReservationKey,
 } from "../../core/agent-messages.js";
-import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
+import {
+	type AgentSessionRuntimeConfig,
+	type DurableAgentSessionRuntimeConfig,
+	durableAgentSessionRuntimeConfig,
+	mergeAgentSessionRuntimeConfig,
+} from "../../core/agent-session-config.js";
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
@@ -115,6 +120,8 @@ import {
 	type DaemonWorkerDescriptor,
 	type DaemonWorkerFrameHeader,
 	type DaemonWorkerLifecycle,
+	durableDaemonCreateCommand,
+	durableDaemonWorkerDescriptor,
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
 } from "./daemon-worker-protocol.js";
@@ -271,6 +278,7 @@ interface ResidentWorker {
 	intentionalStop: boolean;
 	stopRevision: number;
 	launchEnv?: Record<string, string>;
+	transientCreateCommand?: DaemonCreateCommand;
 	stopFinalization?: Promise<void>;
 	ownerCleanupTimer?: ReturnType<typeof setTimeout>;
 	promotedOwnerClientId?: string;
@@ -304,7 +312,7 @@ interface DaemonSupervisorOptions {
 interface PersistedSupervisorConfig {
 	version: 1;
 	socketPath: string;
-	defaultSessionConfig: AgentSessionRuntimeConfig;
+	defaultSessionConfig: DurableAgentSessionRuntimeConfig;
 }
 
 interface WorkerMatch {
@@ -424,7 +432,7 @@ function isDaemonWorkerDescriptor(value: unknown, socketPath: string): value is 
 	}
 	const descriptor = value as Partial<DaemonWorkerDescriptor>;
 	return (
-		descriptor.version === 1 &&
+		(descriptor.version === 1 || descriptor.version === 2) &&
 		descriptor.supervisorSocketPath === socketPath &&
 		typeof descriptor.workerId === "string" &&
 		Number.isInteger(descriptor.pid) &&
@@ -937,17 +945,20 @@ export class DaemonSupervisor {
 				descriptor.lifecycle = "recovering";
 				descriptor.recoveryJournalPath ??= join(this.descriptorDir, `${descriptor.workerId}.recovery.jsonl`);
 				descriptor.orphanProcessJournalPath ??= join(this.descriptorDir, `${descriptor.workerId}.orphans.jsonl`);
-				this.workers.set(descriptor.workerId, {
-					descriptor,
+				const durableDescriptor = durableDaemonWorkerDescriptor(descriptor);
+				const worker: ResidentWorker = {
+					descriptor: durableDescriptor,
 					descriptorPath: path,
 					summaries: new Map(),
 					snapshotCache: new Map(),
 					transcriptCaches: new Map(),
 					snapshotGenerations: new Map(),
 					snapshotLoads: new Map(),
-					intentionalStop: descriptor.stopRequestedAt !== undefined,
+					intentionalStop: durableDescriptor.stopRequestedAt !== undefined,
 					stopRevision: 0,
-				});
+				};
+				this.persistWorker(worker);
+				this.workers.set(durableDescriptor.workerId, worker);
 			} catch (error) {
 				this.log(`Ignoring invalid worker descriptor ${path}: ${String(error)}`);
 			}
@@ -968,7 +979,7 @@ export class DaemonSupervisor {
 			) {
 				return undefined;
 			}
-			return parsed.defaultSessionConfig;
+			return durableAgentSessionRuntimeConfig(parsed.defaultSessionConfig);
 		} catch {
 			return undefined;
 		}
@@ -978,7 +989,7 @@ export class DaemonSupervisor {
 		const persisted: PersistedSupervisorConfig = {
 			version: 1,
 			socketPath: this.socketPath,
-			defaultSessionConfig: this.defaultSessionConfig,
+			defaultSessionConfig: durableAgentSessionRuntimeConfig(this.defaultSessionConfig),
 		};
 		const tempPath = `${this.supervisorConfigPath}.${process.pid}.tmp`;
 		writeFileSync(tempPath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
@@ -994,8 +1005,9 @@ export class DaemonSupervisor {
 
 	private persistWorker(worker: ResidentWorker): void {
 		worker.descriptor.updatedAt = new Date().toISOString();
+		const persisted = durableDaemonWorkerDescriptor(worker.descriptor);
 		const tempPath = `${worker.descriptorPath}.${process.pid}.tmp`;
-		writeFileSync(tempPath, `${JSON.stringify(worker.descriptor, null, 2)}\n`, { mode: 0o600 });
+		writeFileSync(tempPath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
 		chmodSync(tempPath, 0o600);
 		renameSync(tempPath, worker.descriptorPath);
 	}
@@ -1816,7 +1828,7 @@ export class DaemonSupervisor {
 					sessionPath = await this.catalog.resolve(
 						command.targetActiveSessionId,
 						cwd,
-						source?.worker.descriptor.createCommand.config?.sessionDir ?? this.defaultSessionConfig.sessionDir,
+						source?.worker.descriptor.sessionDir ?? this.defaultSessionConfig.sessionDir,
 					);
 				} catch (catalogError) {
 					// Preserve selector ambiguity so a2a senders can distinguish it from
@@ -2026,7 +2038,10 @@ export class DaemonSupervisor {
 		const ownerClientId = command.lifecycle === "client_owned" ? clientId : undefined;
 		if (command.sessionPath) {
 			const activeMatches = this.matchWorkers(command.sessionPath);
-			if (activeMatches.length === 1 && !(await this.reclaimStaleWorkerRegistration(activeMatches[0]!.worker))) {
+			if (
+				activeMatches.length === 1 &&
+				!(await this.reclaimStaleWorkerRegistration(activeMatches[0]!.worker, command.launchEnv !== undefined))
+			) {
 				return this.reuseWorkerForCreate(activeMatches[0]!.worker, ownerClientId, command.sessionPath);
 			}
 			if (activeMatches.length > 1) {
@@ -2038,8 +2053,8 @@ export class DaemonSupervisor {
 				: await this.catalog.resolve(command.sessionPath, config.cwd ?? process.cwd(), config.sessionDir);
 			createCommand = { ...createCommand, sessionPath };
 			const existing = this.findWorkerBySessionFile(sessionPath);
-			if (existing && !(await this.reclaimStaleWorkerRegistration(existing.worker))) {
-				return this.reuseWorkerForCreate(existing.worker, ownerClientId, sessionPath);
+			if (existing && !(await this.reclaimStaleWorkerRegistration(existing, command.launchEnv !== undefined))) {
+				return this.reuseWorkerForCreate(existing, ownerClientId, sessionPath);
 			}
 			// A passive child from a stopped worker reopens as top-level here (pre-existing behavior);
 			// the recursive-harness residency/eviction PR will revisit it.
@@ -2096,12 +2111,29 @@ export class DaemonSupervisor {
 	 * saved transcript forever, so complete the interrupted stop and let the
 	 * caller launch a fresh worker for the saved session.
 	 */
-	private async reclaimStaleWorkerRegistration(worker: ResidentWorker): Promise<boolean> {
+	private async reclaimStaleWorkerRegistration(worker: ResidentWorker, freshCreate = false): Promise<boolean> {
 		if (worker.client !== undefined || worker.recovery !== undefined) {
 			return false;
 		}
 		if (worker.descriptor.stopRequestedAt === undefined) {
-			return false;
+			if (worker.descriptor.lifecycle !== "failed" || worker.descriptor.ownerClientId) {
+				return false;
+			}
+			const identity = this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId);
+			if (identity === "current") {
+				if (!freshCreate || worker.descriptor.ownerClientId || !worker.descriptor.processStartId) return false;
+				await this.stopWorker(worker, true, true);
+				return true;
+			}
+			if (identity !== "gone" && identity !== "replaced") {
+				return false;
+			}
+			worker.intentionalStop = true;
+			await this.recoverUncertainWorkerOperations(worker, false);
+			this.workers.delete(worker.descriptor.workerId);
+			this.deleteWorkerDescriptor(worker);
+			await this.syncAgentPeers().catch(() => undefined);
+			return true;
 		}
 		// Fail fast before waiting on anything: only a confirmed-dead process is
 		// reclaimable. A live, unknown, or still-stopping worker is left alone
@@ -2151,6 +2183,7 @@ export class DaemonSupervisor {
 			worker.ownerCleanupTimer = undefined;
 		}
 		worker.launchEnv = undefined;
+		worker.transientCreateCommand = undefined;
 		await this.syncAgentPeers().catch((error) => this.log(`Could not synchronize agent peers: ${String(error)}`));
 	}
 
@@ -2164,8 +2197,7 @@ export class DaemonSupervisor {
 			throw new Error(`Session worker ${existing.descriptor.workerId} recovery was cancelled`);
 		}
 		const recoveryStopRevision = existing?.stopRevision;
-		const launchEnv =
-			ownerClientId || existing?.descriptor.ownerClientId ? (command.launchEnv ?? existing?.launchEnv) : undefined;
+		const launchEnv = command.launchEnv ?? existing?.launchEnv;
 		const createCommand: DaemonCreateCommand = {
 			...withoutSupervisorCreateFields(command),
 			config: mergeAgentSessionRuntimeConfig(this.defaultSessionConfig, command.config),
@@ -2232,7 +2264,7 @@ export class DaemonSupervisor {
 			await this.assertRecoveryAllowed();
 
 			const descriptor: DaemonWorkerDescriptor = {
-				version: 1,
+				version: 2,
 				workerId,
 				pid: childPid,
 				...(childProcessStartId ? { processStartId: childProcessStartId } : {}),
@@ -2243,10 +2275,12 @@ export class DaemonSupervisor {
 				authenticationToken: token,
 				rootActiveSessionId,
 				ownerClientId: existing?.descriptor.ownerClientId ?? ownerClientId,
+				sessionDir: createCommand.config?.sessionDir,
+				telemetryDisabled: createCommand.config?.telemetryDisabled,
 				createdAt: existing?.descriptor.createdAt ?? now,
 				updatedAt: now,
 				lifecycle: "starting",
-				createCommand: { ...createCommand, id: undefined },
+				createCommand: durableDaemonCreateCommand(createCommand),
 				consecutiveFailures: existing?.descriptor.consecutiveFailures ?? 0,
 			};
 			worker = existing ?? {
@@ -2260,10 +2294,12 @@ export class DaemonSupervisor {
 				intentionalStop: false,
 				stopRevision: 0,
 				launchEnv,
+				transientCreateCommand: ownerClientId ? createCommand : undefined,
 			};
 			await this.assertRecoveryAllowed();
 			worker.descriptor = descriptor;
 			worker.launchEnv = launchEnv;
+			worker.transientCreateCommand = descriptor.ownerClientId ? createCommand : undefined;
 			descriptorAssigned = true;
 			this.persistWorker(worker);
 			worker.intentionalStop = false;
@@ -2324,6 +2360,10 @@ export class DaemonSupervisor {
 			worker.descriptor.consecutiveFailures = 0;
 			worker.descriptor.lastError = undefined;
 			this.persistWorker(worker);
+			if (!worker.descriptor.ownerClientId) {
+				worker.launchEnv = undefined;
+				worker.transientCreateCommand = undefined;
+			}
 			await this.syncAgentPeers().catch((error) => this.log(`Could not synchronize agent peers: ${String(error)}`));
 			this.broadcastHeartbeatsChanged();
 			return worker;
@@ -2856,13 +2896,21 @@ export class DaemonSupervisor {
 							`Cannot safely replace live session worker ${worker.descriptor.workerId} without a verified process identity`,
 						);
 					}
+					const recoveryCommand = worker.descriptor.ownerClientId ? worker.transientCreateCommand : undefined;
+					if (!recoveryCommand || !worker.launchEnv) {
+						worker.descriptor.lifecycle = "failed";
+						worker.descriptor.lastError = "Waiting for a client with fresh runtime context";
+						this.persistWorker(worker);
+						await this.syncAgentPeers().catch(() => undefined);
+						return;
+					}
 					const safeToKillWorkerProcess =
 						processAlive && processIdentityMatches && worker.descriptor.processStartId !== undefined;
 					await this.recoverUncertainWorkerOperations(worker, safeToKillWorkerProcess);
 					if (this.isWorkerRecoveryCancelled(worker)) {
 						return;
 					}
-					await this.launchWorker(worker.descriptor.createCommand, worker);
+					await this.launchWorker(recoveryCommand, worker, worker.descriptor.ownerClientId);
 					return;
 				} catch (error) {
 					if (isSupervisorRecoveryCancelled(error) || this.isWorkerRecoveryCancelled(worker)) {
@@ -3010,15 +3058,11 @@ export class DaemonSupervisor {
 			}
 			worker.descriptor.rootSessionId = root.sessionId;
 			worker.descriptor.sessionFile = root.sessionFile;
-			worker.descriptor.createCommand = {
-				...worker.descriptor.createCommand,
+			worker.descriptor.createCommand = durableDaemonCreateCommand({
+				type: "create",
 				sessionPath: root.sessionFile,
-				continueRecent: false,
-				config: {
-					...worker.descriptor.createCommand.config,
-					cwd: root.cwd,
-				},
-			};
+				noSession: worker.descriptor.createCommand.noSession,
+			});
 			this.persistWorker(worker);
 		}
 	}
@@ -3367,16 +3411,31 @@ export class DaemonSupervisor {
 		});
 	}
 
-	private findWorkerBySessionFile(sessionFile: string): WorkerMatch | undefined {
+	private findWorkerBySessionFile(sessionFile: string): ResidentWorker | undefined {
 		const target = canonicalSessionPath(sessionFile);
+		const matches = new Set<ResidentWorker>();
 		for (const worker of this.workers.values()) {
 			for (const summary of worker.summaries.values()) {
 				if (summary.sessionFile && canonicalSessionPath(summary.sessionFile) === target) {
-					return { worker, summary };
+					matches.add(worker);
 				}
 			}
+			const descriptorSessionFile = worker.descriptor.sessionFile;
+			const configuredSessionPath = worker.descriptor.createCommand.sessionPath;
+			if (descriptorSessionFile && configuredSessionPath) {
+				if (canonicalSessionPath(descriptorSessionFile) !== canonicalSessionPath(configuredSessionPath)) {
+					throw new Error(`Conflicting resident session paths for worker ${worker.descriptor.workerId}`);
+				}
+			}
+			const authoritativePath = descriptorSessionFile ?? configuredSessionPath;
+			if (authoritativePath && canonicalSessionPath(authoritativePath) === target) {
+				matches.add(worker);
+			}
 		}
-		return undefined;
+		if (matches.size > 1) {
+			throw new Error(`Ambiguous resident session path "${sessionFile}"`);
+		}
+		return matches.values().next().value;
 	}
 
 	private async forwardToWorker(
@@ -3574,7 +3633,7 @@ export class DaemonSupervisor {
 	}
 
 	private assertTelemetryAttachAllowed(worker: ResidentWorker, telemetryDisabled: true | undefined): void {
-		if (telemetryDisabled && worker.descriptor.createCommand.config?.telemetryDisabled !== true) {
+		if (telemetryDisabled && worker.descriptor.telemetryDisabled !== true) {
 			throw new Error(
 				"Cannot attach to this active agent while telemetry is disabled for the current invocation. Stop the agent and retry so it can restart without telemetry.",
 			);

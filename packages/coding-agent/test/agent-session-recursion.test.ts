@@ -110,7 +110,10 @@ interface CapturedCommReply {
 
 interface InspectableRlmRun {
 	id: string;
+	prompt?: string;
+	sessionName?: string;
 	sessionDir: string;
+	model?: typeof model;
 	abort: () => void;
 	status: string;
 	settled: boolean;
@@ -131,6 +134,7 @@ interface InspectableRlmSession {
 	_rlmChildCleanupFailures: Map<string, Awaited<ReturnType<AgentSession["listRlmSubagents"]>>["subagents"][number]>;
 	_rlmChildSessions: Map<string, AgentSession>;
 	_rlmChildUnsubscribes: Map<string, () => void>;
+	_deletedRlmChildIds: Set<string>;
 	_createKernelHostHandlers(): HostRequestHandlers;
 	_reapDeletedRlmSubagentRuntimesAfterCompaction(): Promise<void>;
 }
@@ -648,6 +652,97 @@ describe("AgentSession rlm recursion", () => {
 		await expect(root.runRlmChild("replacement", { name: "retained-retry-worker" })).resolves.toMatchObject({
 			name: "retained-retry-worker",
 		});
+	});
+
+	it("keeps live nested children visible when their direct parent is hidden by deletion", () => {
+		const root = createSession();
+		const rootInternals = root as unknown as InspectableRlmSession;
+		const hiddenParents = [
+			{ id: "deleted-parent", hiding: "deleted" as const },
+			{ id: "deleting-parent", hiding: "deleting" as const },
+			{ id: "detached-parent", hiding: "detached" as const },
+		];
+		const parentInternalsToClear: InspectableRlmSession[] = [];
+
+		for (const [index, { id, hiding }] of hiddenParents.entries()) {
+			const parent = createSession({ rlmSessionDir: join(tempDir, id) });
+			const parentInternals = parent as unknown as InspectableRlmSession;
+			parentInternalsToClear.push(parentInternals);
+			const nestedId = `${id}-live-grandchild`;
+			parentInternals._activeRlmChildRuns.set(nestedId, {
+				id: nestedId,
+				prompt: "still working",
+				sessionName: nestedId,
+				sessionDir: join(tempDir, nestedId),
+				model,
+				abort: () => {},
+				status: index === 1 ? "queued" : "running",
+				settled: false,
+			});
+
+			if (hiding === "detached") {
+				rootInternals._activeRlmChildRuns.set(id, {
+					id,
+					prompt: "hidden parent",
+					sessionName: id,
+					sessionDir: join(tempDir, id),
+					model,
+					abort: () => {},
+					status: "cancelled",
+					settled: false,
+					detachedDeletion: {
+						rlm_child_id: id,
+						active_session_id: null,
+						session_id: null,
+						session_name: id,
+						session_dir: join(tempDir, id),
+						status: "running",
+					},
+					session: parent,
+				});
+				// The same child can be visible in both lifecycle registries while
+				// deletion settles; it must be traversed exactly once and remain hidden.
+				rootInternals._rlmChildSessions.set(id, parent);
+			} else {
+				rootInternals._rlmChildSessions.set(id, parent);
+				if (hiding === "deleted") {
+					rootInternals._deletedRlmChildIds.add(id);
+				} else {
+					rootInternals._deletingRlmChildren.set(id, {
+						subagent: {
+							rlm_child_id: id,
+							active_session_id: null,
+							session_id: null,
+							session_name: id,
+							session_dir: join(tempDir, id),
+							status: "completed",
+						},
+						promise: Promise.resolve({
+							subagent: {
+								rlm_child_id: id,
+								active_session_id: null,
+								session_id: null,
+								session_name: id,
+								session_dir: join(tempDir, id),
+								status: "completed",
+							},
+						}),
+					});
+				}
+			}
+		}
+
+		const snapshots = root.getRlmChildSnapshots();
+		expect(snapshots.map((snapshot) => snapshot.id).sort()).toEqual(
+			hiddenParents.map(({ id }) => `${id}-live-grandchild`).sort(),
+		);
+		expect(snapshots.map((snapshot) => snapshot.status).sort()).toEqual(["queued", "running", "running"]);
+		// These are deliberately minimal lifecycle records; remove them before
+		// fixture teardown asks real runs to settle.
+		rootInternals._activeRlmChildRuns.clear();
+		rootInternals._rlmChildSessions.clear();
+		for (const parentInternals of parentInternalsToClear) parentInternals._activeRlmChildRuns.clear();
+		root.dispose();
 	});
 
 	it("makes an orchestrator-chosen name override a custom runtime's preexisting name", async () => {
