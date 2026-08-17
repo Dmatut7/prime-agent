@@ -14,7 +14,14 @@ export interface RlmPromptOptions {
 const LONG_RUNNING_WORK_PROMPT = [
 	"For slow or independently completing work, use a nonblocking control loop: start the work, record its handle or output location, then end your turn. Read the result on a later turn or when a reply arrives.",
 	"Do not keep the turn open by polling with `time.sleep()` or shell `sleep`, and do not replace polling with a long blocking `await`. Await only the short operation needed to start work or inspect a result that is already available; otherwise end the turn.",
-	"When work uses many subagents or spans multiple turns, keep the user informed. Before ending a turn with work still running, give a concise update that says what completed, what is still running or blocked, and what will happen next. Send another update at meaningful milestones during long-running work, without repeating unchanged status.",
+	"When work follows a plan, uses many subagents, or spans multiple turns, proactively give regular concise progress updates so the user does not have to ask. State the current plan, what has completed, any blockers, the proposed fixes, and the next actions. Send an update at meaningful milestones and before ending a turn while work is still running. Do not repeat unchanged status or interrupt short work with unnecessary updates.",
+].join("\n");
+
+const SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT = [
+	"Use simplified technical English by default for user-facing prose.",
+	"Prefer short sentences, common words, and concrete verbs. State one main action or fact per sentence when practical. Use lists for steps or conditions.",
+	"Keep necessary technical terms, names, commands, code, paths, and exact quoted text unchanged. State uncertainty directly.",
+	"Treat this as clarity guidance, not a claim of formal ASD-STE100 compliance. Preserve a user-requested format, tone, terminology, and necessary precision.",
 ].join("\n");
 
 const IPYTHON_CONTROL_PROMPT = [
@@ -79,6 +86,8 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		"When you are done, stop calling tools and state your final answer.",
 		"",
 		LONG_RUNNING_WORK_PROMPT,
+		"",
+		SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT,
 		"",
 		`Working directory: ${cwd}`,
 		`Conversation log: ${messagesPath}`,
