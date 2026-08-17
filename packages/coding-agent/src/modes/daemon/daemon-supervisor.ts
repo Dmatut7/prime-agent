@@ -11,6 +11,7 @@ import {
 	getCronJobsPath,
 	getDaemonLogPath,
 	getDaemonUpdateRestartManifestPath,
+	getSessionsDir,
 	VERSION,
 } from "../../config.js";
 import {
@@ -41,9 +42,9 @@ import {
 	type WorkerEvictionSnapshot,
 } from "../../core/session-action-store.js";
 import { canonicalSessionPath, getProcessStartId, SessionAlreadyActiveError } from "../../core/session-lease.js";
-import { readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
+import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
 import { SettingsManager } from "../../core/settings-manager.js";
-import { signalProcessGroupOrProcess } from "../../utils/child-process.js";
+import { isProcessAlive, processIdExists, signalProcessGroupOrProcess } from "../../utils/child-process.js";
 import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import type { PrivateFrame } from "../session-worker/private-framing.js";
@@ -113,10 +114,12 @@ import {
 	type DaemonCreateCommand,
 	type DaemonWorkerDescriptor,
 	type DaemonWorkerFrameHeader,
+	type DaemonWorkerLifecycle,
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
 } from "./daemon-worker-protocol.js";
 import { MutationDrainLatch } from "./mutation-drain-latch.js";
+import { createRlmLedgerRegistrySeedSource, RlmSpawnLedger } from "./rlm-ledger.js";
 import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import { SNAPSHOT_TARGET_CHUNK_BYTES, SnapshotTranscriptCache } from "./snapshot-transcript-cache.js";
 import { WorkerRecoveryJournal } from "./worker-recovery-journal.js";
@@ -135,6 +138,14 @@ const UPDATE_RESTART_WORKER_REQUEST_TIMEOUT_MS = 90_000;
 const UPDATE_RESTART_PREPARE_DEADLINE_MS = 100_000;
 const WORKER_RETRY_DELAYS_MS = [250, 1000, 5000] as const;
 const DEFERRED_RECOVERY_RECHECK_MS = 5000;
+const STOP_FINALIZATION_RECHECK_MS = 250;
+const STOP_FINALIZATION_SIGKILL_GRACE_MS = 5000;
+const STOP_FINALIZATION_RETRY_MS = 5000;
+const STALE_RECLAIM_WAIT_MS = 10_000;
+// Polling loops probe existence cheaply via kill(0); the ps-backed zombie and
+// identity checks are throttled so a wedged worker cannot saturate the
+// supervisor event loop with synchronous subprocess spawns.
+const LIVENESS_IDENTITY_RECHECK_MS = 500;
 const OWNED_WORKER_DISCONNECT_GRACE_MS = 30_000;
 const IDLE_EVICTION_MAX_SWEEP_INTERVAL_MS = 5 * 60_000;
 const IDLE_EVICTION_MIN_SWEEP_INTERVAL_MS = 60_000;
@@ -190,6 +201,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"get_model_catalog",
 	"get_available_models",
 	"get_queue",
+	"mutate_queued_message",
 	"clear_queue",
 	"abort_and_clear_queue",
 	"cron_list",
@@ -259,6 +271,7 @@ interface ResidentWorker {
 	intentionalStop: boolean;
 	stopRevision: number;
 	launchEnv?: Record<string, string>;
+	stopFinalization?: Promise<void>;
 	ownerCleanupTimer?: ReturnType<typeof setTimeout>;
 	promotedOwnerClientId?: string;
 	updateRestartPrepareClient?: DaemonWorkerClient;
@@ -326,6 +339,8 @@ class SupervisorRecoveryCancelledError extends Error {
 }
 
 class SnapshotLoadInvalidatedError extends Error {}
+
+class WorkerStopTimeoutError extends Error {}
 
 function isSupervisorGenerationStale(error: unknown): boolean {
 	return (
@@ -509,15 +524,6 @@ function looksLikeSessionPath(selector: string): boolean {
 	return isAbsolute(selector) || selector.endsWith(".jsonl") || selector.includes("/") || selector.includes("\\");
 }
 
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
-	}
-}
-
 function isFinalizedTranscriptEvent(eventType: string | undefined): boolean {
 	return (
 		eventType === "message_end" ||
@@ -609,6 +615,7 @@ export class DaemonSupervisor {
 	private readonly pendingSessionNames = new Set<string>();
 	private readonly catalog: DaemonCatalogClient;
 	private readonly settingsManager: SettingsManager;
+	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
 	private idleEvictionTimer?: ReturnType<typeof setTimeout>;
 	private idleEvictionSweep?: Promise<void>;
 	private idleEvictionFence?: Promise<void>;
@@ -765,7 +772,7 @@ export class DaemonSupervisor {
 		return {
 			lifecycle: worker.descriptor.lifecycle,
 			isConnected: worker.client !== undefined,
-			isStopping: worker.intentionalStop || worker.descriptor.stopRequestedAt !== undefined,
+			isStopping: this.isWorkerStopping(worker),
 			hasOwnerClient: worker.descriptor.ownerClientId !== undefined,
 			isPreparingUpdateRestart:
 				this.updateRestartPhase !== undefined || worker.updateRestartPrepareClient !== undefined,
@@ -881,7 +888,10 @@ export class DaemonSupervisor {
 	private async assertCurrentOwnership(): Promise<void> {
 		const ownership = this.ownership;
 		if (!ownership) {
-			const error = new Error(`Daemon supervisor generation ${this.generation} no longer owns its registry entry`);
+			const error = new Error(
+				`Daemon supervisor generation ${this.generation} holds no registry ownership (never acquired or already released); ` +
+					`socket: ${this.socketPath}; restart the daemon to recover — sessions are preserved`,
+			);
 			Object.assign(error, { code: "supervisor_generation_stale" as const });
 			throw error;
 		}
@@ -1580,7 +1590,7 @@ export class DaemonSupervisor {
 					const match = await this.findWorkerForClient(client, command.activeSessionId);
 					return this.forwardToWorker(match.worker, command);
 				}
-				const first = [...this.workers.values()].find((worker) => this.isVisibleWorker(worker) && worker.client);
+				const first = [...this.workers.values()].find((worker) => this.isLiveWorker(worker) && worker.client);
 				if (!first) {
 					return success(command.id, command.type, { paused: false, limits: {} });
 				}
@@ -1594,7 +1604,7 @@ export class DaemonSupervisor {
 				}
 				const responses = await Promise.all(
 					[...this.workers.values()]
-						.filter((worker) => this.isVisibleWorker(worker) && worker.client)
+						.filter((worker) => this.isLiveWorker(worker) && worker.client)
 						.map((worker) => this.forwardToWorker(worker, command)),
 				);
 				const failed = responses.find((response) => !response.success);
@@ -1609,8 +1619,7 @@ export class DaemonSupervisor {
 				const responses = await Promise.all(
 					[...this.workers.values()]
 						.filter(
-							(worker) =>
-								this.isVisibleWorker(worker) && worker.client && worker.descriptor.lifecycle === "ready",
+							(worker) => this.isLiveWorker(worker) && worker.client && worker.descriptor.lifecycle === "ready",
 						)
 						.map((worker) =>
 							this.forwardToWorker(worker, command, 5000).catch((error: unknown) =>
@@ -1634,7 +1643,7 @@ export class DaemonSupervisor {
 					const match = await this.findWorkerForClient(client, command.activeSessionId);
 					return this.forwardToWorker(match.worker, command);
 				}
-				const workers = [...this.workers.values()].filter((worker) => this.isVisibleWorker(worker));
+				const workers = [...this.workers.values()].filter((worker) => this.isLiveWorker(worker));
 				const heartbeats = new Map<string, AgentConnectionHeartbeat>();
 				const snapshots: Array<{ heartbeats?: AgentConnectionHeartbeat[]; response?: DaemonResponse }> =
 					await Promise.all(
@@ -1718,8 +1727,7 @@ export class DaemonSupervisor {
 				const listed = await Promise.all(
 					[...this.workers.values()]
 						.filter(
-							(worker) =>
-								this.isVisibleWorker(worker) && worker.client && worker.descriptor.lifecycle === "ready",
+							(worker) => this.isLiveWorker(worker) && worker.client && worker.descriptor.lifecycle === "ready",
 						)
 						.map(async (worker) => ({
 							worker,
@@ -1762,6 +1770,15 @@ export class DaemonSupervisor {
 					await this.assertSupervisorSavedSessionNameAvailable(command.sessionPath, target.name);
 					if (!command.activeSessionId) {
 						await this.catalog.rename(command.sessionPath, command.name);
+						// Third rename write point: an offline saved-session rename
+						// changes the name the ledger carries for that child.
+						await this.rlmSpawnLedger()
+							.appendRenameByChildPath(command.sessionPath, target.name)
+							.catch((error) => {
+								this.log(
+									`failed to append RLM ledger rename: ${error instanceof Error ? error.message : String(error)}`,
+								);
+							});
 						return success(command.id, command.type);
 					}
 					const match = await this.findWorkerForClient(client, command.activeSessionId);
@@ -1836,10 +1853,8 @@ export class DaemonSupervisor {
 				if ((source.summary.activeSessionId ?? source.summary.id) === targetActiveSessionId) {
 					throw new Error("Agent messaging cannot target the sending session");
 				}
-				if (!target.worker.client) {
-					throw new Error("Target session worker is not connected");
-				}
-				const response = await target.worker.client.requestWorker(
+				const targetClient = this.requireAvailableWorkerClient(target.worker);
+				const response = await targetClient.requestWorker(
 					{
 						type: "worker_deliver_message",
 						targetActiveSessionId,
@@ -1906,11 +1921,16 @@ export class DaemonSupervisor {
 				return await forward();
 			}
 			this.persistWorkerStopTombstone(match.worker, true);
+			const releaseStopOwnership = this.acquireWorkerStopOwnership(match.worker);
 			let response: DaemonResponse;
 			try {
 				response = await this.forwardToWorker(match.worker, resolvedCommand);
 			} finally {
-				await this.stopWorker(match.worker, true, false, true);
+				try {
+					await this.stopWorker(match.worker, true, false, true);
+				} finally {
+					releaseStopOwnership();
+				}
 			}
 			return response;
 		} finally {
@@ -1923,10 +1943,14 @@ export class DaemonSupervisor {
 		command: Extract<DaemonCommand, { type: "list" }>,
 	): Promise<DaemonResponse> {
 		await Promise.all(
-			[...this.workers.values()].map((worker) => this.refreshWorkerSummaries(worker).catch(() => undefined)),
+			[...this.workers.values()]
+				.filter((worker) => !this.isWorkerStopping(worker))
+				.map((worker) => this.refreshWorkerSummaries(worker).catch(() => undefined)),
 		);
 		await this.syncAgentPeers().catch((error) => this.log(`Could not synchronize agent peers: ${String(error)}`));
 		const clientOwnedWorkers = [...this.workers.values()].filter((worker) => !this.isVisibleWorker(worker));
+		// Stopping workers stay listed (with an honest workerState) because this
+		// list also feeds busy-daemon safety checks in daemon-launch.
 		const active = [...this.workers.values()]
 			.filter(
 				(worker) =>
@@ -2002,7 +2026,7 @@ export class DaemonSupervisor {
 		const ownerClientId = command.lifecycle === "client_owned" ? clientId : undefined;
 		if (command.sessionPath) {
 			const activeMatches = this.matchWorkers(command.sessionPath);
-			if (activeMatches.length === 1) {
+			if (activeMatches.length === 1 && !(await this.reclaimStaleWorkerRegistration(activeMatches[0]!.worker))) {
 				return this.reuseWorkerForCreate(activeMatches[0]!.worker, ownerClientId, command.sessionPath);
 			}
 			if (activeMatches.length > 1) {
@@ -2014,7 +2038,7 @@ export class DaemonSupervisor {
 				: await this.catalog.resolve(command.sessionPath, config.cwd ?? process.cwd(), config.sessionDir);
 			createCommand = { ...createCommand, sessionPath };
 			const existing = this.findWorkerBySessionFile(sessionPath);
-			if (existing) {
+			if (existing && !(await this.reclaimStaleWorkerRegistration(existing.worker))) {
 				return this.reuseWorkerForCreate(existing.worker, ownerClientId, sessionPath);
 			}
 			// A passive child from a stopped worker reopens as top-level here (pre-existing behavior);
@@ -2029,7 +2053,7 @@ export class DaemonSupervisor {
 		}
 		const opening = (async () => {
 			if (!createCommand.name) return this.launchWorker(createCommand, undefined, ownerClientId);
-			const savedSiblings = createCommand.sessionPath ? await this.catalog.siblings(createCommand.sessionPath) : [];
+			const savedSiblings = createCommand.sessionPath ? await this.rlmLedgerSiblings(createCommand.sessionPath) : [];
 			const target = savedSiblings.find(
 				(session) => canonicalSessionPath(session.path) === canonicalSessionPath(createCommand.sessionPath!),
 			);
@@ -2063,6 +2087,46 @@ export class DaemonSupervisor {
 			return worker;
 		}
 		throw new SessionAlreadyActiveError(sessionPath, worker.descriptor.rootActiveSessionId);
+	}
+
+	/**
+	 * A stopping worker whose process already died can strand its registration
+	 * (for example when the stop timed out and its finalization was interrupted
+	 * by a supervisor restart). Such a registration would block reopening the
+	 * saved transcript forever, so complete the interrupted stop and let the
+	 * caller launch a fresh worker for the saved session.
+	 */
+	private async reclaimStaleWorkerRegistration(worker: ResidentWorker): Promise<boolean> {
+		if (worker.client !== undefined || worker.recovery !== undefined) {
+			return false;
+		}
+		if (worker.descriptor.stopRequestedAt === undefined) {
+			return false;
+		}
+		// Fail fast before waiting on anything: only a confirmed-dead process is
+		// reclaimable. A live, unknown, or still-stopping worker is left alone
+		// and the caller reports the session as already active.
+		const identity = this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId);
+		if (identity !== "gone" && identity !== "replaced") {
+			return false;
+		}
+		// Single cleanup path: the background stop finalizer is identity-aware,
+		// retrying, and single-flighted, so concurrent resumes share one stop.
+		// The wait is bounded so a resume request always returns promptly.
+		this.scheduleWorkerStopFinalization(worker);
+		const finalization = worker.stopFinalization;
+		if (finalization) {
+			await Promise.race([finalization.catch(() => undefined), unrefDelay(STALE_RECLAIM_WAIT_MS)]);
+		}
+		if (this.workers.get(worker.descriptor.workerId) === worker) {
+			// The process is confirmed dead, so the registration must never be
+			// reused; slow cleanup fails the resume honestly instead.
+			throw new Error(
+				`Stopped session worker ${worker.descriptor.workerId} is still being cleaned up; retry shortly`,
+			);
+		}
+		this.log(`Reclaimed stale registration for stopped worker ${worker.descriptor.workerId}`);
+		return true;
 	}
 
 	private async promoteOwnedWorker(client: DaemonSocketClient, worker: ResidentWorker): Promise<void> {
@@ -2381,9 +2445,26 @@ export class DaemonSupervisor {
 		await this.assertRecoveryAllowed();
 		if (worker.descriptor.stopRequestedAt) {
 			try {
-				// A tombstoned worker must not run long enough to elect another
-				// supervisor while its intentional stop is being adopted.
-				signalProcessGroupOrProcess(worker.descriptor.pid, "SIGKILL");
+				// A descriptor persisted before identity tracking has no
+				// processStartId, so stopWorker could neither signal the live
+				// process nor let the finalizer escalate. Authenticating on the
+				// worker's socket proves the pid still belongs to our worker, so
+				// the start id observed while it was alive can be persisted (and
+				// the connected client gives stopWorker its graceful IPC path).
+				if (worker.descriptor.processStartId === undefined && isProcessAlive(worker.descriptor.pid)) {
+					const observedProcessStartId = getProcessStartId(worker.descriptor.pid);
+					try {
+						await this.connectWorker(worker, 2000);
+						if (observedProcessStartId) {
+							worker.descriptor.processStartId = observedProcessStartId;
+							this.persistWorker(worker);
+						}
+					} catch {
+						// Unverifiable identity stays untrusted; the stop below
+						// still runs its graceful path and the finalizer keeps
+						// waiting rather than signalling a possibly-recycled pid.
+					}
+				}
 				await this.stopWorker(worker, true, true, worker.descriptor.archiveOnStop === true);
 				this.log(`Completed intentional stop for worker ${worker.descriptor.workerId} during supervisor adoption`);
 			} catch (error) {
@@ -2905,6 +2986,9 @@ export class DaemonSupervisor {
 	}
 
 	private async refreshWorkerSummaries(worker: ResidentWorker, recovery = false): Promise<void> {
+		if (this.isWorkerStopping(worker)) {
+			throw new Error("Session worker is stopping");
+		}
 		if (!worker.client) {
 			throw new Error("Session worker is not connected");
 		}
@@ -2983,6 +3067,34 @@ export class DaemonSupervisor {
 		});
 	}
 
+	/**
+	 * Supervisor-side view of the spawn ledger for this supervisor's sessions
+	 * dir. Workers hold their own instances over the same file; every read
+	 * re-reads the file, so cross-process freshness is per-operation.
+	 */
+	private rlmSpawnLedger(): RlmSpawnLedger {
+		const agentDir = this.defaultSessionConfig.agentDir;
+		if (!agentDir) {
+			throw new Error("Daemon supervisor config is missing agentDir");
+		}
+		this.rlmSpawnLedgerInstance ??= new RlmSpawnLedger(
+			agentDir,
+			this.defaultSessionConfig.sessionDir ?? getSessionsDir(agentDir),
+			createRlmLedgerRegistrySeedSource(),
+			(message) => this.log(message),
+		);
+		return this.rlmSpawnLedgerInstance;
+	}
+
+	/**
+	 * Ledger-backed same-parent rows for name reservation and admission. Rows
+	 * carry ledger topology plus best-effort display fields; consumers here
+	 * only need id/path/name/depth/parent.
+	 */
+	private rlmLedgerSiblings(sessionPath: string): Promise<SessionInfo[]> {
+		return this.rlmSpawnLedger().siblings(sessionPath);
+	}
+
 	private async savedSessionNameReservationInput(
 		sessionPath: string,
 		name: string,
@@ -2992,7 +3104,7 @@ export class DaemonSupervisor {
 			.flatMap((worker) => [...worker.summaries.values()])
 			.find((summary) => summary.sessionFile && canonicalSessionPath(summary.sessionFile) === targetPath);
 		if (active) return this.summaryNameReservationInput(active, name);
-		const siblings = await this.catalog.siblings(sessionPath);
+		const siblings = await this.rlmLedgerSiblings(sessionPath);
 		const saved = siblings.find((info) => canonicalSessionPath(info.path) === targetPath);
 		if (!saved) throw new Error(`Session not found: ${sessionPath}`);
 		return {
@@ -3021,7 +3133,7 @@ export class DaemonSupervisor {
 			.flatMap((worker) => [...worker.summaries.values()])
 			.find((summary) => summary.sessionFile && canonicalSessionPath(summary.sessionFile) === targetPath);
 		if (active) return this.assertSupervisorSessionNameAvailable(active, name);
-		const siblings = await this.catalog.siblings(sessionPath);
+		const siblings = await this.rlmLedgerSiblings(sessionPath);
 		const saved = siblings.find((info) => canonicalSessionPath(info.path) === targetPath);
 		if (!saved) throw new Error(`Session not found: ${sessionPath}`);
 		if (saved.parentSessionPath && (saved.rlmDepth ?? 0) > 0) {
@@ -3061,9 +3173,7 @@ export class DaemonSupervisor {
 			.then(async () => {
 				const readyWorkers = [...this.workers.values()].filter(
 					(worker): worker is ResidentWorker & { client: DaemonWorkerClient } =>
-						this.isVisibleWorker(worker) &&
-						worker.descriptor.lifecycle === "ready" &&
-						worker.client !== undefined,
+						this.isLiveWorker(worker) && worker.descriptor.lifecycle === "ready" && worker.client !== undefined,
 				);
 				await Promise.all(
 					readyWorkers.map(async (worker) => {
@@ -3088,6 +3198,41 @@ export class DaemonSupervisor {
 
 	private isVisibleWorker(worker: ResidentWorker): boolean {
 		return worker.descriptor.ownerClientId === undefined;
+	}
+
+	/** A worker with a durable or in-memory stop intent is stopping, never live. */
+	private isWorkerStopping(worker: ResidentWorker): boolean {
+		return worker.intentionalStop || worker.descriptor.stopRequestedAt !== undefined;
+	}
+
+	/** Live workers are visible to all clients and not stopping. */
+	private isLiveWorker(worker: ResidentWorker): boolean {
+		return this.isVisibleWorker(worker) && !this.isWorkerStopping(worker);
+	}
+
+	/**
+	 * The lifecycle reported to clients. A stop intent always wins, and a worker
+	 * whose process connection is gone is never reported as "ready".
+	 */
+	private effectiveWorkerState(worker: ResidentWorker): DaemonWorkerLifecycle {
+		if (this.isWorkerStopping(worker)) {
+			return "stopping";
+		}
+		if (worker.descriptor.lifecycle === "ready" && worker.client === undefined) {
+			return "recovering";
+		}
+		return worker.descriptor.lifecycle;
+	}
+
+	private requireAvailableWorkerClient(worker: ResidentWorker, allowStopping = false): DaemonWorkerClient {
+		if (
+			!worker.client ||
+			worker.descriptor.lifecycle !== "ready" ||
+			(!allowStopping && this.isWorkerStopping(worker))
+		) {
+			throw new Error(`Session worker is ${this.effectiveWorkerState(worker)}`);
+		}
+		return worker.client;
 	}
 
 	private familyCatalogEntry(summary: SessionSummary): AgentFamilyCatalogEntry {
@@ -3134,7 +3279,7 @@ export class DaemonSupervisor {
 			...summary,
 			attachedClients: [...this.clients].filter((client) => client.attachedActiveSessionIds.has(activeSessionId))
 				.length,
-			workerState: worker.descriptor.lifecycle,
+			workerState: this.effectiveWorkerState(worker),
 			workerPid: worker.descriptor.pid,
 		};
 	}
@@ -3239,10 +3384,8 @@ export class DaemonSupervisor {
 		command: DaemonCommand,
 		timeoutMs = WORKER_REQUEST_TIMEOUT_MS,
 	): Promise<DaemonResponse> {
-		if (!worker.client || worker.descriptor.lifecycle !== "ready") {
-			throw new Error(`Session worker is ${worker.descriptor.lifecycle}`);
-		}
-		const response = await worker.client.request(withoutCommandId(command), timeoutMs);
+		const client = this.requireAvailableWorkerClient(worker, command.type === "kill");
+		const response = await client.request(withoutCommandId(command), timeoutMs);
 		if (command.type === "get_state" && response.success && isSessionSummary(response.data)) {
 			return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
 		}
@@ -3284,6 +3427,7 @@ export class DaemonSupervisor {
 		}
 		const match = await this.findWorkerForClient(client, command.activeSessionId);
 		this.assertTelemetryAttachAllowed(match.worker, command.telemetryDisabled);
+		this.requireAvailableWorkerClient(match.worker);
 		const activeSessionId = match.summary.activeSessionId ?? match.summary.id;
 		const duplicateValidation = this.currentSnapshotGeneration(match.worker, activeSessionId)?.validation;
 		if (duplicateValidation) {
@@ -3313,10 +3457,8 @@ export class DaemonSupervisor {
 						match.worker.transcriptCaches.get(activeSessionId)?.snapshotId ??
 						match.worker.snapshotCache.get(activeSessionId)?.snapshotStream?.id;
 					loading = (async () => {
-						if (!match.worker.client) {
-							throw new Error("Session worker is not connected");
-						}
-						const response = await match.worker.client.request({
+						const workerClient = this.requireAvailableWorkerClient(match.worker);
+						const response = await workerClient.request({
 							type: "attach",
 							activeSessionId,
 							capabilities: client.capabilities.has("chunked_snapshot")
@@ -3373,6 +3515,7 @@ export class DaemonSupervisor {
 				}
 			}
 		}
+		this.requireAvailableWorkerClient(match.worker);
 		const wasAttached = client.attachedActiveSessionIds.has(activeSessionId);
 		let transcript: SnapshotTranscriptCache | undefined;
 		if (client.capabilities.has("chunked_snapshot")) {
@@ -4147,9 +4290,14 @@ export class DaemonSupervisor {
 			!this.shuttingDown
 		) {
 			worker.intentionalStop = true;
-			this.workers.delete(worker.descriptor.workerId);
-			this.deleteWorkerDescriptor(worker);
-			void this.syncAgentPeers().catch(() => undefined);
+			// An exact stop owns its registration and descriptor cleanup until its
+			// tuple assertions complete. A synchronous root shutdown event can arrive
+			// before its request resolves, so leave both intact while it is active.
+			if ((this.workerStopCounts?.get(worker) ?? 0) === 0) {
+				this.workers.delete(worker.descriptor.workerId);
+				this.deleteWorkerDescriptor(worker);
+				void this.syncAgentPeers().catch(() => undefined);
+			}
 		}
 	}
 
@@ -4332,11 +4480,12 @@ export class DaemonSupervisor {
 	private async prepareUpdateRestartFenced(deadline: number): Promise<DaemonUpdateRestartManifest> {
 		const residents = [...this.workers.values()];
 		const unavailable = residents.find(
-			(worker) => worker.descriptor.lifecycle !== "ready" || worker.client === undefined,
+			(worker) =>
+				this.isWorkerStopping(worker) || worker.descriptor.lifecycle !== "ready" || worker.client === undefined,
 		);
 		if (unavailable) {
 			throw new Error(
-				`Cannot prepare update restart while resident worker ${unavailable.descriptor.workerId} is ${unavailable.descriptor.lifecycle}${unavailable.client ? "" : " and disconnected"}`,
+				`Cannot prepare update restart while resident worker ${unavailable.descriptor.workerId} is ${this.effectiveWorkerState(unavailable)}${unavailable.client ? "" : " and disconnected"}`,
 			);
 		}
 		const workers = residents as Array<ResidentWorker & { client: DaemonWorkerClient }>;
@@ -4504,6 +4653,49 @@ export class DaemonSupervisor {
 		renameSync(tempPath, path);
 	}
 
+	/**
+	 * Verdict on whether a pid is still the process we launched. Callers must
+	 * be conservative in both directions: signal a pid only on "current"
+	 * (never SIGKILL a recycled pid), and clean up a registration only on
+	 * "gone"/"replaced" (never orphan a live worker because a transient
+	 * identity lookup failed).
+	 */
+	private processIdentity(
+		pid: number,
+		processStartId: string | undefined,
+	): "current" | "replaced" | "gone" | "unknown" {
+		if (!isProcessAlive(pid)) {
+			return "gone";
+		}
+		if (processStartId === undefined) {
+			return "unknown";
+		}
+		const observed = getProcessStartId(pid);
+		if (observed === undefined) {
+			return "unknown";
+		}
+		return observed === processStartId ? "current" : "replaced";
+	}
+
+	/**
+	 * Keep an exact stop's registration and descriptor authoritative while any
+	 * part of its cleanup is in flight. Root kills acquire this before forwarding
+	 * because a synchronous shutdown event may arrive before the worker replies.
+	 */
+	private acquireWorkerStopOwnership(worker: ResidentWorker): () => void {
+		if (!this.workerStopCounts) this.workerStopCounts = new Map();
+		const stopCounts = this.workerStopCounts;
+		stopCounts.set(worker, (stopCounts.get(worker) ?? 0) + 1);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			const remaining = (stopCounts.get(worker) ?? 1) - 1;
+			if (remaining === 0) stopCounts.delete(worker);
+			else stopCounts.set(worker, remaining);
+		};
+	}
+
 	private async stopWorker(
 		worker: ResidentWorker,
 		removeDescriptor: boolean,
@@ -4512,15 +4704,11 @@ export class DaemonSupervisor {
 		recoveryCleanup = false,
 		directChild?: { child: ChildProcess; closed: Promise<void> },
 	): Promise<void> {
-		if (!this.workerStopCounts) this.workerStopCounts = new Map();
-		const stopCounts = this.workerStopCounts;
-		stopCounts.set(worker, (stopCounts.get(worker) ?? 0) + 1);
+		const releaseStopOwnership = this.acquireWorkerStopOwnership(worker);
 		try {
 			await this.stopWorkerUntracked(worker, removeDescriptor, force, archiveSession, recoveryCleanup, directChild);
 		} finally {
-			const remaining = (stopCounts.get(worker) ?? 1) - 1;
-			if (remaining === 0) stopCounts.delete(worker);
-			else stopCounts.set(worker, remaining);
+			releaseStopOwnership();
 		}
 	}
 
@@ -4539,6 +4727,24 @@ export class DaemonSupervisor {
 		if (!recoveryCleanup) {
 			worker.stopRevision++;
 		}
+		// A retry can rescind this stop and relaunch the worker while we await
+		// below. Bind every liveness check and signal to the process this stop
+		// entered with, and abort cleanup once the stop no longer applies: the
+		// pid changed (relaunched) or a removeDescriptor stop lost its tombstone
+		// (rescinded, even before the successor pid lands).
+		const entryPid = worker.descriptor.pid;
+		const entryStartId = worker.descriptor.processStartId;
+		const assertStopStillApplies = () => {
+			if (directChild) {
+				return;
+			}
+			if (
+				worker.descriptor.pid !== entryPid ||
+				(removeDescriptor && worker.descriptor.stopRequestedAt === undefined)
+			) {
+				throw new Error(`Session worker ${worker.descriptor.workerId} was relaunched during stop`);
+			}
+		};
 		try {
 			if (removeDescriptor) {
 				this.persistWorkerStopTombstone(worker, archiveSession);
@@ -4587,22 +4793,42 @@ export class DaemonSupervisor {
 			worker.client = undefined;
 		} else if (directChild) {
 			directChild.child.kill("SIGTERM");
-		} else if (isProcessAlive(worker.descriptor.pid)) {
-			signalProcessGroupOrProcess(worker.descriptor.pid, "SIGTERM");
+		} else if (this.processIdentity(entryPid, entryStartId) === "current") {
+			signalProcessGroupOrProcess(entryPid, "SIGTERM");
 		}
-		const isWorkerProcessAlive = () =>
-			directChild
-				? directChild.child.exitCode === null && directChild.child.signalCode === null
-				: isProcessAlive(worker.descriptor.pid);
+		// Identity-aware in both directions: a replaced pid counts as gone (never
+		// signal a recycled pid) while an unknown identity counts as alive (never
+		// clean up a possibly-live worker on a transient lookup failure). kill(0)
+		// runs on every poll; the expensive identity check is throttled.
+		let identityVerdict: "current" | "replaced" | "gone" | "unknown" = "current";
+		let identityCheckedAt = 0;
+		const isWorkerProcessAlive = () => {
+			if (directChild) {
+				return directChild.child.exitCode === null && directChild.child.signalCode === null;
+			}
+			if (!processIdExists(entryPid)) {
+				return false;
+			}
+			const now = Date.now();
+			if (now - identityCheckedAt >= LIVENESS_IDENTITY_RECHECK_MS) {
+				identityCheckedAt = now;
+				identityVerdict = this.processIdentity(entryPid, entryStartId);
+			}
+			return identityVerdict !== "replaced" && identityVerdict !== "gone";
+		};
 		const gracefulDeadline = Date.now() + (force ? 500 : 2000);
 		while (isWorkerProcessAlive() && Date.now() < gracefulDeadline) {
 			await delay(25);
 		}
+		let sigkillSent = false;
 		if (force && isWorkerProcessAlive()) {
 			if (directChild) {
-				directChild.child.kill("SIGKILL");
-			} else {
-				signalProcessGroupOrProcess(worker.descriptor.pid, "SIGKILL");
+				sigkillSent = directChild.child.kill("SIGKILL");
+			} else if (this.processIdentity(entryPid, entryStartId) === "current") {
+				// Fresh, unthrottled check: the cached verdict may be up to 500ms
+				// old, long enough for the pid to be recycled.
+				signalProcessGroupOrProcess(entryPid, "SIGKILL");
+				sigkillSent = true;
 			}
 			const forceDeadline = Date.now() + 1000;
 			while (isWorkerProcessAlive() && Date.now() < forceDeadline) {
@@ -4611,16 +4837,23 @@ export class DaemonSupervisor {
 		}
 		if (isWorkerProcessAlive()) {
 			worker.intentionalStop = worker.descriptor.stopRequestedAt !== undefined;
-			throw new Error(`Session worker ${worker.descriptor.workerId} did not stop${force ? " after SIGKILL" : ""}`);
+			if (removeDescriptor) {
+				this.scheduleWorkerStopFinalization(worker);
+			}
+			throw new WorkerStopTimeoutError(
+				`Session worker ${worker.descriptor.workerId} did not stop${sigkillSent ? " after SIGKILL" : ""}`,
+			);
 		}
 		if (directChild) {
 			await directChild.closed;
 		}
+		assertStopStillApplies();
 		if (removeDescriptor && worker.descriptor.archiveOnStop) {
 			if (force) {
 				this.reclaimStoppedWorkerCronLock(worker);
 			}
 			await this.finalizeArchivedWorkerStop(worker);
+			assertStopStillApplies();
 		}
 		this.workers.delete(worker.descriptor.workerId);
 		if (removeDescriptor) {
@@ -4629,6 +4862,105 @@ export class DaemonSupervisor {
 		if (!this.shuttingDown) {
 			void this.syncAgentPeers().catch(() => undefined);
 			this.broadcastHeartbeatsChanged();
+		}
+	}
+
+	/**
+	 * A stop that timed out leaves a tombstoned registration behind. Keep
+	 * escalating in the background until the process is gone, then finish the
+	 * interrupted cleanup instead of leaving a dead worker registered forever.
+	 */
+	private scheduleWorkerStopFinalization(worker: ResidentWorker): void {
+		if (worker.stopFinalization) {
+			return;
+		}
+		worker.stopFinalization = this.finalizeTimedOutWorkerStop(worker).finally(() => {
+			worker.stopFinalization = undefined;
+		});
+	}
+
+	private async finalizeTimedOutWorkerStop(worker: ResidentWorker): Promise<void> {
+		// Bind to the exact process generation being stopped: a retry can rescind
+		// the stop and relaunch with a new pid, and the OS can recycle the old
+		// pid. The finalizer must never follow either successor.
+		const pid = worker.descriptor.pid;
+		const processStartId = worker.descriptor.processStartId;
+		const stopRevision = worker.stopRevision;
+		const isStopGenerationCurrent = () =>
+			this.workers.get(worker.descriptor.workerId) === worker &&
+			worker.stopRevision === stopRevision &&
+			worker.descriptor.stopRequestedAt !== undefined &&
+			worker.descriptor.pid === pid;
+		// A replaced pid counts as gone (never SIGKILL a recycled pid); an
+		// unobservable identity counts as alive (never clean up a possibly-live
+		// worker). kill(0) probes every poll; ps-backed checks are throttled.
+		let stoppedVerdict = true;
+		let stoppedCanSignal = processStartId !== undefined;
+		let stoppedCheckedAt = 0;
+		const isStoppedProcessAlive = () => {
+			if (!processIdExists(pid)) {
+				return false;
+			}
+			const now = Date.now();
+			if (now - stoppedCheckedAt < LIVENESS_IDENTITY_RECHECK_MS) {
+				return stoppedVerdict;
+			}
+			stoppedCheckedAt = now;
+			if (!isProcessAlive(pid)) {
+				stoppedVerdict = false;
+			} else if (processStartId === undefined) {
+				stoppedVerdict = true;
+				// Without an identity captured while the original worker was known
+				// alive, this pid may now belong to an unrelated process. Keep
+				// waiting for it to disappear, but never escalate by pid alone.
+				stoppedCanSignal = false;
+			} else {
+				const observed = getProcessStartId(pid);
+				stoppedVerdict = observed !== processStartId ? observed === undefined : true;
+				stoppedCanSignal = observed === processStartId;
+			}
+			return stoppedVerdict;
+		};
+		const sigkillDeadline = Date.now() + STOP_FINALIZATION_SIGKILL_GRACE_MS;
+		let killed = false;
+		while (!this.shuttingDown) {
+			if (!isStopGenerationCurrent()) {
+				return;
+			}
+			if (!isStoppedProcessAlive()) {
+				break;
+			}
+			if (!killed && stoppedCanSignal && Date.now() >= sigkillDeadline) {
+				// Fresh, unthrottled identity check right before signalling: the
+				// cached verdict may be up to 500ms old, long enough for the pid
+				// to be recycled by an unrelated process. A transiently
+				// unobservable identity skips this attempt but keeps escalation
+				// armed so a wedged worker is still killed on a later pass.
+				const observedNow = processStartId === undefined ? undefined : getProcessStartId(pid);
+				if (processStartId === undefined || observedNow === processStartId) {
+					signalProcessGroupOrProcess(pid, "SIGKILL");
+					killed = true;
+				}
+			}
+			await unrefDelay(STOP_FINALIZATION_RECHECK_MS);
+		}
+		// Retry transient cleanup failures (for example catalog archival) so a
+		// dead worker's registration is never stranded permanently. Each attempt
+		// bumps the worker's stopRevision, so rescission is detected through the
+		// registration and tombstone instead of the waiting-phase snapshot.
+		const isCleanupStillWanted = () =>
+			this.workers.get(worker.descriptor.workerId) === worker &&
+			worker.descriptor.stopRequestedAt !== undefined &&
+			worker.descriptor.pid === pid;
+		while (!this.shuttingDown && isCleanupStillWanted()) {
+			try {
+				await this.stopWorker(worker, true, true, worker.descriptor.archiveOnStop === true);
+				this.log(`Finalized timed-out stop for worker ${worker.descriptor.workerId}`);
+				return;
+			} catch (error) {
+				this.reportCleanupFailure(`timed-out worker stop ${worker.descriptor.workerId}`, error);
+				await unrefDelay(STOP_FINALIZATION_RETRY_MS);
+			}
 		}
 	}
 
@@ -4665,7 +4997,7 @@ export class DaemonSupervisor {
 		}
 		return {
 			sessionFile,
-			artifactDir: join(dirname(dirname(sessionFile)), "session-artifacts", worker.descriptor.rootSessionId),
+			artifactDir: getSessionArtifactPathForFile(sessionFile, worker.descriptor.rootSessionId),
 		};
 	}
 
@@ -4843,7 +5175,18 @@ export class DaemonSupervisor {
 		}
 		if (stopWorkers) {
 			await Promise.all(
-				[...this.workers.values()].map((worker) => this.stopWorker(worker, true, forceWorkers, true)),
+				[...this.workers.values()].map(async (worker) => {
+					try {
+						await this.stopWorker(worker, true, forceWorkers, true);
+					} catch (error) {
+						if (!(error instanceof WorkerStopTimeoutError)) {
+							throw error;
+						}
+						this.log(
+							`Worker ${worker.descriptor.workerId} remains tombstoned for recovery after shutdown: ${error.message}`,
+						);
+					}
+				}),
 			);
 			if (!this.hasPersistedWorkerDescriptors()) {
 				rmSync(this.supervisorConfigPath, { force: true });

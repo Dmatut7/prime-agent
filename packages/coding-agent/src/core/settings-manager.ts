@@ -45,7 +45,7 @@ export interface TerminalSettings {
 	clearOnShrink?: boolean; // default: false (clear empty rows when content shrinks)
 	showTerminalProgress?: boolean; // default: false (OSC 9;4 terminal progress indicators)
 	fullscreen?: boolean; // default: true (alternate-screen rendering with scrollable transcript)
-	fullscreenMouse?: boolean; // default: true (wheel scrolling in fullscreen; disable if it breaks selection)
+	fullscreenMouse?: boolean; // default: true
 }
 
 export interface ImageSettings {
