@@ -173,6 +173,11 @@ describe("daemon protocol helpers", () => {
 	});
 
 	it("capability-gates authoritative rosters and transient owned-session recovery context", () => {
+		expect(DAEMON_COMMAND_COMPATIBILITY.get_rlm_children).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 17,
+			capability: "authoritative_child_roster",
+		});
 		expect(
 			getDaemonCommandCompatibilities({
 				type: "attach",

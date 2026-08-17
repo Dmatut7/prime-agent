@@ -201,6 +201,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"get_state",
 	"get_connection_state",
 	"get_messages",
+	"get_rlm_children",
 	"get_session_stats",
 	"get_context_tree",
 	"get_commands",
@@ -3512,10 +3513,6 @@ export class DaemonSupervisor {
 		}
 		client.capabilities = normalizeCapabilities(command.capabilities, command.supportsExtensionUi);
 		client.supportsExtensionUi = client.capabilities.has("extension_ui");
-		const wasAttached = client.attachedActiveSessionIds.has(activeSessionId);
-		if (wasAttached && client.capabilities.has("authoritative_child_roster")) {
-			this.invalidateWorkerSnapshot(match.worker, activeSessionId);
-		}
 
 		let result = match.worker.snapshotCache.get(activeSessionId);
 		if (
@@ -3594,6 +3591,7 @@ export class DaemonSupervisor {
 			}
 		}
 		this.requireAvailableWorkerClient(match.worker);
+		const wasAttached = client.attachedActiveSessionIds.has(activeSessionId);
 		let transcript: SnapshotTranscriptCache | undefined;
 		if (client.capabilities.has("chunked_snapshot")) {
 			while (true) {

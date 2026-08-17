@@ -60,11 +60,12 @@ function fakeAcpConnection(
 				options.initialSnapshot = undefined;
 				return result;
 			}
-			if (options.finalSnapshot) {
-				await options.onFinalSnapshot?.();
-				return options.finalSnapshot();
-			}
+			if (options.finalSnapshot) return options.finalSnapshot();
 			return snapshot;
+		},
+		getRlmChildSnapshots: async () => {
+			await options.onFinalSnapshot?.();
+			return options.finalSnapshot ? ((await options.finalSnapshot()).children ?? []) : snapshot.children;
 		},
 		promptAndWait: async () => {
 			await options.onPromptAndWait?.();

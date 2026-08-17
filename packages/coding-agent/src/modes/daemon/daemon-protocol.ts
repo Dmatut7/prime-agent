@@ -62,7 +62,7 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 16 adds the "stopping" workerState and stops reporting disconnected workers as "ready".
 // Revision 17 gates authoritative child rosters and transient owned-session recovery context.
 export const DAEMON_SCHEMA_REVISION = 17;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-17-1bcb9e7f1a49";
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-17-84d48af53ec6";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -80,8 +80,7 @@ export type DaemonClientCapability =
 	| "extension_ui"
 	| "slim_attach"
 	| "chunked_snapshot"
-	| "client_owned_sessions"
-	| "authoritative_child_roster";
+	| "client_owned_sessions";
 export type DaemonPromptAdmissionCancellationStatus = "cancelled" | "owned" | "unknown";
 export interface DaemonPromptAdmissionCancellationResult {
 	status: DaemonPromptAdmissionCancellationStatus;
@@ -103,6 +102,7 @@ export type DaemonServerCapability =
 	| "session_input_admission"
 	| "prompt_admission_cancellation"
 	| "queue_message_mutation"
+	| "authoritative_child_roster"
 	| "owned_session_recovery_context";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
@@ -129,7 +129,6 @@ export const DAEMON_SUPPORTED_CLIENT_CAPABILITIES: readonly DaemonClientCapabili
 	"slim_attach",
 	"chunked_snapshot",
 	"client_owned_sessions",
-	"authoritative_child_roster",
 ];
 
 export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
@@ -143,6 +142,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"session_input_admission",
 	"prompt_admission_cancellation",
 	"queue_message_mutation",
+	"authoritative_child_roster",
 	"owned_session_recovery_context",
 ];
 
@@ -513,6 +513,7 @@ export type DaemonCommand =
 	| { id?: string; type: "get_state"; activeSessionId: string }
 	| { id?: string; type: "get_connection_state"; activeSessionId: string }
 	| { id?: string; type: "get_messages"; activeSessionId: string }
+	| { id?: string; type: "get_rlm_children"; activeSessionId: string }
 	| { id?: string; type: "get_session_stats"; activeSessionId: string }
 	| { id?: string; type: "get_context_tree"; activeSessionId: string }
 	| { id?: string; type: "get_commands"; activeSessionId: string }
@@ -656,6 +657,11 @@ const DELETE_RLM_SUBAGENT_COMMAND = {
 } as const;
 const FLAT_SESSION_TREE_COMMAND = { minProtocol: 7 } as const;
 const TELEMETRY_POLICY_COMMAND = { minProtocol: 7, minSchemaRevision: 14 } as const;
+const AUTHORITATIVE_CHILD_ROSTER_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 17,
+	capability: "authoritative_child_roster",
+} as const;
 const OWNED_SESSION_RECOVERY_CONTEXT = {
 	minProtocol: 7,
 	minSchemaRevision: 17,
@@ -701,6 +707,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	get_state: LEGACY_DAEMON_COMMAND,
 	get_connection_state: LEGACY_DAEMON_COMMAND,
 	get_messages: LEGACY_DAEMON_COMMAND,
+	get_rlm_children: AUTHORITATIVE_CHILD_ROSTER_COMMAND,
 	get_session_stats: LEGACY_DAEMON_COMMAND,
 	get_context_tree: LEGACY_DAEMON_COMMAND,
 	get_commands: LEGACY_DAEMON_COMMAND,
@@ -1053,6 +1060,7 @@ const READ_ONLY_DAEMON_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"get_state",
 	"get_connection_state",
 	"get_messages",
+	"get_rlm_children",
 	"get_session_stats",
 	"get_context_tree",
 	"get_commands",

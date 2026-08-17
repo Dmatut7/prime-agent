@@ -664,13 +664,13 @@ export async function runAcpModeWithConnection(
 					return { stopReason: "cancelled" satisfies AcpStopReason };
 				}
 				const autonomous = autonomousMeta(status);
-				const liveSnapshot = await connection.getInitialSnapshot({ authoritativeChildren: true });
+				const liveChildren = await connection.getRlmChildSnapshots();
 				if (abort.signal.aborted) {
 					await entry.producer.drain();
 					return { stopReason: "cancelled" satisfies AcpStopReason };
 				}
 				const outcome = failure ? "error" : "result";
-				const terminalQuiescence = quiescenceMeta(status, liveSnapshot.children);
+				const terminalQuiescence = quiescenceMeta(status, liveChildren);
 				// Lifecycle completion is authoritative here: unused autonomous
 				// continuation capacity is telemetry, not outstanding work.
 				const terminal = terminalQuiescence.outstandingSubagents === 0;

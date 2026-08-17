@@ -36,7 +36,6 @@ import type {
 	AgentConnectionExtensionUiResponse,
 	AgentConnectionForkOptions,
 	AgentConnectionHeartbeat,
-	AgentConnectionInitialSnapshotOptions,
 	AgentConnectionModel,
 	AgentConnectionModelCatalog,
 	AgentConnectionModelCycleResult,
@@ -50,6 +49,7 @@ import type {
 	AgentConnectionQueueMode,
 	AgentConnectionQueueState,
 	AgentConnectionResourceSnapshot,
+	AgentConnectionRlmChildAgentSnapshot,
 	AgentConnectionSavedSessionInfo,
 	AgentConnectionSavedSessionScope,
 	AgentConnectionScopedModel,
@@ -125,8 +125,12 @@ export class InProcessAgentConnection implements AgentConnection {
 		return createAgentConnectionState(this.runtimeHost);
 	}
 
-	async getInitialSnapshot(_options?: AgentConnectionInitialSnapshotOptions): Promise<AgentConnectionSnapshot> {
+	async getInitialSnapshot(): Promise<AgentConnectionSnapshot> {
 		return createAgentConnectionSnapshot(this.runtimeHost);
+	}
+
+	async getRlmChildSnapshots(): Promise<AgentConnectionRlmChildAgentSnapshot[]> {
+		return this.session.getRlmChildSnapshots();
 	}
 
 	async getMessages(): Promise<AgentMessage[]> {

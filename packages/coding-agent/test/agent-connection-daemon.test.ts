@@ -9,6 +9,7 @@ import {
 } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import type {
 	AgentConnectionEvent,
+	AgentConnectionRlmChildAgentSnapshot,
 	AgentConnectionSavedSessionInfo,
 	AgentConnectionState,
 } from "../src/modes/agent-connection/types.js";
@@ -46,6 +47,9 @@ class FakeDaemonClient {
 	attachFailures = 0;
 	connectionStateGate: Promise<void> | undefined;
 	connectionStateFactory: ((activeSessionId: string) => AgentConnectionState) | undefined;
+	rlmChildren: AgentConnectionRlmChildAgentSnapshot[] = [];
+	rlmChildrenEventSequence = 12;
+	rlmChildrenGate: Promise<void> | undefined;
 	abortBashUnknownCommand = false;
 	abortAndClearQueueUnknownCommand = false;
 	cronAddGate: Promise<void> | undefined;
@@ -147,6 +151,14 @@ class FakeDaemonClient {
 					command: command.type,
 					success: true,
 					data: { messages: [{ role: "user", content: "current prompt", timestamp: 4 }] },
+				};
+			case "get_rlm_children":
+				await this.rlmChildrenGate;
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: { children: this.rlmChildren, eventSequence: this.rlmChildrenEventSequence },
 				};
 			case "get_resource_snapshot":
 				return {
@@ -676,6 +688,27 @@ function createAttachResult(
 			),
 		},
 	};
+}
+
+function emitRlmChildUpdate(
+	client: FakeDaemonClient,
+	activeSessionId: string,
+	sequence: number,
+	child: AgentConnectionRlmChildAgentSnapshot,
+): void {
+	client.emitMessage({
+		type: "session_event",
+		activeSessionId,
+		event: { type: "rlm_child_update", child },
+		meta: {
+			id: `${activeSessionId}:${sequence}`,
+			protocol: DAEMON_PROTOCOL_INFO,
+			activeSessionId,
+			sequence,
+			cursor: { generation: `generation-${activeSessionId}`, sequence },
+			emittedAt: "2026-01-01T00:00:00.000Z",
+		},
+	});
 }
 
 function emitSequencedQueueUpdate(client: FakeDaemonClient, activeSessionId: string, sequence: number): void {
@@ -2157,25 +2190,37 @@ describe("DaemonAgentConnection", () => {
 		});
 	});
 
-	it.each([true, false])("capability-gates authoritative child-roster refresh: %s", async (supported) => {
+	it.each([true, false])("capability-gates authoritative child-roster reads: %s", async (supported) => {
 		const fakeClient = new FakeDaemonClient();
 		if (supported) fakeClient.serverCapabilities.add("authoritative_child_roster");
-		let attachCount = 0;
-		fakeClient.attachResultFactory = (command) => {
-			attachCount++;
-			return createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12, {
-				children:
-					attachCount === 1
-						? [{ id: "child-stale", label: "stale child", status: "running", sessionDir: "/tmp/stale" }]
-						: [],
-			});
-		};
 		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
 		await connection.attach();
 
-		const refreshed = connection.getInitialSnapshot({ authoritativeChildren: true });
-		if (supported) await expect(refreshed).resolves.toMatchObject({ children: [] });
-		else await expect(refreshed).rejects.toThrow("authoritative_child_roster");
+		const children = connection.getRlmChildSnapshots();
+		if (supported) await expect(children).resolves.toEqual([]);
+		else await expect(children).rejects.toThrow("authoritative_child_roster");
+	});
+
+	it("preserves a newer live child update over an in-flight roster read", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.serverCapabilities.add("authoritative_child_roster");
+		let releaseRoster!: () => void;
+		fakeClient.rlmChildrenGate = new Promise<void>((resolve) => {
+			releaseRoster = resolve;
+		});
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+		await connection.attach();
+
+		const children = connection.getRlmChildSnapshots();
+		emitRlmChildUpdate(fakeClient, "active-1", 13, {
+			id: "child-live",
+			label: "live child",
+			status: "running",
+			sessionDir: "/tmp/child-live",
+		});
+		releaseRoster();
+
+		await expect(children).resolves.toEqual([expect.objectContaining({ id: "child-live", status: "running" })]);
 	});
 
 	it("keeps the live child roster after an empty attach snapshot", async () => {
@@ -2185,26 +2230,11 @@ describe("DaemonAgentConnection", () => {
 		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
 
 		await connection.attach();
-		fakeClient.emitMessage({
-			type: "session_event",
-			activeSessionId: "active-1",
-			event: {
-				type: "rlm_child_update",
-				child: {
-					id: "child-live",
-					label: "live child",
-					status: "running",
-					sessionDir: "/tmp/child-live",
-				},
-			},
-			meta: {
-				id: "active-1:13",
-				protocol: DAEMON_PROTOCOL_INFO,
-				activeSessionId: "active-1",
-				sequence: 13,
-				cursor: { generation: "generation-active-1", sequence: 13 },
-				emittedAt: "2026-01-01T00:00:00.000Z",
-			},
+		emitRlmChildUpdate(fakeClient, "active-1", 13, {
+			id: "child-live",
+			label: "live child",
+			status: "running",
+			sessionDir: "/tmp/child-live",
 		});
 
 		await expect(connection.getInitialSnapshot()).resolves.toMatchObject({

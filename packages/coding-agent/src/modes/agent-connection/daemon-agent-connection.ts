@@ -53,7 +53,6 @@ import type {
 	AgentConnectionExtensionUiResponse,
 	AgentConnectionForkOptions,
 	AgentConnectionHeartbeat,
-	AgentConnectionInitialSnapshotOptions,
 	AgentConnectionModel,
 	AgentConnectionModelCatalog,
 	AgentConnectionModelCycleResult,
@@ -219,6 +218,7 @@ export class DaemonAgentConnection implements AgentConnection {
 	private lastEventCursor: DaemonEventCursor | undefined;
 	private readonly retiredEventGenerations = new Set<string>();
 	private lastEventSequence: number | undefined;
+	private childRosterSequence: number | undefined;
 	private latestSnapshot: AgentConnectionSnapshot | undefined;
 	private latestSnapshotIsFresh = false;
 	private attachedSessionId: string | undefined;
@@ -300,7 +300,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		}
 	}
 
-	async attach(snapshotOptions?: AgentConnectionInitialSnapshotOptions): Promise<void> {
+	async attach(): Promise<void> {
 		const supportsExtensionUi = this.options.supportsExtensionUi !== false;
 		const result = await this.requestData<SessionSummary | DaemonAttachResult>({
 			type: "attach",
@@ -314,7 +314,6 @@ export class DaemonAgentConnection implements AgentConnection {
 				"slim_attach",
 				"chunked_snapshot",
 				...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
-				...(snapshotOptions?.authoritativeChildren ? (["authoritative_child_roster"] as const) : []),
 			],
 			env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
 			launchEnv: this.options.ownedSession ? collectDaemonLaunchEnv() : undefined,
@@ -350,6 +349,7 @@ export class DaemonAgentConnection implements AgentConnection {
 				? await this.waitForSnapshot(result.snapshotStream.id)
 				: result.snapshot;
 			this.latestSnapshot = mapDaemonSessionSnapshot(snapshot, result.replay);
+			if (Array.isArray(snapshot.children)) this.childRosterSequence = snapshot.lastEventSequence;
 			if (this.lastEventSequence !== undefined) {
 				this.latestSnapshot.lastEventSequence = this.lastEventSequence;
 			}
@@ -384,18 +384,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		});
 	}
 
-	async getInitialSnapshot(options?: AgentConnectionInitialSnapshotOptions): Promise<AgentConnectionSnapshot> {
-		if (options?.authoritativeChildren) {
-			if (!this.client.supportsServerCapability("authoritative_child_roster")) {
-				throw new DaemonCapabilityUnavailableError("attach", "authoritative_child_roster");
-			}
-			await this.attach(options);
-			const snapshot = this.latestSnapshot;
-			if (!Array.isArray(snapshot?.children)) {
-				throw new Error("Daemon attach did not provide an authoritative child roster");
-			}
-			return snapshot;
-		}
+	async getInitialSnapshot(): Promise<AgentConnectionSnapshot> {
 		if (this.latestSnapshotIsFresh && this.latestSnapshot) {
 			return this.latestSnapshot;
 		}
@@ -438,6 +427,27 @@ export class DaemonAgentConnection implements AgentConnection {
 			snapshotCursor?.generation === this.lastEventCursor?.generation &&
 			snapshotCursor?.sequence === this.lastEventCursor?.sequence;
 		return this.latestSnapshot;
+	}
+
+	async getRlmChildSnapshots(): Promise<AgentConnectionRlmChildAgentSnapshot[]> {
+		if (!this.client.supportsServerCapability("authoritative_child_roster")) {
+			throw new DaemonCapabilityUnavailableError("get_rlm_children", "authoritative_child_roster");
+		}
+		const data = await this.requestData<{
+			children: AgentConnectionRlmChildAgentSnapshot[];
+			eventSequence: number;
+		}>({ type: "get_rlm_children", activeSessionId: this.activeSessionId });
+		if (!Array.isArray(data.children) || !Number.isInteger(data.eventSequence)) {
+			throw new Error("Daemon returned an invalid child roster");
+		}
+		if ((this.childRosterSequence ?? -1) > data.eventSequence) {
+			return this.latestSnapshot?.children ?? data.children;
+		}
+		this.childRosterSequence = data.eventSequence;
+		if (this.latestSnapshot) {
+			this.latestSnapshot = { ...this.latestSnapshot, children: data.children };
+		}
+		return data.children;
 	}
 
 	async getMessages(): Promise<AgentMessage[]> {
@@ -1507,6 +1517,7 @@ export class DaemonAgentConnection implements AgentConnection {
 				this.observeStreamingMessage(message.event);
 			}
 			if (message.event.type === "rlm_child_update") {
+				this.childRosterSequence = maxEventSequence(this.childRosterSequence, getDaemonMessageSequence(message));
 				this.observeRlmChildUpdate(message.event.child);
 			}
 			this.latestSnapshotIsFresh = false;
@@ -1533,6 +1544,9 @@ export class DaemonAgentConnection implements AgentConnection {
 			this.attachedSessionId = message.snapshot.state.sessionId;
 			this.attachedSessionFile = message.snapshot.state.sessionFile;
 			this.latestSnapshot = mapDaemonSessionSnapshot(message.snapshot);
+			if (Array.isArray(message.snapshot.children)) {
+				this.childRosterSequence = message.snapshot.lastEventSequence;
+			}
 			if (this.lastEventSequence !== undefined) {
 				this.latestSnapshot.lastEventSequence = this.lastEventSequence;
 			}
@@ -1561,6 +1575,7 @@ export class DaemonAgentConnection implements AgentConnection {
 				latestSnapshot.lastEventCursor = this.lastEventCursor;
 			}
 			this.latestSnapshot = latestSnapshot;
+			this.childRosterSequence = undefined;
 			this.latestSnapshotIsFresh = true;
 			await this.emit({ type: "session_replaced", state: message.state, messages: message.messages });
 			return;
@@ -1850,6 +1865,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		this.attachedSessionId = snapshot.state.sessionId;
 		this.attachedSessionFile = snapshot.state.sessionFile;
 		this.latestSnapshot = mapDaemonSessionSnapshot(snapshot, replay);
+		this.childRosterSequence = Array.isArray(snapshot.children) ? snapshot.lastEventSequence : undefined;
 		this.latestSnapshotIsFresh = true;
 	}
 

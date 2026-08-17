@@ -275,6 +275,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"get_state",
 	"get_connection_state",
 	"get_messages",
+	"get_rlm_children",
 	"get_session_stats",
 	"get_context_tree",
 	"get_commands",
@@ -4425,6 +4426,14 @@ export class AgentDaemon {
 				const state = this.getSessionState(command.activeSessionId);
 				return success(command.id, "get_messages", {
 					messages: state.runtime.session.messages,
+				});
+			}
+
+			case "get_rlm_children": {
+				const state = this.getSessionState(command.activeSessionId);
+				return success(command.id, "get_rlm_children", {
+					children: state.runtime.session.getRlmChildSnapshots(),
+					eventSequence: state.lastEventSequence,
 				});
 			}
 
