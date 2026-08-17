@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Changed RLM guidance to end the turn instead of sleeping, polling, or blocking on long awaits, provide proactive progress updates, and use simplified technical English for user-facing prose.
+- Changed RLM guidance to end the turn instead of sleeping, polling, or blocking on long awaits, provide proactive progress updates from root agents, and use simplified technical English for user-facing prose.
 - Fixed new top-level daemon sessions inheriting an RLM child depth from the supervisor process.
 
 ## [0.7.3] - 2026-08-17
