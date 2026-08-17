@@ -36,6 +36,7 @@ import type {
 	AgentConnectionExtensionUiResponse,
 	AgentConnectionForkOptions,
 	AgentConnectionHeartbeat,
+	AgentConnectionInitialSnapshotOptions,
 	AgentConnectionModel,
 	AgentConnectionModelCatalog,
 	AgentConnectionModelCycleResult,
@@ -124,7 +125,7 @@ export class InProcessAgentConnection implements AgentConnection {
 		return createAgentConnectionState(this.runtimeHost);
 	}
 
-	async getInitialSnapshot(): Promise<AgentConnectionSnapshot> {
+	async getInitialSnapshot(_options?: AgentConnectionInitialSnapshotOptions): Promise<AgentConnectionSnapshot> {
 		return createAgentConnectionSnapshot(this.runtimeHost);
 	}
 

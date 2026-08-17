@@ -9605,14 +9605,7 @@ export class AgentSession {
 		return unsubscribe;
 	}
 
-	/**
-	 * Live recursive child roster for connection snapshots.
-	 *
-	 * The run registry is authoritative while a child is queued or running; retained
-	 * sessions preserve completed children and expose any nested work that outlives
-	 * their direct parent run. This deliberately does not reconstruct state from
-	 * observer events, which can predate a newly attached connection.
-	 */
+	/** Live recursive child roster from lifecycle state, including nested work under retained parents. */
 	getRlmChildSnapshots(): RlmChildAgentSnapshot[] {
 		const snapshots: RlmChildAgentSnapshot[] = [];
 		const recorded = new Set<string>();
@@ -9622,11 +9615,12 @@ export class AgentSession {
 				run.detachedDeletion || this._deletingRlmChildren.has(run.id) || this._deletedRlmChildIds.has(run.id);
 			const child = run.session;
 			if (!hidden) {
+				const model = child?.model ?? run.model;
 				snapshots.push({
 					id: run.id,
 					parentId: this._rlmParentNodeId,
 					sessionName: child?.sessionName ?? run.sessionName,
-					model: `${(child?.model ?? run.model).provider}/${(child?.model ?? run.model).id}`,
+					model: `${model.provider}/${model.id}`,
 					label: rlmChildLabel(run.prompt),
 					status: run.status,
 					sessionDir: run.sessionDir,

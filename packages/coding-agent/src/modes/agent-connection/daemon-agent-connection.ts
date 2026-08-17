@@ -53,6 +53,7 @@ import type {
 	AgentConnectionExtensionUiResponse,
 	AgentConnectionForkOptions,
 	AgentConnectionHeartbeat,
+	AgentConnectionInitialSnapshotOptions,
 	AgentConnectionModel,
 	AgentConnectionModelCatalog,
 	AgentConnectionModelCycleResult,
@@ -316,7 +317,11 @@ export class DaemonAgentConnection implements AgentConnection {
 			],
 			env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
 			launchEnv: this.options.ownedSession ? collectDaemonLaunchEnv() : undefined,
-			recoveryConfig: this.options.ownedSession ? this.options.ownedSessionRecoveryConfig : undefined,
+			...(this.options.ownedSession &&
+			this.options.ownedSessionRecoveryConfig &&
+			this.client.supportsServerCapability("owned_session_recovery_context")
+				? { recoveryConfig: this.options.ownedSessionRecoveryConfig }
+				: {}),
 			telemetryDisabled: this.options.telemetryDisabled,
 			resumeCursor:
 				this.lastEventCursor === undefined
@@ -378,7 +383,18 @@ export class DaemonAgentConnection implements AgentConnection {
 		});
 	}
 
-	async getInitialSnapshot(): Promise<AgentConnectionSnapshot> {
+	async getInitialSnapshot(options?: AgentConnectionInitialSnapshotOptions): Promise<AgentConnectionSnapshot> {
+		if (options?.authoritativeChildren) {
+			if (!this.client.supportsServerCapability("authoritative_child_roster")) {
+				throw new DaemonCapabilityUnavailableError("attach", "authoritative_child_roster");
+			}
+			await this.attach();
+			const snapshot = this.latestSnapshot;
+			if (!Array.isArray(snapshot?.children)) {
+				throw new Error("Daemon attach did not provide an authoritative child roster");
+			}
+			return snapshot;
+		}
 		if (this.latestSnapshotIsFresh && this.latestSnapshot) {
 			return this.latestSnapshot;
 		}
@@ -401,10 +417,6 @@ export class DaemonAgentConnection implements AgentConnection {
 				activeSessionId: this.activeSessionId,
 			}),
 		]);
-		// Children only travel in the attach snapshot; a session event arriving
-		// before the first read marks the cache stale, but the attach-time child
-		// roster is still the best seed available (live rlm_child_update events
-		// overwrite each entry anyway).
 		const children = this.latestSnapshot?.children;
 		const streamingMessage = this.latestSnapshot?.streamingMessage;
 		this.latestSnapshot = {

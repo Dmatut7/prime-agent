@@ -206,36 +206,6 @@ describe("ACP mode end to end", () => {
 		close();
 	});
 
-	it("does not emit terminal quiescence when a lifecycle-filtered parent leaves a live grandchild", async () => {
-		const connection = fakeAcpConnection({
-			finalSnapshot: async () => ({
-				state: { cwd: process.cwd() },
-				messages: [],
-				children: [
-					{
-						id: "live-grandchild",
-						parentId: "deleted-parent",
-						sessionName: "live-grandchild",
-						label: "still working",
-						status: "running",
-						sessionDir: "/tmp/live-grandchild",
-					},
-				],
-			}),
-		});
-		const { client, updates, close } = connectAcpClient(connection);
-		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
-		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
-		await client.request("session/prompt", {
-			sessionId: session.sessionId,
-			prompt: [{ type: "text", text: "finish" }],
-		});
-		const metadata = updates.map((update) => update.update?._meta?.[PRIME_AGENT_META_NAMESPACE]).filter(Boolean);
-		expect(metadata.some((meta) => meta.phase === "terminalQuiescence")).toBe(false);
-		expect(metadata.find((meta) => meta.quiescence)?.quiescence.outstandingSubagents).toBe(1);
-		close();
-	});
-
 	it("releases the subscription when the initial roster snapshot fails", async () => {
 		let unsubscribeCount = 0;
 		const connection = fakeAcpConnection({

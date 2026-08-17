@@ -60,8 +60,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
 // Revision 15 adds the mutate_queued_message command and queue_message_mutation capability.
 // Revision 16 adds the "stopping" workerState and stops reporting disconnected workers as "ready".
-export const DAEMON_SCHEMA_REVISION = 16;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-16-1bcb9e7f1a49";
+// Revision 17 gates authoritative child rosters and transient owned-session recovery context.
+export const DAEMON_SCHEMA_REVISION = 17;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-17-1bcb9e7f1a49";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -100,7 +101,9 @@ export type DaemonServerCapability =
 	| "transient_bash"
 	| "session_input_admission"
 	| "prompt_admission_cancellation"
-	| "queue_message_mutation";
+	| "queue_message_mutation"
+	| "authoritative_child_roster"
+	| "owned_session_recovery_context";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -139,6 +142,8 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"session_input_admission",
 	"prompt_admission_cancellation",
 	"queue_message_mutation",
+	"authoritative_child_roster",
+	"owned_session_recovery_context",
 ];
 
 export interface DaemonRuntimeIdentity {
@@ -651,6 +656,11 @@ const DELETE_RLM_SUBAGENT_COMMAND = {
 } as const;
 const FLAT_SESSION_TREE_COMMAND = { minProtocol: 7 } as const;
 const TELEMETRY_POLICY_COMMAND = { minProtocol: 7, minSchemaRevision: 14 } as const;
+const OWNED_SESSION_RECOVERY_CONTEXT = {
+	minProtocol: 7,
+	minSchemaRevision: 17,
+	capability: "owned_session_recovery_context",
+} as const;
 
 export const DAEMON_COMMAND_COMPATIBILITY = {
 	ack_result: LEGACY_DAEMON_COMMAND,
@@ -754,17 +764,18 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 } as const satisfies Record<DaemonCommandName, DaemonCommandCompatibility>;
 
 export function getDaemonCommandCompatibilities(command: DaemonCommand): readonly DaemonCommandCompatibility[] {
-	const compatibility = DAEMON_COMMAND_COMPATIBILITY[command.type];
+	const requirements: DaemonCommandCompatibility[] = [];
+	if ((command.type === "attach" || command.type === "reattach") && command.recoveryConfig !== undefined) {
+		requirements.push(OWNED_SESSION_RECOVERY_CONTEXT);
+	}
 	const carriesTelemetryPolicy =
 		((command.type === "attach" || command.type === "reattach") && command.telemetryDisabled !== undefined) ||
 		(command.type === "create" && command.config?.telemetryDisabled !== undefined);
-	if (carriesTelemetryPolicy) {
-		return [TELEMETRY_POLICY_COMMAND, compatibility];
-	}
+	if (carriesTelemetryPolicy) requirements.push(TELEMETRY_POLICY_COMMAND);
 	if ((command.type === "prompt" || command.type === "prompt_and_wait") && command.admissionId !== undefined) {
-		return [PROMPT_ADMISSION_CANCELLATION_COMMAND, compatibility];
+		requirements.push(PROMPT_ADMISSION_CANCELLATION_COMMAND);
 	}
-	return [compatibility];
+	return [...requirements, DAEMON_COMMAND_COMPATIBILITY[command.type]];
 }
 
 export type DaemonResponse =

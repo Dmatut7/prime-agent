@@ -1627,6 +1627,21 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(supervisor.persistWorker).toHaveBeenCalledWith(worker);
 	});
 
+	it("rejects create reuse when a failed worker cannot be safely reclaimed", () => {
+		const worker = {
+			descriptor: {
+				workerId: "failed-unreclaimed",
+				rootActiveSessionId: "active-failed",
+				lifecycle: "failed",
+			},
+		};
+		const supervisor = Object.create(DaemonSupervisor.prototype) as {
+			reuseWorkerForCreate(target: typeof worker, ownerClientId: undefined, sessionPath: string): typeof worker;
+		};
+
+		expect(() => supervisor.reuseWorkerForCreate(worker, undefined, "/tmp/failed.jsonl")).toThrow(/failed worker/);
+	});
+
 	it("reclaims a dead failed resident so a fresh create can reopen its session", async () => {
 		const worker = {
 			descriptor: { workerId: "failed-resident", pid: 42, lifecycle: "failed" as const },

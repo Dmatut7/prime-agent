@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Added correlated ACP completion metadata and limited durable daemon descriptors to identity-only recovery state.
+- Added correlated ACP completion metadata and prevented daemon recovery state from persisting runtime credentials or model configuration.
 
 ## [0.7.3] - 2026-08-17
 

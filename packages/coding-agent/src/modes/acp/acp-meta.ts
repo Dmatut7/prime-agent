@@ -119,7 +119,7 @@ export interface PrimeAgentSessionMeta {
 	compaction?: { tokensBefore?: number; summary?: string };
 	subagents?: PrimeAgentSubagentMeta[];
 	autonomous?: PrimeAgentAutonomousMeta;
-	/** Exact zero counters carried by a scoreable terminal-quiescence boundary. */
+	/** Observed subagent and autonomous-continuation counts at completion. */
 	quiescence?: PrimeAgentQuiescenceMeta;
 	ipython?: PrimeAgentIpythonMeta;
 }

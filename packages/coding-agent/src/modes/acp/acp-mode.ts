@@ -69,12 +69,15 @@ function canonicalCwd(path: string): string {
 	return normalizeWindowsDriveLetter(canonical);
 }
 
-/** A response cannot be confused with a peer request that reuses a JSON-RPC id. */
 function isJsonRpcResponse(message: unknown, requestId: unknown): boolean {
 	if (typeof message !== "object" || message === null) return false;
 	const record = message as Record<string, unknown>;
-	const has = (key: string): boolean => Object.hasOwn(record, key);
-	return record.jsonrpc === "2.0" && record.id === requestId && !has("method") && has("result") !== has("error");
+	return (
+		record.jsonrpc === "2.0" &&
+		record.id === requestId &&
+		!Object.hasOwn(record, "method") &&
+		Object.hasOwn(record, "result") !== Object.hasOwn(record, "error")
+	);
 }
 
 function sameCwd(left: string, right: string): boolean {
@@ -107,7 +110,6 @@ export interface AcpModeOptions {
 	stream?: ReturnType<typeof acp.ndJsonStream>;
 	/** Skip claiming stdout when the caller supplies its own transport. */
 	ownStdout?: boolean;
-	/** Test seam for deterministically gating a serialized outbound update. */
 	beforeAcpUpdatePublish?: (update: Record<string, unknown>) => Promise<void> | void;
 }
 
@@ -152,14 +154,12 @@ class AcpUpdateProducer {
 		});
 	}
 
-	/** Open the initial update gate only after session/new reached the transport. */
 	commitSessionNewResponse(): void {
 		if (this.admissionClosed) return;
 		this.admissionOpen = true;
 		this.releaseAdmission();
 	}
 
-	/** Settle a failed admission without allowing its buffered updates to publish. */
 	failSessionNewAdmission(): void {
 		if (this.admissionOpen || this.admissionClosed) return;
 		this.admissionClosed = true;
@@ -461,11 +461,12 @@ export async function runAcpModeWithConnection(
 		pendingSessionNewResponse = undefined;
 		admission?.producer.failSessionNewAdmission();
 	};
+	type AcpStreamMessage = typeof baseStream.writable extends WritableStream<infer TMessage> ? TMessage : never;
 	const stream: typeof baseStream = {
 		readable: baseStream.readable,
-		writable: new WritableStream<any>({
+		writable: new WritableStream<AcpStreamMessage>({
 			async write(message) {
-				let writer: WritableStreamDefaultWriter<any> | undefined;
+				let writer: WritableStreamDefaultWriter<AcpStreamMessage> | undefined;
 				try {
 					writer = baseStream.writable.getWriter();
 					await writer.write(message);
@@ -482,7 +483,7 @@ export async function runAcpModeWithConnection(
 				}
 			},
 			async close() {
-				let writer: WritableStreamDefaultWriter<any> | undefined;
+				let writer: WritableStreamDefaultWriter<AcpStreamMessage> | undefined;
 				try {
 					writer = baseStream.writable.getWriter();
 					await writer.close();
@@ -495,7 +496,7 @@ export async function runAcpModeWithConnection(
 				failPendingSessionNewResponse();
 			},
 			async abort(reason) {
-				let writer: WritableStreamDefaultWriter<any> | undefined;
+				let writer: WritableStreamDefaultWriter<AcpStreamMessage> | undefined;
 				try {
 					writer = baseStream.writable.getWriter();
 					await writer.abort(reason);
@@ -607,8 +608,6 @@ export async function runAcpModeWithConnection(
 						}
 					}
 				} catch (error) {
-					// A failed setup never claims the session slot, but it must still release
-					// the listener installed above and settle buffered producers.
 					producer.failSessionNewAdmission();
 					unsubscribe();
 					throw error;
@@ -654,8 +653,6 @@ export async function runAcpModeWithConnection(
 					await entry.producer.drain();
 					return { stopReason: "cancelled" satisfies AcpStopReason };
 				}
-				// Both successful and failed model turns must establish quiescence from
-				// the same authoritative sources before making a terminal claim.
 				const status = await connection.waitForHeadlessCompletion();
 				if (abort.signal.aborted) {
 					await entry.producer.drain();
@@ -667,7 +664,7 @@ export async function runAcpModeWithConnection(
 					return { stopReason: "cancelled" satisfies AcpStopReason };
 				}
 				const autonomous = autonomousMeta(status);
-				const liveSnapshot = await connection.getInitialSnapshot();
+				const liveSnapshot = await connection.getInitialSnapshot({ authoritativeChildren: true });
 				if (abort.signal.aborted) {
 					await entry.producer.drain();
 					return { stopReason: "cancelled" satisfies AcpStopReason };

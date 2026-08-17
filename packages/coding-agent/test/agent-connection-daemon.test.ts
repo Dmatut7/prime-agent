@@ -713,8 +713,9 @@ describe("DaemonAgentConnection", () => {
 		});
 	});
 
-	it("supplies fresh runtime context when attaching an owned session", async () => {
+	it.each([true, false])("capability-gates owned-session recovery context: %s", async (supported) => {
 		const fakeClient = new FakeDaemonClient();
+		if (supported) fakeClient.serverCapabilities.add("owned_session_recovery_context");
 		const recoveryConfig = { cwd: "/tmp/fresh-owner" };
 		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-owned", {
 			ownedSession: true,
@@ -723,11 +724,9 @@ describe("DaemonAgentConnection", () => {
 
 		await connection.attach();
 
-		expect(fakeClient.requests[0]).toMatchObject({
-			type: "attach",
-			activeSessionId: "active-owned",
-			recoveryConfig,
-		});
+		const request = fakeClient.requests[0];
+		if (supported) expect(request).toMatchObject({ recoveryConfig });
+		else expect(request).not.toHaveProperty("recoveryConfig");
 	});
 
 	it("forwards queueIfBusy for prompt admission", async () => {
@@ -2156,6 +2155,27 @@ describe("DaemonAgentConnection", () => {
 			type: "attach",
 			activeSessionId: "active-restored",
 		});
+	});
+
+	it.each([true, false])("capability-gates authoritative child-roster refresh: %s", async (supported) => {
+		const fakeClient = new FakeDaemonClient();
+		if (supported) fakeClient.serverCapabilities.add("authoritative_child_roster");
+		let attachCount = 0;
+		fakeClient.attachResultFactory = (command) => {
+			attachCount++;
+			return createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12, {
+				children:
+					attachCount === 1
+						? [{ id: "child-stale", label: "stale child", status: "running", sessionDir: "/tmp/stale" }]
+						: [],
+			});
+		};
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+		await connection.attach();
+
+		const refreshed = connection.getInitialSnapshot({ authoritativeChildren: true });
+		if (supported) await expect(refreshed).resolves.toMatchObject({ children: [] });
+		else await expect(refreshed).rejects.toThrow("authoritative_child_roster");
 	});
 
 	it("keeps the live child roster after an empty attach snapshot", async () => {

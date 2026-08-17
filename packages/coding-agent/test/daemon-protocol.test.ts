@@ -172,6 +172,22 @@ describe("daemon protocol helpers", () => {
 		).toEqual([{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }]);
 	});
 
+	it("capability-gates authoritative rosters and transient owned-session recovery context", () => {
+		expect(
+			getDaemonCommandCompatibilities({
+				type: "attach",
+				activeSessionId: "active-1",
+				recoveryConfig: { cwd: "/tmp/fresh-owner" },
+			}),
+		).toEqual([
+			{ minProtocol: 7, minSchemaRevision: 17, capability: "owned_session_recovery_context" },
+			{ minProtocol: 7 },
+		]);
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toEqual(
+			expect.arrayContaining(["authoritative_child_roster", "owned_session_recovery_context"]),
+		);
+	});
+
 	it("version- and capability-gates prompt admission cancellation", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission).toEqual({
 			minProtocol: 7,

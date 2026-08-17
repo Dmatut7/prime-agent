@@ -632,12 +632,16 @@ export type AgentConnectionEvent =
 export type AgentConnectionEventListener = (event: AgentConnectionEvent) => void | Promise<void>;
 export type AgentConnectionBeforeSessionInvalidateListener = () => void;
 
+export interface AgentConnectionInitialSnapshotOptions {
+	authoritativeChildren?: boolean;
+}
+
 export interface AgentConnection {
 	subscribe(listener: AgentConnectionEventListener): () => void;
 	onBeforeSessionInvalidate(listener: AgentConnectionBeforeSessionInvalidateListener): () => void;
 
 	getState(): Promise<AgentConnectionState>;
-	getInitialSnapshot(): Promise<AgentConnectionSnapshot>;
+	getInitialSnapshot(options?: AgentConnectionInitialSnapshotOptions): Promise<AgentConnectionSnapshot>;
 	getMessages(): Promise<AgentMessage[]>;
 	getSessionHeader(): Promise<AgentConnectionSessionHeader | undefined>;
 	getCommands(): Promise<AgentConnectionSlashCommand[]>;
