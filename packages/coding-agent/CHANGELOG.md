@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Changed the default RLM maximum recursion depth for new sessions from 1 to 2.
 - Fixed the agent going silent after an automatic context compaction interrupted unfinished work: the tool loop now resumes when a threshold compaction fails or is skipped, and active goals keep continuing after a successful mid-goal threshold compaction.
 - Changed the agents view splash hint from "type to start" to "type to search sessions".
 - Added `app.edits.expand` (`ctrl+j`) to toggle edit diffs; diffs are now shown only by this toggle, and `ctrl+o` no longer affects them.
