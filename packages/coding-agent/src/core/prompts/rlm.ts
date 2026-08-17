@@ -11,6 +11,12 @@ export interface RlmPromptOptions {
 	activeTools?: string[];
 }
 
+const LONG_RUNNING_WORK_PROMPT = [
+	"For slow or independently completing work, use a nonblocking control loop: start the work, record its handle or output location, then end your turn. Read the result on a later turn or when a reply arrives.",
+	"Do not keep the turn open by polling with `time.sleep()` or shell `sleep`, and do not replace polling with a long blocking `await`. Await only the short operation needed to start work or inspect a result that is already available; otherwise end the turn.",
+	"When work uses many subagents or spans multiple turns, keep the user informed. Before ending a turn with work still running, give a concise update that says what completed, what is still running or blocked, and what will happen next. Send another update at meaningful milestones during long-running work, without repeating unchanged status.",
+].join("\n");
+
 const IPYTHON_CONTROL_PROMPT = [
 	"IPython is the agent's long-lived notebook: a persistent control environment for reasoning, context management, state, tool orchestration, and recursive subcalls. Use it to keep intermediate variables, inspect and transform outputs, write small helper functions, and preserve useful state across turns or compaction.",
 	"",
@@ -25,8 +31,6 @@ const IPYTHON_CONTROL_PROMPT = [
 	"Each `%%bash` cell runs in a throw-away subshell, so shell-level state (`cd`, `export`, `source`, shell variables) does NOT carry to later cells. Keep dependent shell steps inside one `%%bash` cell when they need shared shell state, or use kernel-level equivalents that survive across calls: `%cd <dir>` for the working directory and `os.environ['VAR'] = '...'` (or `%env VAR=...`) for environment variables — these apply to all subsequent `%%bash` calls.",
 	"",
 	"Python state in the kernel, by contrast, persists across cells: named variables, helper functions, classes, imports, notes, parsed outputs, and helper data structures all remain available in every later turn. Tool calls are themselves Python `await` expressions, so their return values can be bound to variables and composed into program logic just like any other call.",
-	"",
-	"Do not block the kernel or shell waiting on slow external work. Never poll with `time.sleep()` loops or long blocking sleeps in Python, and never use `sleep` in `%%bash` cells or the bash tool to wait for a background run, sandbox, sub-agent, or remote job to progress. A blocked cell or command holds the turn open, wastes wall-clock, and stops the user from interacting. Instead kick off the work, record its handle or output location, end your turn, and check the result on a later turn (or when a reply arrives). A single bounded wait of a few seconds is fine when completion is imminent; anything longer, or any loop containing `sleep`, means end your turn and check on a later one.",
 	"",
 	"Continual harness state is available as `rlm.harness` and `rlm.get_harness_state()`. CRUD calls are local to this Prime Agent session by default: `rlm.harness.create_memory(...)`, `rlm.harness.update_memory(...)`, `rlm.harness.delete_memory(...)`, `rlm.harness.create_skill(...)`, `rlm.harness.update_skill(...)`, `rlm.harness.delete_skill(...)`, `rlm.harness.create_subagent(...)`, `rlm.harness.update_subagent(...)`, `rlm.harness.delete_subagent(...)`, `rlm.harness.create_prompt_note(...)`, `rlm.harness.update_prompt_note(...)`, `rlm.harness.delete_prompt_note(...)`, plus `rlm.harness.record_refinement(...)` and `rlm.harness.overview()`. Use `global_=True` only for stable cross-session lessons; Python reserves `global`, so literal `global=True` is invalid syntax.",
 	"",
@@ -73,6 +77,8 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		"You are a general purpose agent that uses code to solve tasks.",
 		"You solve tasks by breaking down problems into sub-tasks, writing and executing code, observing results, and iterating one step at a time.",
 		"When you are done, stop calling tools and state your final answer.",
+		"",
+		LONG_RUNNING_WORK_PROMPT,
 		"",
 		`Working directory: ${cwd}`,
 		`Conversation log: ${messagesPath}`,

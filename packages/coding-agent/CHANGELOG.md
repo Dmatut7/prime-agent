@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Changed RLM guidance to end the turn instead of sleeping, polling, or blocking on long awaits, and to keep users updated during large multi-agent work.
+
 ## [0.7.3] - 2026-08-17
 
 - Fixed assistant rendering when provider payloads contain null or sparse content blocks.
