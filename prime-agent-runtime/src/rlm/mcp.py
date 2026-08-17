@@ -139,6 +139,7 @@ class _Registry:
         self._generations: dict[str, _Generation] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._next_generation = 0
+        self._closing = False
 
     async def get(self, server: str) -> _Generation:
         _validate_name(server, "server")
@@ -147,6 +148,8 @@ class _Registry:
             return await self._get_locked(server)
 
     async def _get_locked(self, server: str) -> _Generation:
+        if self._closing:
+            raise RuntimeError("MCP registry is closing")
         config = await _config(server)
         current = self._generations.get(server)
         if current and current.config == config and not current.closed:
@@ -184,7 +187,17 @@ class _Registry:
                     await generation.close()
 
     async def close(self) -> None:
-        await self.reload()
+        self._closing = True
+        try:
+            names = set(self._locks) | set(self._generations)
+            for name in names:
+                lock = self._locks.setdefault(name, asyncio.Lock())
+                async with lock:
+                    generation = self._generations.pop(name, None)
+                    if generation:
+                        await generation.close()
+        finally:
+            self._closing = False
 
 
 _registry = _Registry()
@@ -218,7 +231,8 @@ def _validate_name(value: str, label: str) -> None:
 
 async def _config(server: str) -> dict[str, Any]:
     try:
-        config = await host_request("mcp.config", {"server": server})
+        async with asyncio.timeout(_DEFAULT_STARTUP_TIMEOUT):
+            config = await host_request("mcp.config", {"server": server})
     except Exception as exc:
         raise RuntimeError(f"Could not load MCP configuration for '{server}'") from exc
     if not config:
@@ -287,7 +301,7 @@ def _stdio_env(config: dict[str, Any]) -> dict[str, str]:
 def _seconds(value: Any, default: float) -> float:
     if value is None:
         return default
-    if not isinstance(value, (int, float)) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         raise ValueError("MCP timeouts must be positive milliseconds")
     return value / 1000
 

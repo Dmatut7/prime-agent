@@ -192,4 +192,14 @@ describe("McpManager", () => {
 		expect(await manager.hostHandlers()["mcp.config"]({ server: "local" })).toEqual(config);
 		expect(manager.listStatus().find((status) => status.server === "local")?.enabled).toBe(true);
 	});
+
+	it("does not enable an authored catalog skill when a generic server shadows its name", () => {
+		for (const config of [
+			{ type: "stdio", command: "node" },
+			{ type: "http", url: "https://proxy.test/mcp" },
+		] satisfies McpServerConfig[]) {
+			const manager = new McpManager({ authStorage, getUserServers: () => ({ linear: config }) });
+			expect(manager.getDisabledBuiltinSkillOverrides()).toContain("-linear/SKILL.md");
+		}
+	});
 });

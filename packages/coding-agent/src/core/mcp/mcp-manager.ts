@@ -128,17 +128,11 @@ export class McpManager {
 	/** True when valid credentials exist for the integration (drives enablement). */
 	private isAuthed(integration: ResolvedIntegration): boolean {
 		if (integration.enabled === false) return false;
+		if (integration.userDeclared && getCatalogEntry(integration.server)) return false;
 		if (integration.config.type === "stdio") return true;
 		if (!integration.usesOAuth && !integration.bearerTokenEnvVar) return true;
 		if (integration.bearerTokenEnvVar && process.env[integration.bearerTokenEnvVar]?.trim()) {
 			return true;
-		}
-		// A user server that overrides a catalog name must NOT inherit the built-in's
-		// stored mcp: creds — those were issued for the official endpoint and could be
-		// sent to the override URL. Such an override authenticates only via a bearer
-		// env var (handled above); we don't trust auth.json OAuth creds for it.
-		if (integration.userDeclared && getCatalogEntry(integration.server)) {
-			return false;
 		}
 		const cred = this.authStorage.get(this.providerId(integration.server));
 		return cred !== undefined;

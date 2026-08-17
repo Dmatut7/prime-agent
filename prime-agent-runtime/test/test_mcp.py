@@ -242,6 +242,36 @@ class McpRegistryTest(unittest.TestCase):
                 process.kill()
                 process.wait(timeout=3)
 
+    def test_boolean_timeout_is_rejected(self):
+        with self.assertRaises(ValueError):
+            mcp._seconds(True, 1)
+
+    def test_close_waits_for_inflight_startup(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def config(_server):
+            return {"type": "http", "url": "a"}
+
+        async def open_generation(generation):
+            started.set()
+            await release.wait()
+            generation.session = FakeSession([])
+
+        async def scenario():
+            with mock.patch.object(mcp, "_config", config), mock.patch.object(mcp._Generation, "open", open_generation):
+                opening = asyncio.create_task(mcp._registry.get("svc"))
+                await started.wait()
+                closing = asyncio.create_task(mcp._registry.close())
+                await asyncio.sleep(0)
+                self.assertFalse(closing.done())
+                release.set()
+                await opening
+                await closing
+                self.assertEqual(mcp._registry._generations, {})
+
+        run(scenario())
+
 
 if __name__ == "__main__":
     unittest.main()
