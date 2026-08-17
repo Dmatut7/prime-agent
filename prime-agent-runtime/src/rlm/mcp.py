@@ -21,10 +21,9 @@ _SAFE_ENV = ("HOME", "PATH", "TMPDIR", "TEMP", "TMP", "SystemRoot", "WINDIR")
 
 
 class _Generation:
-    def __init__(self, server: str, config: dict[str, Any], number: int):
+    def __init__(self, server: str, config: dict[str, Any]):
         self.server = server
         self.config = config
-        self.number = number
         self.stack = AsyncExitStack()
         self.session: Any = None
         self.tools: dict[str, dict[str, Any]] = {}
@@ -138,7 +137,6 @@ class _Registry:
     def __init__(self):
         self._generations: dict[str, _Generation] = {}
         self._locks: dict[str, asyncio.Lock] = {}
-        self._next_generation = 0
         self._closing = False
 
     async def get(self, server: str) -> _Generation:
@@ -157,8 +155,7 @@ class _Registry:
         if current:
             await current.close()
             self._generations.pop(server, None)
-        self._next_generation += 1
-        generation = _Generation(server, config, self._next_generation)
+        generation = _Generation(server, config)
         await generation.open()
         self._generations[server] = generation
         return generation
@@ -321,7 +318,10 @@ def install_shutdown_hook() -> None:
 
     async def do_shutdown(restart: bool):
         await close()
-        return await original(restart)
+        result = original(restart)
+        if hasattr(result, "__await__"):
+            return await result
+        return result
 
     kernel.do_shutdown = do_shutdown
     kernel._prime_agent_mcp_shutdown = True

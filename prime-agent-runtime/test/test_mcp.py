@@ -76,7 +76,7 @@ class McpRegistryTest(unittest.TestCase):
         mcp._registry = mcp._Registry()
 
     def generation(self, config, tools):
-        generation = mcp._Generation("svc", config, 1)
+        generation = mcp._Generation("svc", config)
         generation.stack = FakeStack()
         generation.session = FakeSession(tools)
         run(generation.discover())
@@ -200,7 +200,7 @@ class McpRegistryTest(unittest.TestCase):
 
         async def scenario():
             with mock.patch.dict(os.environ, {"SOURCE_VALUE": "resolved"}, clear=False):
-                generation = mcp._Generation("svc", config, 1)
+                generation = mcp._Generation("svc", config)
                 await generation.open()
                 try:
                     result = await generation.call("fixture/raw.tool", {"x": 1})
@@ -232,7 +232,7 @@ class McpRegistryTest(unittest.TestCase):
                 self.fail("HTTP MCP fixture did not start")
 
             async def scenario():
-                generation = mcp._Generation("svc", {"type": "http", "url": f"http://127.0.0.1:{port}/mcp"}, 1)
+                generation = mcp._Generation("svc", {"type": "http", "url": f"http://127.0.0.1:{port}/mcp"})
                 await generation.open()
                 try:
                     tools = list(generation.tools)
@@ -255,6 +255,22 @@ class McpRegistryTest(unittest.TestCase):
     def test_boolean_timeout_is_rejected(self):
         with self.assertRaises(ValueError):
             mcp._seconds(True, 1)
+
+    def test_shutdown_hook_supports_synchronous_kernel_handler(self):
+        class Kernel:
+            def __init__(self):
+                self._prime_agent_mcp_shutdown = False
+
+            def do_shutdown(self, restart):
+                return {"status": "ok", "restart": restart}
+
+        kernel = Kernel()
+        shell = SimpleNamespace(kernel=kernel)
+        with mock.patch.object(mcp, "get_ipython", create=True, return_value=shell):
+            mcp.install_shutdown_hook()
+        with mock.patch.object(mcp, "close", mock.AsyncMock()) as close:
+            self.assertEqual(run(kernel.do_shutdown(False)), {"status": "ok", "restart": False})
+        close.assert_awaited_once()
 
     def test_close_waits_for_inflight_startup(self):
         started = asyncio.Event()
