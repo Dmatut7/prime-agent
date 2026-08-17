@@ -3143,6 +3143,7 @@ describe("daemon worker supervisor monitoring", () => {
 				rootActiveSessionId: activeSessionId,
 				lifecycle: "failed",
 				consecutiveFailures: 1,
+				telemetryDisabled: true,
 				createCommand: { type: "create" as const, sessionPath: "/tmp/session.jsonl" },
 			},
 			summaries: new Map(),
@@ -3191,7 +3192,7 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(worker.transientCreateCommand).toEqual({
 			type: "create",
 			sessionPath: "/tmp/session.jsonl",
-			config: { cwd: "/tmp/fresh-owner" },
+			config: { cwd: "/tmp/fresh-owner", telemetryDisabled: true },
 			env: { HERDR_PANE_ID: "pane-1" },
 			launchEnv: { OWNER_SECRET: "fresh" },
 			lifecycle: "client_owned",

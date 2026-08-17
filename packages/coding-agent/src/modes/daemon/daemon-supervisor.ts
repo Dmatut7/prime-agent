@@ -3484,7 +3484,10 @@ export class DaemonSupervisor {
 				if (command.recoveryConfig) {
 					ownedWorker.transientCreateCommand = {
 						...ownedWorker.descriptor.createCommand,
-						config: command.recoveryConfig,
+						config: {
+							...command.recoveryConfig,
+							...(ownedWorker.descriptor.telemetryDisabled === true ? { telemetryDisabled: true } : {}),
+						},
 						env: command.env,
 						launchEnv: command.launchEnv,
 						lifecycle: "client_owned",
