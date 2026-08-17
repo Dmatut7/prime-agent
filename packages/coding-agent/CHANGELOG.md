@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Added a pre-imported generic MCP API for persistent Streamable HTTP and stdio servers declared in user settings.
+- Fixed new top-level daemon sessions inheriting an RLM child depth from the supervisor process.
 
 ## [0.7.3] - 2026-08-17
 
