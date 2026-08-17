@@ -124,13 +124,13 @@ class _Generation:
     async def close(self) -> None:
         if self.closed:
             return
-        self.closed = True
         async with self._call_lock:
             try:
                 async with asyncio.timeout(5):
                     await self.stack.aclose()
             except TimeoutError:
                 pass
+            self.closed = True
 
 
 class _Registry:

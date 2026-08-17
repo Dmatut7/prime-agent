@@ -173,6 +173,24 @@ class McpRegistryTest(unittest.TestCase):
                 run(mcp.call_tool("svc", "tool", {"secret": "do-not-print"}))
         self.assertNotIn("do-not-print", str(caught.exception))
 
+    def test_cancelled_close_can_be_retried(self):
+        generation = self.generation({"type": "http"}, [])
+
+        async def scenario():
+            await generation._call_lock.acquire()
+            closing = asyncio.create_task(generation.close())
+            await asyncio.sleep(0)
+            closing.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await closing
+            self.assertFalse(generation.closed)
+            generation._call_lock.release()
+            await generation.close()
+
+        run(scenario())
+        self.assertTrue(generation.closed)
+        self.assertEqual(generation.stack.closed, 1)
+
     def test_close_is_idempotent(self):
         generation = self.generation({"type": "http"}, [])
         run(generation.close())
