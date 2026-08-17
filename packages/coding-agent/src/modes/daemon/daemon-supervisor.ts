@@ -3513,7 +3513,9 @@ export class DaemonSupervisor {
 		client.capabilities = normalizeCapabilities(command.capabilities, command.supportsExtensionUi);
 		client.supportsExtensionUi = client.capabilities.has("extension_ui");
 		const wasAttached = client.attachedActiveSessionIds.has(activeSessionId);
-		if (wasAttached) this.invalidateWorkerSnapshot(match.worker, activeSessionId);
+		if (wasAttached && client.capabilities.has("authoritative_child_roster")) {
+			this.invalidateWorkerSnapshot(match.worker, activeSessionId);
+		}
 
 		let result = match.worker.snapshotCache.get(activeSessionId);
 		if (

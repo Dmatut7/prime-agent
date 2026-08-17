@@ -300,7 +300,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		}
 	}
 
-	async attach(): Promise<void> {
+	async attach(snapshotOptions?: AgentConnectionInitialSnapshotOptions): Promise<void> {
 		const supportsExtensionUi = this.options.supportsExtensionUi !== false;
 		const result = await this.requestData<SessionSummary | DaemonAttachResult>({
 			type: "attach",
@@ -314,6 +314,7 @@ export class DaemonAgentConnection implements AgentConnection {
 				"slim_attach",
 				"chunked_snapshot",
 				...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
+				...(snapshotOptions?.authoritativeChildren ? (["authoritative_child_roster"] as const) : []),
 			],
 			env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
 			launchEnv: this.options.ownedSession ? collectDaemonLaunchEnv() : undefined,
@@ -388,7 +389,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			if (!this.client.supportsServerCapability("authoritative_child_roster")) {
 				throw new DaemonCapabilityUnavailableError("attach", "authoritative_child_roster");
 			}
-			await this.attach();
+			await this.attach(options);
 			const snapshot = this.latestSnapshot;
 			if (!Array.isArray(snapshot?.children)) {
 				throw new Error("Daemon attach did not provide an authoritative child roster");

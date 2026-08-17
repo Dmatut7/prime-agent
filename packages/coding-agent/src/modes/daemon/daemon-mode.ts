@@ -4935,7 +4935,7 @@ export class AgentDaemon {
 				sequence: state.lastEventSequence,
 			},
 			...(parent ? { parent } : {}),
-			...(children.length > 0 ? { children } : {}),
+			children,
 		};
 	}
 
