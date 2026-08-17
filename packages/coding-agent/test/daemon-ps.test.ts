@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
 	type DaemonInfo,
 	evaluateShutdownQuietPeriod,
+	isTrackedWorkerDescriptor,
 	isWorkerSocketPath,
 	mergeDiscoveredDaemonProcesses,
 	parseLsofListeners,
@@ -23,6 +24,25 @@ describe("worker socket classification", () => {
 		expect(isWorkerSocketPath(join(defaultDaemonSocketDir(), "worker-abc.sock"))).toBe(true);
 		expect(isWorkerSocketPath(join(defaultDaemonSocketDir(), "daemon.sock"))).toBe(false);
 		expect(isWorkerSocketPath("/tmp/worker-abc.sock")).toBe(false);
+	});
+});
+
+describe("tracked worker descriptors", () => {
+	const descriptor = {
+		supervisorSocketPath: "/tmp/supervisor.sock",
+		workerId: "worker-1",
+		pid: process.pid,
+		processStartId: "process-start",
+		socketPath: "/tmp/worker.sock",
+		recoveryJournalPath: "/tmp/worker.recovery.jsonl",
+	};
+
+	it.each([1, 2] as const)("recognizes version %i descriptors", (version) => {
+		expect(isTrackedWorkerDescriptor({ ...descriptor, version })).toBe(true);
+	});
+
+	it("rejects unknown descriptor versions", () => {
+		expect(isTrackedWorkerDescriptor({ ...descriptor, version: 3 })).toBe(false);
 	});
 });
 

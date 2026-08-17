@@ -3473,6 +3473,15 @@ export class DaemonSupervisor {
 			this.assertTelemetryAttachAllowed(ownedWorker, command.telemetryDisabled);
 			ownedWorker.launchEnv = command.launchEnv ?? ownedWorker.launchEnv;
 			if (!ownedWorker.client || ownedWorker.descriptor.lifecycle !== "ready") {
+				if (command.recoveryConfig) {
+					ownedWorker.transientCreateCommand = {
+						...ownedWorker.descriptor.createCommand,
+						config: command.recoveryConfig,
+						env: command.env,
+						launchEnv: command.launchEnv,
+						lifecycle: "client_owned",
+					};
+				}
 				if (!ownedWorker.launchEnv) {
 					throw new Error("Client-owned session recovery requires the owning client environment");
 				}

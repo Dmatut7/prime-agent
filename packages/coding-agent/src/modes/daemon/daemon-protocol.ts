@@ -158,6 +158,8 @@ export interface DaemonAttachClientMetadata {
 	resumeCursor?: DaemonResumeCursor;
 	/** Opt-out-only policy. A telemetry-enabled worker must reject this attach. */
 	telemetryDisabled?: true;
+	/** Fresh owner-supplied runtime context for recovering a client-owned worker. Never persisted. */
+	recoveryConfig?: AgentSessionRuntimeConfig;
 }
 
 /**

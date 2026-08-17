@@ -3119,6 +3119,72 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(seed).toHaveBeenCalledWith(activeSessionId, streamingMessage);
 	});
 
+	it("reconstructs a client-owned recovery command from fresh attach context", async () => {
+		const activeSessionId = "active-owned-recovery";
+		const worker = {
+			descriptor: {
+				workerId: "worker-owned-recovery",
+				ownerClientId: "client-1",
+				rootActiveSessionId: activeSessionId,
+				lifecycle: "failed",
+				consecutiveFailures: 1,
+				createCommand: { type: "create" as const, sessionPath: "/tmp/session.jsonl" },
+			},
+			summaries: new Map(),
+			intentionalStop: false,
+			stopRevision: 0,
+			launchEnv: undefined as Record<string, string> | undefined,
+			transientCreateCommand: undefined as Record<string, unknown> | undefined,
+		};
+		const client = {
+			id: "client-1",
+			capabilities: new Set<string>(),
+			supportsExtensionUi: false,
+			attachedActiveSessionIds: new Set<string>(),
+		};
+		const recoverWorker = vi.fn(async () => {
+			throw new Error("stop after reconstruction");
+		});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			clients: new Set([client]),
+			protocolClientIds: new WeakMap(),
+			persistWorker: vi.fn(),
+			recoverWorker,
+		}) as {
+			attachClient(
+				attachClient: typeof client,
+				command: {
+					type: "attach";
+					activeSessionId: string;
+					recoveryConfig: { cwd: string };
+					launchEnv: Record<string, string>;
+					env: Record<string, string>;
+				},
+			): Promise<unknown>;
+		};
+
+		await expect(
+			supervisor.attachClient(client, {
+				type: "attach",
+				activeSessionId,
+				recoveryConfig: { cwd: "/tmp/fresh-owner" },
+				launchEnv: { OWNER_SECRET: "fresh" },
+				env: { HERDR_PANE_ID: "pane-1" },
+			}),
+		).rejects.toThrow("stop after reconstruction");
+		expect(worker.transientCreateCommand).toEqual({
+			type: "create",
+			sessionPath: "/tmp/session.jsonl",
+			config: { cwd: "/tmp/fresh-owner" },
+			env: { HERDR_PANE_ID: "pane-1" },
+			launchEnv: { OWNER_SECRET: "fresh" },
+			lifecycle: "client_owned",
+		});
+		expect(worker.launchEnv).toEqual({ OWNER_SECRET: "fresh" });
+		expect(recoverWorker).toHaveBeenCalledWith(worker);
+	});
+
 	it("rejects an opted-out attach to a telemetry-enabled worker", async () => {
 		const activeSessionId = "active-telemetry-enabled";
 		const summary = {

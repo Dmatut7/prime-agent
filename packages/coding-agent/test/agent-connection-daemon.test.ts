@@ -713,6 +713,23 @@ describe("DaemonAgentConnection", () => {
 		});
 	});
 
+	it("supplies fresh runtime context when attaching an owned session", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const recoveryConfig = { cwd: "/tmp/fresh-owner" };
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-owned", {
+			ownedSession: true,
+			ownedSessionRecoveryConfig: recoveryConfig,
+		});
+
+		await connection.attach();
+
+		expect(fakeClient.requests[0]).toMatchObject({
+			type: "attach",
+			activeSessionId: "active-owned",
+			recoveryConfig,
+		});
+	});
+
 	it("forwards queueIfBusy for prompt admission", async () => {
 		const fakeClient = new FakeDaemonClient();
 		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");

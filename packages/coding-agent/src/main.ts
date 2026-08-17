@@ -968,6 +968,7 @@ async function createDaemonClientConnection(options: {
 				closeClientOnDispose: true,
 				sendClientEnv: true,
 				ownedSession: options.clientOwned,
+				ownedSessionRecoveryConfig: options.clientOwned ? options.config : undefined,
 				supportsExtensionUi: options.supportsExtensionUi,
 				recoverDaemon: () => ensureInteractiveDaemonRunning(options.socketPath),
 				telemetryDisabled: options.config.telemetryDisabled,
