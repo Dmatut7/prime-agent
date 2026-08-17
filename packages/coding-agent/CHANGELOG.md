@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Added correlated ACP completion metadata and prevented daemon recovery state from persisting runtime credentials or model configuration.
+- Fixed new top-level daemon sessions inheriting an RLM child depth from the supervisor process.
 
 ## [0.7.3] - 2026-08-17
 
