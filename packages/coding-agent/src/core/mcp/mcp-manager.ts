@@ -23,7 +23,8 @@ export interface McpManagerOptions {
 interface ResolvedIntegration {
 	server: string;
 	label: string;
-	url: string;
+	config: McpServerConfig;
+	url?: string;
 	usesOAuth: boolean;
 	bearerTokenEnvVar?: string;
 	enabled?: boolean;
@@ -65,20 +66,21 @@ export class McpManager {
 			integrations.set(entry.server, {
 				server: entry.server,
 				label: entry.label,
+				config: { type: "http", url: entry.url, oauth: true },
 				url: entry.url,
 				usesOAuth: entry.oauth?.kind === "oauth",
 			});
 		}
 		for (const [server, config] of Object.entries(this.getUserServers() ?? {})) {
-			if (config.type !== "http") continue; // stdio servers self-manage in Python
 			integrations.set(server, {
 				server,
 				label: server,
-				url: config.url,
-				usesOAuth: config.oauth === true,
-				bearerTokenEnvVar: config.bearerTokenEnvVar,
+				config,
+				url: config.type === "http" ? config.url : undefined,
+				usesOAuth: config.type === "http" && config.oauth === true,
+				bearerTokenEnvVar: config.type === "http" ? config.bearerTokenEnvVar : undefined,
 				enabled: config.enabled,
-				headers: config.headers,
+				headers: config.type === "http" ? config.headers : undefined,
 				userDeclared: true,
 			});
 		}
@@ -98,7 +100,7 @@ export class McpManager {
 	registerUserProviders(): void {
 		const current = new Set<string>();
 		for (const integration of this.integrations.values()) {
-			if (!integration.userDeclared) continue;
+			if (!integration.userDeclared || integration.config.type !== "http") continue;
 			const id = this.providerId(integration.server);
 			if (integration.usesOAuth) {
 				// Register pointing at the user's URL (overrides a catalog default too).
@@ -107,7 +109,7 @@ export class McpManager {
 					createMcpOAuthProvider({
 						server: integration.server,
 						label: integration.label,
-						url: integration.url,
+						url: integration.url!,
 					}),
 				);
 			} else if (getCatalogEntry(integration.server)) {
@@ -126,6 +128,8 @@ export class McpManager {
 	/** True when valid credentials exist for the integration (drives enablement). */
 	private isAuthed(integration: ResolvedIntegration): boolean {
 		if (integration.enabled === false) return false;
+		if (integration.config.type === "stdio") return true;
+		if (!integration.usesOAuth && !integration.bearerTokenEnvVar) return true;
 		if (integration.bearerTokenEnvVar && process.env[integration.bearerTokenEnvVar]?.trim()) {
 			return true;
 		}
@@ -171,12 +175,8 @@ export class McpManager {
 				const server = String(payload.server ?? "");
 				if (!server) throw new Error("mcp.config requires a server");
 				const integration = this.integrations.get(server);
-				if (!integration) return {};
-				const config: Record<string, unknown> = { url: integration.url };
-				if (integration.headers && Object.keys(integration.headers).length > 0) {
-					config.headers = integration.headers;
-				}
-				return config;
+				if (!integration?.userDeclared) return {};
+				return { ...integration.config };
 			},
 		};
 		// Only expose begin_login when an interactive login is actually wired, so the

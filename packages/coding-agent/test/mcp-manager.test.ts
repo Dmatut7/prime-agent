@@ -106,10 +106,13 @@ describe("McpManager", () => {
 		});
 		const handlers = manager.hostHandlers();
 		expect(await handlers["mcp.config"]({ server: "linear" })).toEqual({
+			type: "http",
 			url: "https://proxy.test/mcp",
+			oauth: true,
 			headers: { "X-Extra": "1" },
 		});
-		expect(await handlers["mcp.config"]({ server: "notion" })).toEqual({ url: "https://mcp.notion.com/mcp" });
+		// Catalog-only entries are reserved for their authored skills, not the generic API.
+		expect(await handlers["mcp.config"]({ server: "notion" })).toEqual({});
 	});
 
 	it("does not treat an oauth override of a catalog name as authed via the official stored cred", () => {
@@ -175,5 +178,18 @@ describe("McpManager", () => {
 		servers = {};
 		manager.refresh();
 		expect(getOAuthProvider("mcp:acme")).toBeUndefined();
+	});
+	it("serves user stdio configuration without resolving tagged environment values", async () => {
+		const config: McpServerConfig = {
+			type: "stdio",
+			command: "node",
+			args: ["server.js", "--raw"],
+			cwd: "/tmp/work",
+			env: { TOKEN: { env: "MCP_TOKEN" } },
+			enabledTools: ["raw.tool/name"],
+		};
+		const manager = new McpManager({ authStorage, getUserServers: () => ({ local: config }) });
+		expect(await manager.hostHandlers()["mcp.config"]({ server: "local" })).toEqual(config);
+		expect(manager.listStatus().find((status) => status.server === "local")?.enabled).toBe(true);
 	});
 });

@@ -500,6 +500,10 @@ describe("SettingsManager", () => {
 			expect(servers?.acme).toEqual({ type: "http", url: "https://global.acme/mcp", oauth: true });
 			// Project override replaces the shared entry.
 			expect(servers?.shared).toEqual({ type: "http", url: "https://project.shared/mcp" });
+			expect(manager.getGlobalMcpServers()).toEqual({
+				acme: { type: "http", url: "https://global.acme/mcp", oauth: true },
+				shared: { type: "http", url: "https://global.shared/mcp" },
+			});
 		});
 	});
 	describe("idle worker eviction", () => {

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added a pre-imported generic MCP API for persistent Streamable HTTP and stdio servers declared in user settings.
+
 ## [0.7.3] - 2026-08-17
 
 - Fixed assistant rendering when provider payloads contain null or sparse content blocks.

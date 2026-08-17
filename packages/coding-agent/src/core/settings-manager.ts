@@ -108,15 +108,21 @@ export type McpServerConfig =
 			enabled?: boolean;
 			enabledTools?: string[];
 			disabledTools?: string[];
+			startupTimeoutMs?: number;
+			callTimeoutMs?: number;
 	  }
 	| {
 			type: "stdio";
 			command: string;
 			args?: string[];
-			env?: Record<string, string>;
+			cwd?: string;
+			/** Environment variables resolved from the kernel environment. */
+			env?: Record<string, { env: string }>;
 			enabled?: boolean;
 			enabledTools?: string[];
 			disabledTools?: string[];
+			startupTimeoutMs?: number;
+			callTimeoutMs?: number;
 	  };
 
 export interface Settings {
@@ -1211,6 +1217,11 @@ export class SettingsManager {
 
 	getMcpServers(): Record<string, McpServerConfig> | undefined {
 		return this.settings.mcpServers;
+	}
+
+	/** MCP execution is intentionally restricted to user/global settings. */
+	getGlobalMcpServers(): Record<string, McpServerConfig> | undefined {
+		return structuredClone(this.globalSettings.mcpServers);
 	}
 
 	setEnabledModels(patterns: string[] | undefined): void {
