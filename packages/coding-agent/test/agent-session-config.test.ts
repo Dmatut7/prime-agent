@@ -192,5 +192,13 @@ describe("mergeAgentSessionRuntimeConfig", () => {
 			sessionDir: "/sessions",
 			telemetryDisabled: true,
 		});
+		expect(
+			durableAgentSessionRuntimeConfig({
+				cwd: 1,
+				agentDir: "/agent",
+				sessionDir: false,
+				telemetryDisabled: "yes",
+			} as unknown as AgentSessionRuntimeConfig),
+		).toEqual({ agentDir: "/agent" });
 	});
 });

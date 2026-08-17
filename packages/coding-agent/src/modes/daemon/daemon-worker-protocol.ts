@@ -128,14 +128,17 @@ export interface DaemonWorkerDescriptor {
 }
 
 export function durableDaemonWorkerDescriptor(descriptor: DaemonWorkerDescriptor): DaemonWorkerDescriptor {
-	const legacyCreateCommand = descriptor.createCommand as unknown as { config?: unknown };
-	const legacyConfig =
-		descriptor.version === 1 && typeof legacyCreateCommand.config === "object" && legacyCreateCommand.config !== null
-			? (legacyCreateCommand.config as Record<string, unknown>)
+	const versionOneCreateCommand = descriptor.createCommand as unknown as { config?: unknown };
+	const versionOneConfig =
+		descriptor.version === 1 &&
+		typeof versionOneCreateCommand.config === "object" &&
+		versionOneCreateCommand.config !== null
+			? (versionOneCreateCommand.config as Record<string, unknown>)
 			: undefined;
 	const sessionDir =
-		descriptor.sessionDir ?? (typeof legacyConfig?.sessionDir === "string" ? legacyConfig.sessionDir : undefined);
-	const telemetryDisabled = descriptor.telemetryDisabled === true || legacyConfig?.telemetryDisabled === true;
+		descriptor.sessionDir ??
+		(typeof versionOneConfig?.sessionDir === "string" ? versionOneConfig.sessionDir : undefined);
+	const telemetryDisabled = descriptor.telemetryDisabled === true || versionOneConfig?.telemetryDisabled === true;
 	return {
 		version: 2,
 		workerId: descriptor.workerId,

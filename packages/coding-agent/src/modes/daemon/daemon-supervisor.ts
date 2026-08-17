@@ -2121,7 +2121,7 @@ export class DaemonSupervisor {
 			}
 			const identity = this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId);
 			if (identity === "current") {
-				if (!freshCreate || worker.descriptor.ownerClientId || !worker.descriptor.processStartId) return false;
+				if (!freshCreate || !worker.descriptor.processStartId) return false;
 				await this.stopWorker(worker, true, true);
 				return true;
 			}

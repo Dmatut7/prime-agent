@@ -55,10 +55,10 @@ export type DurableAgentSessionRuntimeConfig = Pick<
 /** Only non-secret host settings needed to locate and govern durable daemon state. */
 export function durableAgentSessionRuntimeConfig(config: AgentSessionRuntimeConfig): DurableAgentSessionRuntimeConfig {
 	return {
-		...(config.cwd !== undefined ? { cwd: config.cwd } : {}),
-		...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),
-		...(config.sessionDir !== undefined ? { sessionDir: config.sessionDir } : {}),
-		...(config.telemetryDisabled ? { telemetryDisabled: true as const } : {}),
+		...(typeof config.cwd === "string" ? { cwd: config.cwd } : {}),
+		...(typeof config.agentDir === "string" ? { agentDir: config.agentDir } : {}),
+		...(typeof config.sessionDir === "string" ? { sessionDir: config.sessionDir } : {}),
+		...(config.telemetryDisabled === true ? { telemetryDisabled: true as const } : {}),
 	};
 }
 

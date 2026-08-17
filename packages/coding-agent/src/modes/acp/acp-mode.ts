@@ -135,7 +135,6 @@ class AcpUpdateProducer {
 	private readonly childOriginTurnIds = new Map<string, number>();
 	private readonly terminalChildOriginTurns = new Set<number>();
 	private readonly responseCommittedTurns = new Set<number>();
-	private readonly sealedPromptTurns = new Set<number>();
 	private readonly admissionReady: Promise<void>;
 	private releaseAdmission!: () => void;
 	private admissionOpen = false;
@@ -175,7 +174,6 @@ class AcpUpdateProducer {
 	finishPrompt(turnId: number): void {
 		if (this.activePromptTurnId === turnId) this.activePromptTurnId = 0;
 		this.responseCommittedTurns.delete(turnId);
-		this.sealedPromptTurns.delete(turnId);
 		if (![...this.childOriginTurnIds.values()].some((originTurnId) => originTurnId === turnId)) {
 			this.terminalChildOriginTurns.delete(turnId);
 		}
@@ -196,15 +194,10 @@ class AcpUpdateProducer {
 
 	sealTerminal(turnId: number): void {
 		this.commitResponse(turnId);
-		this.sealedPromptTurns.add(turnId);
 		if ([...this.childOriginTurnIds.values()].some((originTurnId) => originTurnId === turnId)) {
 			this.terminalChildOriginTurns.add(turnId);
 		}
 		if (this.activePromptTurnId === turnId) this.activePromptTurnId = 0;
-	}
-
-	isTerminalSealed(turnId: number): boolean {
-		return this.sealedPromptTurns.has(turnId);
 	}
 
 	turnForEvent(event: AgentConnectionSessionEvent): number {
