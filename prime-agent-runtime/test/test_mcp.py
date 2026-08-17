@@ -13,7 +13,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from rlm import mcp
+from mcp.types import CallToolResult, TextContent
+from rlm import McpToolError, mcp
+from rlm.mcp_base import _parse_result
 
 
 _STDIO_FIXTURE = r"""import asyncio, json, os, sys
@@ -85,6 +87,14 @@ class McpRegistryTest(unittest.TestCase):
         tool = SimpleNamespace(name="raw.tool/name", description="raw", input_schema=schema)
         generation = self.generation({"type": "http"}, [tool])
         self.assertEqual(generation.tools["raw.tool/name"]["inputSchema"], schema)
+
+    def test_sdk_result_aliases_preserve_structured_output_and_errors(self):
+        structured = CallToolResult(content=[], structuredContent={})
+        self.assertEqual(_parse_result(structured), {})
+
+        failed = CallToolResult(content=[TextContent(type="text", text="redacted failure")], isError=True)
+        with self.assertRaisesRegex(McpToolError, "redacted failure"):
+            _parse_result(failed)
 
     def test_enabled_then_disabled_filters_listing_and_dispatch(self):
         tools = [SimpleNamespace(name=name, description="", inputSchema={}) for name in ("yes", "denied", "other")]
@@ -233,7 +243,7 @@ class McpRegistryTest(unittest.TestCase):
 
             tools, result = run(scenario())
             self.assertEqual(tools, ["http/raw.tool"])
-            self.assertEqual(json.loads(result), {"value": "ok"})
+            self.assertEqual(result, {"value": "ok"})
         finally:
             process.terminate()
             try:
