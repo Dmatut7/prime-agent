@@ -29,6 +29,10 @@ interface ClientHarness {
 	close: () => void;
 }
 
+interface ClientHarnessOptions {
+	beforeAcpUpdatePublish?: (update: Record<string, unknown>) => void | Promise<void>;
+}
+
 function fakeAcpConnection(
 	options: {
 		initialSnapshot?: () => Promise<any>;
@@ -95,16 +99,36 @@ function fakeAcpConnection(
 	};
 }
 
-function connectAcpClient(connection: any, options: Record<string, unknown> = {}): ClientHarness {
+function acpUpdatePhase(update: Record<string, unknown>): unknown {
+	const metadata = update._meta as Record<string, unknown> | undefined;
+	const primeMetadata = metadata?.[PRIME_AGENT_META_NAMESPACE] as Record<string, unknown> | undefined;
+	return primeMetadata?.phase;
+}
+
+function connectAcpClient(connection: any, options: ClientHarnessOptions = {}): ClientHarness {
 	// Two web streams crossed over: agent's stdout is the client's stdin.
 	const toAgent = new TransformStream<Uint8Array, Uint8Array>();
 	const toClient = new TransformStream<Uint8Array, Uint8Array>();
 
+	const originalNotify = acp.AgentContext.prototype.notify;
+	const publishSpy = options.beforeAcpUpdatePublish
+		? vi.spyOn(acp.AgentContext.prototype, "notify").mockImplementation(async function (
+				this: acp.AgentContext,
+				method: string,
+				params?: unknown,
+			) {
+				if (method === acp.methods.client.session.update) {
+					const update = (params as { update: Record<string, unknown> }).update;
+					await options.beforeAcpUpdatePublish?.(update);
+				}
+				return originalNotify.call(this, method, params);
+			})
+		: undefined;
 	const agentStream = acp.ndJsonStream(toClient.writable, toAgent.readable);
 	const clientStream = acp.ndJsonStream(toAgent.writable, toClient.readable);
 
 	const updates: any[] = [];
-	void runAcpModeWithConnection(connection, { stream: agentStream, ...options } as any);
+	void runAcpModeWithConnection(connection, { stream: agentStream });
 
 	const handle = acp
 		.client({ name: "test-client" })
@@ -114,7 +138,14 @@ function connectAcpClient(connection: any, options: Record<string, unknown> = {}
 		.connect(clientStream);
 
 	// connect() yields a handle whose `agent` proxy is the outbound call surface.
-	return { client: handle.agent, updates, close: () => handle.close() };
+	return {
+		client: handle.agent,
+		updates,
+		close: () => {
+			publishSpy?.mockRestore();
+			handle.close();
+		},
+	};
 }
 
 describe("ACP mode end to end", () => {
@@ -377,26 +408,6 @@ describe("ACP mode end to end", () => {
 		close();
 	});
 
-	it("recovers the update queue after a failed publish hook", async () => {
-		let rejectOnce = true;
-		const connection = fakeAcpConnection();
-		const { client, updates, close } = connectAcpClient(connection, {
-			beforeAcpUpdatePublish: () => {
-				if (!rejectOnce) return;
-				rejectOnce = false;
-				throw new Error("publish hook failed");
-			},
-		});
-		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
-		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
-		connection.emitHeartbeat();
-		connection.emitHeartbeat();
-		await vi.waitFor(() => expect(updates).toHaveLength(1));
-		expect(updates[0].update?._meta?.[PRIME_AGENT_META_NAMESPACE]).toMatchObject({ eventSequence: 2 });
-		await expect(client.request("session/close", { sessionId: session.sessionId })).resolves.toEqual({});
-		close();
-	});
-
 	it("settles queued updates before close resolves without a post-close notification", async () => {
 		let entered!: () => void;
 		let release!: () => void;
@@ -556,8 +567,8 @@ describe("ACP mode end to end", () => {
 			}),
 		});
 		const { client, updates, close } = connectAcpClient(connection, {
-			beforeAcpUpdatePublish: async (update: any) => {
-				if (update._meta?.[PRIME_AGENT_META_NAMESPACE]?.phase === "responseBoundary") {
+			beforeAcpUpdatePublish: async (update) => {
+				if (acpUpdatePhase(update) === "responseBoundary") {
 					entered();
 					await releaseBoundary;
 				}
@@ -592,8 +603,8 @@ describe("ACP mode end to end", () => {
 		});
 		const connection = fakeAcpConnection();
 		const { client, updates, close } = connectAcpClient(connection, {
-			beforeAcpUpdatePublish: async (update: any) => {
-				if (update._meta?.[PRIME_AGENT_META_NAMESPACE]?.phase === "responseBoundary") {
+			beforeAcpUpdatePublish: async (update) => {
+				if (acpUpdatePhase(update) === "responseBoundary") {
 					entered();
 					await releaseBoundary;
 				}

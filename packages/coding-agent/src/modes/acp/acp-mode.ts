@@ -110,7 +110,6 @@ export interface AcpModeOptions {
 	stream?: ReturnType<typeof acp.ndJsonStream>;
 	/** Skip claiming stdout when the caller supplies its own transport. */
 	ownStdout?: boolean;
-	beforeAcpUpdatePublish?: (update: Record<string, unknown>) => Promise<void> | void;
 }
 
 interface AcpSessionEntry {
@@ -145,7 +144,6 @@ class AcpUpdateProducer {
 	constructor(
 		private readonly sessionId: string,
 		private readonly client: { notify(method: unknown, params: unknown): Promise<unknown> },
-		private readonly beforePublish?: (update: Record<string, unknown>) => Promise<void> | void,
 	) {
 		// Subscribe before the initial snapshot, but do not let that subscription
 		// publish a session-bound update before session/new has replied.
@@ -252,14 +250,13 @@ class AcpUpdateProducer {
 				},
 			},
 		};
-		// Keep the chain alive after a failed hook or notification, while preserving
+		// Keep the chain alive after a failed notification, while preserving
 		// the order of every later notification and allowing callers to await its drain.
 		let published = false;
 		this.tail = this.tail.then(async () => {
 			try {
 				await this.admissionReady;
 				if (!this.admissionOpen) return;
-				await this.beforePublish?.(correlatedUpdate);
 				await this.client.notify(acp.methods.client.session.update, {
 					sessionId: this.sessionId,
 					update: correlatedUpdate,
@@ -564,7 +561,7 @@ export async function runAcpModeWithConnection(
 				// Install the listener before fetching the snapshot. Child updates can arrive
 				// while the snapshot request is in flight; the connection remains the
 				// authoritative source used when quiescence is emitted below.
-				const producer = new AcpUpdateProducer(sessionId, ctx.client, options.beforeAcpUpdatePublish);
+				const producer = new AcpUpdateProducer(sessionId, ctx.client);
 				const entry: AcpSessionEntry = { id: sessionId, abort: undefined, unsubscribe: undefined, producer };
 				// Subscribe for the session lifetime, not per prompt turn: prime-agent
 				// subagents are fire-and-forget and keep reporting after the spawning turn
