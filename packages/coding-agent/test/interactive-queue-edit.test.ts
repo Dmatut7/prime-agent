@@ -435,6 +435,7 @@ describe("interactive queued-message editing", () => {
 describe("interactive interrupt preserves the queue", () => {
 	it("aborts without clearing or restoring queued messages", () => {
 		const abort = vi.fn(async () => {});
+		const resumeQueuedWork = vi.fn(async () => {});
 		const harness = {
 			traceUploadAllAbortController: undefined,
 			sideQuestionEvent: undefined,
@@ -442,12 +443,36 @@ describe("interactive interrupt preserves the queue", () => {
 			isAgentCompacting: () => false,
 			isBashRunning: () => false,
 			isAgentStreaming: () => true,
-			agentConnection: { abort },
+			shouldSuppressFeatureHint: () => false,
+			agentConnection: { abort, resumeQueuedWork },
 			showError: vi.fn(),
 			editor: { getText: () => "", setText: vi.fn() },
 		};
 		(proto.interruptOrClearInput as (this: unknown) => void).call(harness);
 		expect(abort).toHaveBeenCalledOnce();
+		expect(resumeQueuedWork).not.toHaveBeenCalled();
+		expect(harness.editor.setText).not.toHaveBeenCalled();
+	});
+
+	it("resumes queued work after abort when messages are already queued", async () => {
+		const abort = vi.fn(async () => {});
+		const resumeQueuedWork = vi.fn(async () => {});
+		const harness = {
+			traceUploadAllAbortController: undefined,
+			sideQuestionEvent: undefined,
+			getRetryAttempt: () => 0,
+			isAgentCompacting: () => false,
+			isBashRunning: () => false,
+			isAgentStreaming: () => true,
+			shouldSuppressFeatureHint: () => true,
+			agentConnection: { abort, resumeQueuedWork },
+			showError: vi.fn(),
+			editor: { getText: () => "", setText: vi.fn() },
+		};
+		(proto.interruptOrClearInput as (this: unknown) => void).call(harness);
+		expect(abort).toHaveBeenCalledOnce();
+		await Promise.resolve();
+		expect(resumeQueuedWork).toHaveBeenCalledOnce();
 		expect(harness.editor.setText).not.toHaveBeenCalled();
 	});
 });

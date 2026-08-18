@@ -905,6 +905,15 @@ export class DaemonAgentConnection implements AgentConnection {
 		await this.requestOk({ type: "abort", activeSessionId: this.activeSessionId });
 	}
 
+	async resumeQueuedWork(): Promise<void> {
+		try {
+			await this.requestOk({ type: "resume_queue", activeSessionId: this.activeSessionId });
+		} catch (error) {
+			if (error instanceof Error && error.message.includes("No queued work to resume")) return;
+			throw error;
+		}
+	}
+
 	async cancelRlmChild(childId: string): Promise<boolean> {
 		try {
 			const result = await this.requestData<{ cancelled: boolean }>({

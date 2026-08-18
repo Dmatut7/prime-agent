@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed queued steering and follow-up messages staying parked after Ctrl+C: an interrupt now resumes the session input pump instead of waiting for a later dummy submit.
 - Fixed new top-level daemon sessions inheriting an RLM child depth from the supervisor process.
 
 ## [0.7.3] - 2026-08-17

@@ -698,6 +698,8 @@ export interface AgentConnection {
 	followUp(message: string, images?: ImageContent[]): Promise<void>;
 	/** Request cancellation of the active turn and return once the request is accepted. */
 	abort(): Promise<void>;
+	/** Unpause the session input pump so queued messages can deliver after an interrupt. */
+	resumeQueuedWork(): Promise<void>;
 	cancelRlmChild(childId: string): Promise<boolean>;
 	waitForIdle(): Promise<void>;
 	waitForHeadlessCompletion(): Promise<AgentAutonomousStatus>;

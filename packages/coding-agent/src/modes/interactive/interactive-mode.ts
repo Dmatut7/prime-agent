@@ -6737,11 +6737,13 @@ export class InteractiveMode {
 			void this.agentConnection.abortBash();
 		}
 		if (this.isAgentStreaming()) {
-			// The queue is preserved server-side; draining resumes on the next
-			// submit or queued-message edit.
-			void this.agentConnection.abort().catch((error) => {
-				this.showError(error instanceof Error ? error.message : String(error));
-			});
+			const shouldResumeQueue = this.shouldSuppressFeatureHint();
+			void this.agentConnection
+				.abort()
+				.then(() => (shouldResumeQueue ? this.agentConnection.resumeQueuedWork() : undefined))
+				.catch((error) => {
+					this.showError(error instanceof Error ? error.message : String(error));
+				});
 		}
 	}
 
