@@ -1642,6 +1642,35 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(() => supervisor.reuseWorkerForCreate(worker, undefined, "/tmp/failed.jsonl")).toThrow(/failed worker/);
 	});
 
+	it("ignores conflicting paths on workers unrelated to a session lookup", () => {
+		const unrelated = {
+			descriptor: {
+				workerId: "unrelated",
+				sessionFile: "/tmp/unrelated-a.jsonl",
+				createCommand: { type: "create" as const, sessionPath: "/tmp/unrelated-b.jsonl" },
+			},
+			summaries: new Map(),
+		};
+		const target = {
+			descriptor: {
+				workerId: "target",
+				sessionFile: "/tmp/target.jsonl",
+				createCommand: { type: "create" as const, sessionPath: "/tmp/target.jsonl" },
+			},
+			summaries: new Map(),
+		};
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([
+				[unrelated.descriptor.workerId, unrelated],
+				[target.descriptor.workerId, target],
+			]),
+		}) as {
+			findWorkerBySessionFile(sessionFile: string): typeof target | undefined;
+		};
+
+		expect(supervisor.findWorkerBySessionFile("/tmp/target.jsonl")).toBe(target);
+	});
+
 	it("reclaims a dead failed resident so a fresh create can reopen its session", async () => {
 		const worker = {
 			descriptor: { workerId: "failed-resident", pid: 42, lifecycle: "failed" as const },

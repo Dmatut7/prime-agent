@@ -3424,22 +3424,20 @@ export class DaemonSupervisor {
 		const target = canonicalSessionPath(sessionFile);
 		const matches = new Set<ResidentWorker>();
 		for (const worker of this.workers.values()) {
-			for (const summary of worker.summaries.values()) {
-				if (summary.sessionFile && canonicalSessionPath(summary.sessionFile) === target) {
-					matches.add(worker);
-				}
+			const summaryMatches = [...worker.summaries.values()].some(
+				(summary) => summary.sessionFile && canonicalSessionPath(summary.sessionFile) === target,
+			);
+			const descriptorPath = worker.descriptor.sessionFile
+				? canonicalSessionPath(worker.descriptor.sessionFile)
+				: undefined;
+			const configuredPath = worker.descriptor.createCommand.sessionPath
+				? canonicalSessionPath(worker.descriptor.createCommand.sessionPath)
+				: undefined;
+			if (!summaryMatches && descriptorPath !== target && configuredPath !== target) continue;
+			if (descriptorPath && configuredPath && descriptorPath !== configuredPath) {
+				throw new Error(`Conflicting resident session paths for worker ${worker.descriptor.workerId}`);
 			}
-			const descriptorSessionFile = worker.descriptor.sessionFile;
-			const configuredSessionPath = worker.descriptor.createCommand.sessionPath;
-			if (descriptorSessionFile && configuredSessionPath) {
-				if (canonicalSessionPath(descriptorSessionFile) !== canonicalSessionPath(configuredSessionPath)) {
-					throw new Error(`Conflicting resident session paths for worker ${worker.descriptor.workerId}`);
-				}
-			}
-			const authoritativePath = descriptorSessionFile ?? configuredSessionPath;
-			if (authoritativePath && canonicalSessionPath(authoritativePath) === target) {
-				matches.add(worker);
-			}
+			matches.add(worker);
 		}
 		if (matches.size > 1) {
 			throw new Error(`Ambiguous resident session path "${sessionFile}"`);
