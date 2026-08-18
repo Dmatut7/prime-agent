@@ -5373,6 +5373,9 @@ export class InteractiveMode {
 				this.featureHintRunPending = this.getRetryAttempt() === 0;
 				this.resetPendingToolState();
 				this.renderRecap();
+				// The queued-messages footer offers Enter-to-send only while idle, so
+				// refresh it on the idle -> streaming transition too.
+				this.updatePendingMessagesDisplay();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
