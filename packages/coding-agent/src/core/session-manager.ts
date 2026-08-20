@@ -282,7 +282,12 @@ export function getSessionArtifactsRoot(sessionDir: string): string {
 	return resolve(dirname(sessionDir), "session-artifacts");
 }
 
-export function getSessionArtifactPath(sessionDir: string, sessionId: string, create = false): string {
+export function getSessionArtifactPath(
+	sessionDir: string,
+	sessionId: string,
+	create = false,
+	enforcePrivateMode = true,
+): string {
 	assertValidSessionId(sessionId);
 	const artifactRoot = getSessionArtifactsRoot(sessionDir);
 	const artifactPath = resolve(artifactRoot, sessionId);
@@ -297,7 +302,7 @@ export function getSessionArtifactPath(sessionDir: string, sessionId: string, cr
 		if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) {
 			throw new Error(`Refusing to use non-directory private path: ${artifactRoot}`);
 		}
-		if (process.platform !== "win32" && (rootStats.mode & 0o777) !== 0o700) {
+		if (enforcePrivateMode && process.platform !== "win32" && (rootStats.mode & 0o777) !== 0o700) {
 			throw new Error(`Refusing to read non-private session artifact directory: ${artifactRoot}`);
 		}
 		if (!existsSync(artifactPath)) return artifactPath;
@@ -305,7 +310,7 @@ export function getSessionArtifactPath(sessionDir: string, sessionId: string, cr
 		if (artifactStats.isSymbolicLink() || !artifactStats.isDirectory()) {
 			throw new Error(`Refusing to use non-directory private path: ${artifactPath}`);
 		}
-		if (process.platform !== "win32" && (artifactStats.mode & 0o777) !== 0o700) {
+		if (enforcePrivateMode && process.platform !== "win32" && (artifactStats.mode & 0o777) !== 0o700) {
 			throw new Error(`Refusing to read non-private session artifact directory: ${artifactPath}`);
 		}
 		const canonicalRoot = realpathSync(artifactRoot);
@@ -1236,6 +1241,10 @@ export class SessionManager {
 
 		if (sessionFile) {
 			this.setSessionFile(sessionFile, preloadedEntries);
+		} else if (preloadedEntries) {
+			this.fileEntries = preloadedEntries;
+			this.sessionId = (preloadedEntries[0] as SessionHeader).id;
+			this._buildIndex();
 		} else {
 			this.newSession();
 		}
@@ -1405,7 +1414,7 @@ export class SessionManager {
 		};
 	}
 
-	isPersisted(): boolean {
+	allowsPersistence(): boolean {
 		return this.persist;
 	}
 
@@ -1426,34 +1435,39 @@ export class SessionManager {
 	}
 
 	materializeSessionFile(sessionDir?: string): string {
-		if (this.sessionFile) {
-			return this.sessionFile;
-		}
+		if (this.sessionFile) return this.sessionFile;
+		const target = this.writeCheckpointFile(sessionDir);
+		this.sessionDir = dirname(target);
+		this.sessionFile = target;
+		this.ownsSessionDir = true;
+		this.persist = true;
+		this.flushed = true;
+		this._notifyPersistListeners();
+		return target;
+	}
+
+	writeCheckpointFile(sessionDir?: string): string {
+		if (this.sessionFile) return this.sessionFile;
 		const dir = sessionDir ?? (this.sessionDir || getDefaultSessionDir(this.cwd));
 		ensurePrivateDirectory(dir);
-		const previousHeader = this.getHeader();
 		const target = createUniqueSessionFileTarget(dir);
-		this.sessionDir = dir;
-		this.ownsSessionDir = true;
-		this.sessionId = target.sessionId;
-		this.sessionFile = target.sessionFile;
-		this.persist = true;
-		const timestamp = new Date().toISOString();
-		const git = captureGitContext(this.cwd) ?? undefined;
-		const header: SessionHeader = {
+		const header = this.getHeader();
+		const checkpointHeader: SessionHeader = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
 			id: this.sessionId,
-			timestamp,
+			timestamp: new Date().toISOString(),
 			cwd: this.cwd,
-			parentSession: previousHeader?.parentSession,
-			rlmDepth: resolveSessionRlmDepth(previousHeader ?? {}, target.sessionFile),
-			git,
+			parentSession: header?.parentSession,
+			rlmDepth: resolveSessionRlmDepth(header ?? {}, target.sessionFile),
+			git: captureGitContext(this.cwd) ?? undefined,
 		};
-		this.fileEntries = [header, ...this.getEntries()];
-		this._rewriteFile();
-		this.flushed = true;
-		return this.sessionFile;
+		const checkpointEntries = [checkpointHeader, ...this.getEntries()];
+		function* serializedEntries(): Iterable<string> {
+			for (const entry of checkpointEntries) yield `${JSON.stringify(entry)}\n`;
+		}
+		writePrivateFileAtomicLines(target.sessionFile, serializedEntries());
+		return target.sessionFile;
 	}
 
 	getSessionArtifactDir(options: { create?: boolean } = {}): string | undefined {
@@ -2103,6 +2117,20 @@ export class SessionManager {
 		return new SessionManager(cwd ?? process.cwd(), dir, path, true, entries, sessionDir !== undefined);
 	}
 
+	static async openInMemoryAsync(path: string, sessionDir?: string, cwdOverride?: string): Promise<SessionManager> {
+		const entries = await loadEntriesFromFileAsync(path);
+		if (entries.length === 0) throw new Error(`Session file is empty or invalid: ${path}`);
+		migrateToCurrentVersion(entries);
+		const cwd = cwdOverride ?? (entries[0] as SessionHeader).cwd;
+		const dir = sessionDir ?? resolve(path, "..");
+		return new SessionManager(cwd ?? process.cwd(), dir, undefined, false, entries);
+	}
+
+	/**
+	 * Continue the most recent session, or create new if none.
+	 * @param cwd Working directory
+	 * @param sessionDir Optional session directory. If omitted, uses the configured session root.
+	 */
 	static continueRecent(cwd: string, sessionDir?: string): SessionManager {
 		const dir = sessionDir ?? getDefaultSessionDir(cwd);
 		const mostRecent = findMostRecentSessionForCwd(dir, cwd);
