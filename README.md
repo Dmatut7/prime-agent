@@ -52,6 +52,8 @@ Prime Agent is an open-source coding and research agent for general and long-run
 | 每帧重拼整份 transcript、输入框每行重排 | 没变的组件不拼接；打字只重排当前行 | 12 行输入框 60fps 仅切字就要 1.1–2.5ms |
 | 正在跑的会话每次整文件重读（可到几十 MB） | 只扫新增字节；文件被整份改写才全量重读 | 活会话不再每次从文件头扫到尾 |
 | 刷新压住并发后，仍按 token 往 socket 推全量摘要 | 流式刷新加间隔；名单没变不重发；ledger 没变不重放；工具参数没变不拆面板 | supervisor 不再按 token 做 GC 和拷缓冲 |
+| 流式刷新仍把每个会话正在生成的整段助手消息塞进 list | 协商能力后，流式刷新和 agents 列表轮询不再带这条消息；已缓存的不丢 | supervisor 不再为每个 token 序列化数 MB 的 JSON |
+| 同一事件游标上两次快照共用一个 id，字节不同被当成损坏 | 每次传输单独编号，不再用游标当身份 | worker 不再因此进入 recovering；Token/上下文栏能读到状态（[#1229](https://github.com/PrimeIntellect-ai/prime-agent/issues/1229)） |
 
 官方 `install.sh` 装的还是没有这些改动的发布版。要跑本 fork：
 
