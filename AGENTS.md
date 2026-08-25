@@ -257,3 +257,33 @@ git pull --rebase && git push
 ### User override
 
 If the user instructions conflict with rules set out here, ask for confirmation that they want to override the rules. Only then execute their instructions.
+
+## Cursor Cloud specific instructions
+
+The startup update script runs `npm ci`. System-level prerequisites (the `canvas`
+native build deps `libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev`,
+plus `ripgrep`, `fd-find` linked as `fd`, `zstd`, and the `uv` Python launcher on PATH)
+are baked into the VM snapshot, not reinstalled per boot. Node comes from nvm and
+satisfies the `>=22.8.0` engine requirement.
+
+Non-obvious gotchas:
+
+- Running the app from source (`./prime-agent.sh`) needs the workspace library
+  packages built first. The `coding-agent` CLI runs via `tsx`, but it imports
+  `@earendil-works/pi-ai`, `pi-agent-core`, and `pi-tui` as their built `dist/`
+  output. After a fresh `npm ci` (which does not build), run `npm run build` from
+  the repo root, or build just the libs with
+  `cd packages/<ai|agent|tui> && ../../node_modules/.bin/tsgo -p tsconfig.build.json`.
+  Without this you get `ERR_MODULE_NOT_FOUND` for `pi-agent-core/dist/index.js`.
+- The IPython control kernel is bootstrapped by `uv` on first use (one-time ~30s).
+  Force it with `cd packages/coding-agent && ../../node_modules/.bin/tsx src/core/kernel/bootstrap-cli.ts`.
+  The `coding-agent` test suite requires `uv`.
+- Running the agent end-to-end requires an LLM provider: an API key env var
+  (e.g. `ANTHROPIC_API_KEY`, `PRIME_API_KEY`) or an interactive `/login`. With no
+  credentials the TUI only reaches the "login with Prime Intellect" screen.
+  Local Ollama models are not a viable substitute here: the single-`ipython`-tool
+  RLM harness needs a strong tool-calling model, and small local models
+  (llama3.2:3b, qwen2.5-coder:7b) emit malformed/hallucinated tool calls.
+- Lint/format/typecheck: `npm run check` from the repo root (does not run tests).
+- Tests: run per package from the package root (`npm test`); see the Commands
+  section above for the focused single-file vitest invocation.
