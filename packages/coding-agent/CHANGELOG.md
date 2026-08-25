@@ -4,6 +4,7 @@
 
 - Fixed starting a second interactive session when another terminal already had Prime Agent open, by keeping worker identity checks independent of the new terminal's locale and home environment.
 - Fixed new top-level daemon sessions inheriting an RLM child depth from the supervisor process.
+- Changed the default Cloudflare AI Gateway model to `claude-sonnet-4.5` after the generated catalog dropped `workers-ai/@cf/...` gateway mirrors.
 
 ## [0.7.3] - 2026-08-17
 

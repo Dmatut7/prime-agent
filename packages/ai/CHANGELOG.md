@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Refreshed the generated model catalog from live provider catalogs after models.dev rescoped `cloudflare-ai-gateway` away from `workers-ai/@cf/...` mirrors; Cloudflare-hosted models remain under `cloudflare-workers-ai`.
+
 ## [0.7.3] - 2026-08-17
 
 - Added provider-derived reasoning levels for OpenRouter and Prime Inference models, including sparse, mandatory, toggle-only, and explicit-off capabilities.
