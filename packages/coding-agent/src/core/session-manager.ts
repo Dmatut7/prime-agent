@@ -19,7 +19,7 @@ import { readdir, readFile, stat } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { v7 as uuidv7 } from "uuid";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
-import { readFirstLineSync, readLinesAsBuffers } from "../utils/file-lines.js";
+import { readFileLines, readFirstLineSync, readLinesAsBuffers } from "../utils/file-lines.js";
 import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
 import {
 	type BashExecutionMessage,
@@ -917,14 +917,39 @@ function extractOversizedMessageSummary(line: string): {
 	};
 }
 
+/**
+ * Everything a scan accumulates, so a later scan of the same file can pick up
+ * where this one stopped instead of starting over. Every field either only ever
+ * grows (counts, search text), keeps the newest value (name, state, status), or
+ * is fixed by the first line (header, first message) — which is what makes a
+ * resumed scan equivalent to a full one.
+ */
+interface SessionScanState {
+	header: SessionHeader;
+	messageCount: number;
+	firstMessage: string;
+	allMessagesText: string;
+	name: string | undefined;
+	state: SessionState | undefined;
+	agentStatus: AgentStatus | undefined;
+	lastActivityTime: number | undefined;
+	/** Byte offset just past the last newline-terminated line consumed. */
+	offset: number;
+}
+
 interface SessionInfoCacheEntry {
 	size: number;
 	mtimeMs: number;
+	/** Distinguishes an append from a whole-file rewrite, which renames a new inode into place. */
+	ino: number;
 	info: SessionInfo | null;
+	scan?: SessionScanState;
 }
 
-// Session files are append-only, so an unchanged (size, mtimeMs) means identical
-// content: cache list metadata and rescan only files that changed.
+// An unchanged (size, mtimeMs) means identical content, so list metadata is
+// served straight from the cache. A live session appends on every message, so
+// that check always misses for exactly the sessions asked about most; the
+// retained scan state lets those reads cover only the appended bytes.
 const sessionInfoCache = new Map<string, SessionInfoCacheEntry>();
 
 export async function readSessionInfo(filePath: string): Promise<SessionInfo | null> {
@@ -935,27 +960,51 @@ export async function readSessionInfo(filePath: string): Promise<SessionInfo | n
 		return null;
 	}
 	const cached = sessionInfoCache.get(filePath);
-	if (cached && cached.size === stats.size && cached.mtimeMs === stats.mtimeMs) {
+	if (cached && cached.size === stats.size && cached.mtimeMs === stats.mtimeMs && cached.ino === stats.ino) {
 		return cached.info;
 	}
-	const info = await scanSessionInfo(filePath, stats);
-	sessionInfoCache.set(filePath, { size: stats.size, mtimeMs: stats.mtimeMs, info });
-	return info;
+	// Resume only on a plain append to the same file: same inode, grown, and the
+	// previous stopping point still within it. A rewrite renames a fresh inode
+	// over the path, and anything else falls back to a full scan.
+	const resumable =
+		cached?.scan !== undefined &&
+		cached.ino === stats.ino &&
+		stats.size > cached.size &&
+		cached.scan.offset <= stats.size
+			? cached.scan
+			: undefined;
+	const scanned = await scanSessionInfo(filePath, stats, resumable);
+	sessionInfoCache.set(filePath, {
+		size: stats.size,
+		mtimeMs: stats.mtimeMs,
+		ino: stats.ino,
+		info: scanned.info,
+		...(scanned.scan ? { scan: scanned.scan } : {}),
+	});
+	return scanned.info;
 }
 
-async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeof stat>>): Promise<SessionInfo | null> {
+async function scanSessionInfo(
+	filePath: string,
+	stats: Awaited<ReturnType<typeof stat>>,
+	resume?: SessionScanState,
+): Promise<{ info: SessionInfo | null; scan?: SessionScanState }> {
 	try {
-		let header: SessionHeader | undefined;
-		let messageCount = 0;
-		let firstMessage = "";
-		let allMessagesText = "";
-		let name: string | undefined;
-		let state: SessionState | undefined;
-		let agentStatus: AgentStatus | undefined;
-		let lastActivityTime: number | undefined;
+		let header: SessionHeader | undefined = resume?.header;
+		let messageCount = resume?.messageCount ?? 0;
+		let firstMessage = resume?.firstMessage ?? "";
+		let allMessagesText = resume?.allMessagesText ?? "";
+		let name: string | undefined = resume?.name;
+		let state: SessionState | undefined = resume?.state;
+		let agentStatus: AgentStatus | undefined = resume?.agentStatus;
+		let lastActivityTime: number | undefined = resume?.lastActivityTime;
+		let offset = resume?.offset ?? 0;
 
-		for await (const lineBuffer of readLinesAsBuffers(filePath)) {
-			const line = lineBuffer.toString("utf8");
+		for await (const fileLine of readFileLines(filePath, offset)) {
+			if (fileLine.terminated) {
+				offset = fileLine.endOffset;
+			}
+			const line = fileLine.line.toString("utf8");
 			if (!line.trim()) continue;
 
 			// Large tool-result entries can be many MB. They do not carry the
@@ -1002,7 +1051,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 
 			if (!header) {
 				if (entry.type !== "session") {
-					return null;
+					return { info: null };
 				}
 				header = entry as SessionHeader;
 			}
@@ -1025,29 +1074,42 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 			}
 		}
 
-		if (!header) return null;
+		if (!header) return { info: null };
 		const cwd = typeof header.cwd === "string" ? header.cwd : "";
 		const parentSessionPath = header.parentSession;
 		const rlmDepth = resolveSessionRlmDepth(header, filePath);
 		const modified = getSessionModifiedDateFromLastActivity(lastActivityTime, header, stats.mtime);
 
 		return {
-			path: filePath,
-			id: header.id,
-			cwd,
-			name,
-			state,
-			parentSessionPath,
-			rlmDepth,
-			created: new Date(header.timestamp),
-			modified,
-			messageCount,
-			firstMessage: firstMessage || "(no messages)",
-			allMessagesText,
-			agentStatus,
+			info: {
+				path: filePath,
+				id: header.id,
+				cwd,
+				name,
+				state,
+				parentSessionPath,
+				rlmDepth,
+				created: new Date(header.timestamp),
+				modified,
+				messageCount,
+				firstMessage: firstMessage || "(no messages)",
+				allMessagesText,
+				agentStatus,
+			},
+			scan: {
+				header,
+				messageCount,
+				firstMessage,
+				allMessagesText,
+				name,
+				state,
+				agentStatus,
+				lastActivityTime,
+				offset,
+			},
 		};
 	} catch {
-		return null;
+		return { info: null };
 	}
 }
 

@@ -34,10 +34,29 @@ export function readFirstLineSync(filePath: string, maxBytes = 64 * 1024): strin
 	return Buffer.concat(chunks).toString("utf8").replace(/\r$/, "");
 }
 
-export async function* readLinesAsBuffers(filePath: string): AsyncGenerator<Buffer> {
+export interface FileLine {
+	line: Buffer;
+	/**
+	 * Byte offset just past this line's terminating newline. Only meaningful
+	 * when `terminated` is true; a caller resuming a later read must not start
+	 * past the last terminated line, because an unterminated tail is a write
+	 * still in progress.
+	 */
+	endOffset: number;
+	/** False for a trailing line with no newline, which a later append may extend. */
+	terminated: boolean;
+}
+
+/**
+ * Yield each newline-separated line together with where it ends, starting at
+ * `startOffset`. A caller that only wants the text should use
+ * `readLinesAsBuffers`.
+ */
+export async function* readFileLines(filePath: string, startOffset = 0): AsyncGenerator<FileLine> {
 	const pendingParts: Buffer[] = [];
 	let pendingBytes = 0;
-	for await (const chunk of createReadStream(filePath)) {
+	let consumed = startOffset;
+	for await (const chunk of createReadStream(filePath, { start: startOffset })) {
 		const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
 		let start = 0;
 		while (start < buffer.length) {
@@ -48,16 +67,18 @@ export async function* readLinesAsBuffers(filePath: string): AsyncGenerator<Buff
 				pendingBytes += part.length;
 				break;
 			}
+			let line: Buffer;
 			if (pendingParts.length > 0) {
 				const part = buffer.subarray(start, end);
 				pendingParts.push(part);
-				const line = Buffer.concat(pendingParts, pendingBytes + part.length);
+				line = Buffer.concat(pendingParts, pendingBytes + part.length);
 				pendingParts.length = 0;
 				pendingBytes = 0;
-				yield line;
 			} else {
-				yield buffer.subarray(start, end);
+				line = buffer.subarray(start, end);
 			}
+			consumed += end - start + 1;
+			yield { line, endOffset: consumed, terminated: true };
 			start = end + 1;
 		}
 	}
@@ -65,6 +86,12 @@ export async function* readLinesAsBuffers(filePath: string): AsyncGenerator<Buff
 		const line = Buffer.concat(pendingParts, pendingBytes);
 		pendingParts.length = 0;
 		pendingBytes = 0;
-		yield line;
+		yield { line, endOffset: consumed + line.length, terminated: false };
+	}
+}
+
+export async function* readLinesAsBuffers(filePath: string): AsyncGenerator<Buffer> {
+	for await (const entry of readFileLines(filePath)) {
+		yield entry.line;
 	}
 }
