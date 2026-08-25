@@ -1,5 +1,5 @@
 import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, rmSync, writeSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 /**
@@ -36,6 +36,18 @@ export function rlmSubagentDisplayPath(sessionDir: string): string {
 	return join(sessionDir, RLM_SUBAGENT_DISPLAY_FILE);
 }
 
+interface RlmSubagentDisplayCacheEntry {
+	size: number;
+	mtimeMs: number;
+	entry: RlmSubagentDisplayEntry | undefined;
+}
+
+// Every session-list walk reads one display file per ledger edge, and the daemon
+// walks on high-frequency session events. Writes are atomic renames of a fully
+// rewritten file, so an unchanged (size, mtimeMs) means identical content; keying
+// on the stat keeps an out-of-process writer's change visible.
+const displayCache = new Map<string, RlmSubagentDisplayCacheEntry>();
+
 function isRlmSubagentDisplayEntry(value: unknown): value is RlmSubagentDisplayEntry {
 	if (!value || typeof value !== "object") return false;
 	const entry = value as Partial<RlmSubagentDisplayEntry>;
@@ -64,6 +76,9 @@ export function writeRlmSubagentDisplayEntry(entry: RlmSubagentDisplayEntry): vo
 			closeSync(handle);
 		}
 		renameSync(tempPath, path);
+		// Two rewrites within one mtime tick can produce an identical stat, so the
+		// writer must drop the cache rather than rely on stat comparison alone.
+		displayCache.delete(path);
 	} catch (error) {
 		// A failed write, fsync, or rename must not leak the temp file.
 		rmSync(tempPath, { force: true });
@@ -72,16 +87,32 @@ export function writeRlmSubagentDisplayEntry(entry: RlmSubagentDisplayEntry): vo
 }
 
 export async function readRlmSubagentDisplayEntry(sessionDir: string): Promise<RlmSubagentDisplayEntry | undefined> {
+	const path = rlmSubagentDisplayPath(sessionDir);
+	let stats: Awaited<ReturnType<typeof stat>>;
+	try {
+		stats = await stat(path);
+	} catch {
+		displayCache.delete(path);
+		return undefined;
+	}
+	const cached = displayCache.get(path);
+	if (cached && cached.size === stats.size && cached.mtimeMs === stats.mtimeMs) {
+		return cached.entry;
+	}
 	let contents: string;
 	try {
-		contents = await readFile(rlmSubagentDisplayPath(sessionDir), "utf8");
+		contents = await readFile(path, "utf8");
 	} catch {
+		displayCache.delete(path);
 		return undefined;
 	}
+	let entry: RlmSubagentDisplayEntry | undefined;
 	try {
 		const parsed = JSON.parse(contents) as unknown;
-		return isRlmSubagentDisplayEntry(parsed) ? parsed : undefined;
+		entry = isRlmSubagentDisplayEntry(parsed) ? parsed : undefined;
 	} catch {
-		return undefined;
+		entry = undefined;
 	}
+	displayCache.set(path, { size: stats.size, mtimeMs: stats.mtimeMs, entry });
+	return entry;
 }

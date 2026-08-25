@@ -289,6 +289,11 @@ interface ResidentWorker {
 	ownerCleanupTimer?: ReturnType<typeof setTimeout>;
 	promotedOwnerClientId?: string;
 	updateRestartPrepareClient?: DaemonWorkerClient;
+	summaryRefresh?: CoalescedSummaryRefresh;
+}
+
+interface CoalescedSummaryRefresh {
+	trailing: boolean;
 }
 
 interface SnapshotDuplicateValidation {
@@ -3247,6 +3252,41 @@ export class DaemonSupervisor {
 		);
 	}
 
+	/**
+	 * Coalesced summary refresh for session events that can fire per streamed
+	 * token, `rlm_child_update` above all. A refresh makes the worker rebuild its
+	 * entire session list, so unbounded fire-and-forget refreshes stack concurrent
+	 * list walks onto a worker that is already behind, which slows every walk and
+	 * queues still more. Hold one refresh in flight per worker plus one trailing
+	 * pass, so the newest event is still reflected without the pile-up.
+	 */
+	private scheduleWorkerSummaryRefresh(worker: ResidentWorker): void {
+		const pending = worker.summaryRefresh;
+		if (pending) {
+			pending.trailing = true;
+			return;
+		}
+		const refresh: CoalescedSummaryRefresh = { trailing: false };
+		worker.summaryRefresh = refresh;
+		void (async () => {
+			try {
+				do {
+					// Events arriving from here on belong to the trailing pass.
+					refresh.trailing = false;
+					try {
+						await this.refreshWorkerSummaries(worker);
+						await this.syncAgentPeers();
+					} catch {
+						// Transient bookkeeping failure: a queued trailing pass still
+						// runs, and any later session event reschedules otherwise.
+					}
+				} while (refresh.trailing && !this.shuttingDown && !this.isWorkerStopping(worker));
+			} finally {
+				worker.summaryRefresh = undefined;
+			}
+		})();
+	}
+
 	private async refreshWorkerSummaries(worker: ResidentWorker, recovery = false): Promise<void> {
 		if (this.isWorkerStopping(worker)) {
 			throw new Error("Session worker is stopping");
@@ -4556,18 +4596,14 @@ export class DaemonSupervisor {
 			}
 			this.writeSerialized(client, publicPayload);
 		}
-		if (outboundType === "session_replaced" || outboundType === "session_closed") {
-			void this.refreshWorkerSummaries(worker)
-				.then(() => this.syncAgentPeers())
-				.catch(() => undefined);
-		} else if (
+		if (
+			outboundType === "session_replaced" ||
+			outboundType === "session_closed" ||
 			sessionEventType === "turn_start" ||
 			sessionEventType === "turn_end" ||
 			sessionEventType === "rlm_child_update"
 		) {
-			void this.refreshWorkerSummaries(worker)
-				.then(() => this.syncAgentPeers())
-				.catch(() => undefined);
+			this.scheduleWorkerSummaryRefresh(worker);
 		}
 		if (
 			decodedOutbound?.type === "session_closed" &&

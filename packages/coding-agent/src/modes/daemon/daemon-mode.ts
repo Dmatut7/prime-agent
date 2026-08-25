@@ -1282,11 +1282,15 @@ export class AgentDaemon {
 				const sessionKey = resolve(entry.sessionFile);
 				if (entry.status === "deleted" || visited.has(sessionKey)) continue;
 				visited.add(sessionKey);
-				const info = await readSessionInfo(entry.sessionFile);
-				if (!info) continue;
 				// A resident child walks its own subtree as an outer root below. Avoid
 				// both duplicate rows and attributing its descendants to an ancestor.
+				// Skipping ahead of the scan also keeps streaming children out of it:
+				// their transcript grows continuously, so readSessionInfo can never
+				// serve them from cache and each walk would rescan the whole file only
+				// to discard the result here.
 				if (!includeResident && this.findSessionBySessionFile(entry.sessionFile)) continue;
+				const info = await readSessionInfo(entry.sessionFile);
+				if (!info) continue;
 				const chain = [...parentChain, entry];
 				passive.push({ ...root, entry, info, chain });
 				await visit(root, { sessionId: info.id, sessionFile: entry.sessionFile }, chain, visited);
