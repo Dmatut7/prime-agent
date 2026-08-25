@@ -66,6 +66,19 @@ function createReplayBuiltInToolDefinition(
 	}
 }
 
+/**
+ * Stable serialization of tool arguments, or undefined when they cannot be
+ * serialized. An undefined signature never compares equal, so an exotic value
+ * falls back to rebuilding unconditionally.
+ */
+function argsSignature(args: unknown): string | undefined {
+	try {
+		return JSON.stringify(args) ?? "undefined";
+	} catch {
+		return undefined;
+	}
+}
+
 export class ToolExecutionComponent extends Container {
 	private contentPanel: ToolPanel;
 	private selfRenderContainer: Container;
@@ -77,6 +90,7 @@ export class ToolExecutionComponent extends Container {
 	private toolName: string;
 	private toolCallId: string;
 	private args: any;
+	private argsSignature: string | undefined;
 	private expanded = false;
 	private agentMessagesExpanded = false;
 	private editDiffsExpanded = false;
@@ -111,6 +125,7 @@ export class ToolExecutionComponent extends Container {
 		this.toolName = toolName;
 		this.toolCallId = toolCallId;
 		this.args = args;
+		this.argsSignature = argsSignature(args);
 		this.toolDefinition = toolDefinition;
 		this.builtInToolDefinition = createReplayBuiltInToolDefinition(toolName, cwd, toolDefinition);
 		this.showImages = options.showImages ?? true;
@@ -216,8 +231,20 @@ export class ToolExecutionComponent extends Container {
 		return new Text(theme.fg("toolOutput", output), 0, 0);
 	}
 
+	/**
+	 * The streaming path re-delivers a tool call's arguments on every update of
+	 * the assistant message, whether or not the partial parse actually advanced.
+	 * A rebuild tears down and recreates the panel's child components and resets
+	 * their render caches, so re-highlighting an ipython cell that did not change
+	 * is pure waste. Compare first and rebuild only on a real change.
+	 */
 	updateArgs(args: any): void {
+		const signature = argsSignature(args);
+		if (signature !== undefined && signature === this.argsSignature) {
+			return;
+		}
 		this.args = args;
+		this.argsSignature = signature;
 		this.updateDisplay();
 	}
 

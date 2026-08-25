@@ -151,6 +151,11 @@ const STOP_FINALIZATION_RECHECK_MS = 250;
 const STOP_FINALIZATION_SIGKILL_GRACE_MS = 5000;
 const STOP_FINALIZATION_RETRY_MS = 5000;
 const STALE_RECLAIM_WAIT_MS = 10_000;
+// Floor between summary refreshes driven by subagent streaming. A list response
+// carries every session's in-progress assistant message, so the refresh rate
+// sets how many megabytes cross the worker socket per second. The counters and
+// previews these passes carry are only ever drawn once per frame.
+const SUMMARY_REFRESH_MIN_INTERVAL_MS = 250;
 // Polling loops probe existence cheaply via kill(0); the ps-backed zombie and
 // identity checks are throttled so a wedged worker cannot saturate the
 // supervisor event loop with synchronous subprocess spawns.
@@ -290,10 +295,24 @@ interface ResidentWorker {
 	promotedOwnerClientId?: string;
 	updateRestartPrepareClient?: DaemonWorkerClient;
 	summaryRefresh?: CoalescedSummaryRefresh;
+	lastSummaryRefreshAt?: number;
+	syncedAgentPeers?: SyncedAgentPeers;
 }
 
 interface CoalescedSummaryRefresh {
 	trailing: boolean;
+	/** A roster-level event is queued, so the next pass skips the streaming floor. */
+	urgent: boolean;
+}
+
+/**
+ * The peer list a worker has already accepted, tied to the connection that
+ * accepted it. A reconnect installs a fresh client whose worker process knows
+ * no peers, so identity comparison retires the memo without extra bookkeeping.
+ */
+interface SyncedAgentPeers {
+	client: DaemonWorkerClient;
+	payload: string;
 }
 
 interface SnapshotDuplicateValidation {
@@ -3259,21 +3278,42 @@ export class DaemonSupervisor {
 	 * list walks onto a worker that is already behind, which slows every walk and
 	 * queues still more. Hold one refresh in flight per worker plus one trailing
 	 * pass, so the newest event is still reflected without the pile-up.
+	 *
+	 * Coalescing alone still leaves the sustained rate at one refresh per list
+	 * round-trip, and each response carries every session's in-progress assistant
+	 * message. Streaming-driven passes therefore also wait out a floor between
+	 * refreshes. They only move counters and previews, which no client renders
+	 * faster than a frame; roster-level events stay `urgent` and never wait.
 	 */
-	private scheduleWorkerSummaryRefresh(worker: ResidentWorker): void {
+	private scheduleWorkerSummaryRefresh(worker: ResidentWorker, urgent: boolean): void {
 		const pending = worker.summaryRefresh;
 		if (pending) {
 			pending.trailing = true;
+			pending.urgent ||= urgent;
 			return;
 		}
-		const refresh: CoalescedSummaryRefresh = { trailing: false };
+		const refresh: CoalescedSummaryRefresh = { trailing: false, urgent };
 		worker.summaryRefresh = refresh;
 		void (async () => {
 			try {
 				do {
 					// Events arriving from here on belong to the trailing pass.
 					refresh.trailing = false;
+					const pass = refresh.urgent;
+					refresh.urgent = false;
+					if (!pass) {
+						const wait = SUMMARY_REFRESH_MIN_INTERVAL_MS - (Date.now() - (worker.lastSummaryRefreshAt ?? 0));
+						if (wait > 0) {
+							await new Promise((resolve) => setTimeout(resolve, wait));
+							if (this.shuttingDown || this.isWorkerStopping(worker)) break;
+							// An urgent event during the wait is already satisfied by the
+							// refresh about to run.
+							refresh.trailing = false;
+							refresh.urgent = false;
+						}
+					}
 					try {
+						worker.lastSummaryRefreshAt = Date.now();
 						await this.refreshWorkerSummaries(worker);
 						await this.syncAgentPeers();
 					} catch {
@@ -3465,6 +3505,13 @@ export class DaemonSupervisor {
 		);
 	}
 
+	/**
+	 * Push each live worker the roster of its sibling roots. A summary refresh
+	 * chains a sync, and refreshes fire for every `rlm_child_update` burst, so
+	 * this runs at streaming cadence while the roster itself only changes at
+	 * worker and turn boundaries. Deliver only when a worker's peer list differs
+	 * from the one it already holds; otherwise the round-trip is pure overhead.
+	 */
 	private syncAgentPeers(): Promise<void> {
 		const sync = this.agentPeerSyncQueue
 			.catch(() => undefined)
@@ -3483,9 +3530,21 @@ export class DaemonSupervisor {
 									return root ? [this.agentPeerSummary(root)] : [];
 								}),
 						];
-						const response = await worker.client.requestWorker({ type: "worker_sync_agent_peers", peers }, 5000);
+						const payload = JSON.stringify(peers);
+						const synced = worker.syncedAgentPeers;
+						if (synced?.client === worker.client && synced.payload === payload) {
+							return;
+						}
+						// Retire the memo first: a failed or superseded delivery must never
+						// leave a worker credited with a roster it did not accept.
+						worker.syncedAgentPeers = undefined;
+						const client = worker.client;
+						const response = await client.requestWorker({ type: "worker_sync_agent_peers", peers }, 5000);
 						if (!response.success) {
 							throw new Error(response.error);
+						}
+						if (worker.client === client) {
+							worker.syncedAgentPeers = { client, payload };
 						}
 					}),
 				);
@@ -4600,10 +4659,11 @@ export class DaemonSupervisor {
 			outboundType === "session_replaced" ||
 			outboundType === "session_closed" ||
 			sessionEventType === "turn_start" ||
-			sessionEventType === "turn_end" ||
-			sessionEventType === "rlm_child_update"
+			sessionEventType === "turn_end"
 		) {
-			this.scheduleWorkerSummaryRefresh(worker);
+			this.scheduleWorkerSummaryRefresh(worker, true);
+		} else if (sessionEventType === "rlm_child_update") {
+			this.scheduleWorkerSummaryRefresh(worker, false);
 		}
 		if (
 			decodedOutbound?.type === "session_closed" &&

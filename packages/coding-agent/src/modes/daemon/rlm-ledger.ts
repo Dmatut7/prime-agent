@@ -295,6 +295,17 @@ function edgeKey(childId: string, child: string): string {
 	return `${childId}\u0000${canonicalSessionPath(child)}`;
 }
 
+/** Hand every replay its own edges so a caller can never write into the cache. */
+function cloneLedgerEdges(edges: Map<string, RlmLedgerEdge>): Map<string, RlmLedgerEdge> {
+	return new Map([...edges].map(([key, edge]) => [key, { ...edge }]));
+}
+
+interface RlmLedgerReplayCache {
+	size: number;
+	mtimeMs: number;
+	edges: Map<string, RlmLedgerEdge>;
+}
+
 /**
  * Per-sessions-dir spawn ledger. All operations are serialized on an internal
  * queue; the first operation lazily seeds a missing ledger from the existing
@@ -306,6 +317,7 @@ export class RlmSpawnLedger {
 	private readonly canonicalSessionsDir: string;
 	private queue: Promise<unknown> = Promise.resolve();
 	private seedAttempted = false;
+	private replayCache?: RlmLedgerReplayCache;
 
 	constructor(
 		agentDir: string,
@@ -697,6 +709,10 @@ export class RlmSpawnLedger {
 	}
 
 	private appendRecord(record: RlmLedgerRecord): void {
+		// A stat cannot distinguish an append that lands within the filesystem's
+		// mtime granularity, and our own writes are the one case we can rule out
+		// for free.
+		this.replayCache = undefined;
 		const dir = dirname(this.path);
 		mkdirSync(dir, { recursive: true, mode: 0o700 });
 		const isNew = !existsSync(this.path);
@@ -725,6 +741,7 @@ export class RlmSpawnLedger {
 	}
 
 	private truncateTornTailSync(): void {
+		this.replayCache = undefined;
 		// Fail closed loudly at the read bound BEFORE the swallowing repair
 		// try-block: an oversized ledger must never trigger a file-sized
 		// allocation, and the error must not be silenced as a repair failure.
@@ -764,12 +781,35 @@ export class RlmSpawnLedger {
 		}
 	}
 
+	/**
+	 * Replay the ledger, reusing the previous replay while the file on disk is
+	 * unchanged.
+	 *
+	 * Every ledger question — edges, siblings, family, duplicate admission —
+	 * replays from scratch, and a daemon listing sessions asks several times per
+	 * request. Each replay is a synchronous whole-file read plus a JSON parse per
+	 * record, on the event loop.
+	 *
+	 * Other processes append to this same file, so the guard is the file's own
+	 * size and mtime rather than our own writes. The size stat is required for
+	 * the read bound anyway, which makes the check free. Records only ever append
+	 * (a torn tail is truncated, which shrinks the file), so a change always
+	 * moves the size.
+	 */
 	private replaySync(): Map<string, RlmLedgerEdge> {
 		const edges = new Map<string, RlmLedgerEdge>();
-		if (!existsSync(this.path)) return edges;
-		const size = statSync(this.path).size;
+		if (!existsSync(this.path)) {
+			this.replayCache = undefined;
+			return edges;
+		}
+		const stats = statSync(this.path);
+		const size = stats.size;
 		if (size > RLM_LEDGER_MAX_BYTES) {
 			throw new Error(`RLM ledger ${this.path} exceeds ${RLM_LEDGER_MAX_BYTES} bytes (${size}); refusing to read`);
+		}
+		const cached = this.replayCache;
+		if (cached && cached.size === size && cached.mtimeMs === stats.mtimeMs) {
+			return cloneLedgerEdges(cached.edges);
 		}
 		const contents = readFileSync(this.path, "utf8");
 		const endsWithNewline = contents.endsWith("\n");
@@ -824,6 +864,7 @@ export class RlmSpawnLedger {
 				}
 			}
 		}
-		return edges;
+		this.replayCache = { size, mtimeMs: stats.mtimeMs, edges };
+		return cloneLedgerEdges(edges);
 	}
 }
