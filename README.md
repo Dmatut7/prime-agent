@@ -38,6 +38,31 @@ Prime Agent is an open-source coding and research agent for general and long-run
 - The **[Recursive Language Model (RLM)](https://www.primeintellect.ai/blog/rlm)** treats context as variables (*prompt-as-a-variable*) and tools like recursive subagents as function calls (*programmatic tool /sub-agent calling*) inside a persistent REPL.
 - The **[Continual Harness](https://arxiv.org/abs/2605.09998)** stores supplemental prompts, memories, skill descriptions, and reusable subagent specifications as durable state that Prime Agent can refine through small, evidence-backed updates, local to the session by default.
 
+> [!NOTE]
+> 这是 [Dmatut7/prime-agent](https://github.com/Dmatut7/prime-agent) 的 fork，不是官方仓库。官方 [PrimeIntellect-ai/prime-agent](https://github.com/PrimeIntellect-ai/prime-agent) 不接受未邀请的 PR。下面这些改动只在本仓库的 `fix/subagent-storm-and-cjk-lag` 分支。
+
+## 这个 fork 改了什么
+
+基于官方 v0.8.0 之后的 main。针对两件实测过的事：**子代理一开 worker 打满**，**中文会话一长就卡输入**。
+
+| 问题 | 改动 | 实测 |
+| --- | --- | --- |
+| 子代理每个 token 都触发全量会话列表重扫 | 活着的子代理先跳过；display 文件按 stat 缓存；每个 worker 同时只跑一轮刷新 | worker 从 **228% CPU / 2GB** 下来；一个 732KB 子会话文件不再被同时打开 780 次 |
+| 中文宽度缓存只有 512 条，超过就每帧重新切字 | 按总字符数封顶（400 万字），不再按条数 | 中文过 512 条慢约 **950 倍**（0.01µs → 9.6µs/行）；ASCII 不受影响 |
+| 每帧重拼整份 transcript、输入框每行重排 | 没变的组件不拼接；打字只重排当前行 | 12 行输入框 60fps 仅切字就要 1.1–2.5ms |
+| 正在跑的会话每次整文件重读（可到几十 MB） | 只扫新增字节；文件被整份改写才全量重读 | 活会话不再每次从文件头扫到尾 |
+| 刷新压住并发后，仍按 token 往 socket 推全量摘要 | 流式刷新加间隔；名单没变不重发；ledger 没变不重放；工具参数没变不拆面板 | supervisor 不再按 token 做 GC 和拷缓冲 |
+
+官方 `install.sh` 装的还是没有这些改动的发布版。要跑本 fork：
+
+```bash
+git clone -b fix/subagent-storm-and-cjk-lag https://github.com/Dmatut7/prime-agent.git
+cd prime-agent
+./prime-agent.sh --daemon-socket /tmp/prime-agent-test/daemon.sock
+```
+
+`--daemon-socket` 必须加，否则会连上已经在跑的旧守护进程，子代理那几笔不会生效。从源码启动会比安装包慢（tsx 现场编译），进去之后的操作速度不受影响。
+
 Prime Agent combines a persistent Python control environment with durable harness state, so useful working context and reusable operating patterns can outlive a single chat window.
 
 - **Everything is programmatic:** persistent IPython is the built-in model tool; file operations, shell commands, tool use, subagents, and context management happen through code.
