@@ -3,7 +3,7 @@
  *
  * These tests verify that DefaultPackageManager.update() handles:
  * - Normal git updates (no force-push)
- * - Force-pushed remotes gracefully (currently fails, fix needed)
+ * - Force-pushed remotes gracefully
  */
 
 import { spawnSync } from "node:child_process";
