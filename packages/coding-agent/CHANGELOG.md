@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed starting a second interactive session when another terminal already had Prime Agent open, by keeping worker identity checks independent of the new terminal's locale and home environment.
 - Fixed new top-level daemon sessions inheriting an RLM child depth from the supervisor process.
 
 ## [0.7.3] - 2026-08-17
