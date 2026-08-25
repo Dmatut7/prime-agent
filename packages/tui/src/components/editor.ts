@@ -27,6 +27,12 @@ const IMAGE_MARKER_REGEX = /\[image #(\d+)\]/g;
 /** Non-global version for single-segment testing. */
 const IMAGE_MARKER_SINGLE = /^\[image #(\d+)\]$/;
 
+/**
+ * Distinct logical lines to keep wrapped. Sized for editing a long prompt, not
+ * for holding a whole document: overflow falls back to wrapping on demand.
+ */
+const EDITOR_WRAP_CACHE_LINES = 512;
+
 /** Check if a segment is an atomic marker (paste or image) merged by segmentWithMarkers. */
 function isAtomicMarker(segment: string): boolean {
 	return segment.length >= 10 && (PASTE_MARKER_SINGLE.test(segment) || IMAGE_MARKER_SINGLE.test(segment));
@@ -262,6 +268,9 @@ export class Editor implements Component, Focusable {
 
 	private scrollOffset: number = 0;
 
+	private readonly wrapCache = new Map<string, TextChunk[]>();
+	private wrapCacheSignature = "";
+
 	public borderColor: (str: string) => string;
 	public backgroundColor: ((str: string) => string) | undefined;
 	public autocompleteBackgroundColor: ((str: string) => string) | undefined;
@@ -342,6 +351,42 @@ export class Editor implements Component, Focusable {
 	/** Segment text with paste-marker awareness, only merging markers with valid IDs. */
 	private segment(text: string): Iterable<Intl.SegmentData> {
 		return segmentWithMarkers(text, this.validPasteIds());
+	}
+
+	/**
+	 * Drop memoized wraps whose inputs other than line text have moved. The
+	 * signature covers everything `wrappedChunks` does not key on: the width a
+	 * line was wrapped to, and which paste markers segment as single units.
+	 */
+	private syncWrapCache(contentWidth: number, pasteIds: Set<number>): void {
+		const signature = `${contentWidth}:${[...pasteIds].sort((a, b) => a - b).join(",")}`;
+		if (this.wrapCacheSignature === signature) return;
+		this.wrapCacheSignature = signature;
+		this.wrapCache.clear();
+	}
+
+	/**
+	 * Word-wrap one logical line, reusing the previous result for unchanged text.
+	 *
+	 * Wrapping segments the line into graphemes, which dominates editor layout
+	 * cost and grows sharply for scripts where nearly every character is its own
+	 * cluster. A wrap depends only on the line's text, the content width, and the
+	 * live paste markers — never on the cursor — so the result survives across
+	 * frames. A keystroke then re-wraps just the edited line instead of the whole
+	 * buffer, and a frame driven by an animation timer re-wraps nothing at all.
+	 *
+	 * Callers must treat the returned chunks as read-only.
+	 */
+	private wrappedChunks(displayLine: string, contentWidth: number, pasteIds: Set<number>): TextChunk[] {
+		const cached = this.wrapCache.get(displayLine);
+		if (cached) return cached;
+		const chunks = wordWrapLine(displayLine, contentWidth, [...segmentWithMarkers(displayLine, pasteIds)]);
+		if (this.wrapCache.size >= EDITOR_WRAP_CACHE_LINES) {
+			const oldest = this.wrapCache.keys().next().value;
+			if (oldest !== undefined) this.wrapCache.delete(oldest);
+		}
+		this.wrapCache.set(displayLine, chunks);
+		return chunks;
 	}
 
 	getPaddingX(): number {
@@ -937,6 +982,8 @@ export class Editor implements Component, Focusable {
 
 	private layoutText(contentWidth: number): LayoutLine[] {
 		const layoutLines: LayoutLine[] = [];
+		const pasteIds = this.validPasteIds();
+		this.syncWrapCache(contentWidth, pasteIds);
 
 		if (this.state.lines.length === 0 || (this.state.lines.length === 1 && this.state.lines[0] === "")) {
 			layoutLines.push({
@@ -977,7 +1024,7 @@ export class Editor implements Component, Focusable {
 					});
 				}
 			} else {
-				const chunks = wordWrapLine(displayLine, contentWidth, [...this.segment(displayLine)]);
+				const chunks = this.wrappedChunks(displayLine, contentWidth, pasteIds);
 
 				for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
 					const chunk = chunks[chunkIndex];
@@ -1713,6 +1760,8 @@ export class Editor implements Component, Focusable {
 	 */
 	private buildVisualLineMap(width: number): Array<{ logicalLine: number; startCol: number; length: number }> {
 		const visualLines: Array<{ logicalLine: number; startCol: number; length: number }> = [];
+		const pasteIds = this.validPasteIds();
+		this.syncWrapCache(width, pasteIds);
 
 		for (let i = 0; i < this.state.lines.length; i++) {
 			const line = this.state.lines[i] || "";
@@ -1724,7 +1773,7 @@ export class Editor implements Component, Focusable {
 			} else if (lineVisWidth <= width) {
 				visualLines.push({ logicalLine: i, startCol: hiddenPrefixLength, length: displayLine.length });
 			} else {
-				const chunks = wordWrapLine(displayLine, width, [...this.segment(displayLine)]);
+				const chunks = this.wrappedChunks(displayLine, width, pasteIds);
 				for (const chunk of chunks) {
 					visualLines.push({
 						logicalLine: i,

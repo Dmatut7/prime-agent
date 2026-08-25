@@ -239,12 +239,73 @@ export interface OverlayHandle {
 	isFocused(): boolean;
 }
 
+interface AggregatedLines {
+	lines: string[];
+	selectionRegions: TableCellSelectionRegion[];
+}
+
+/**
+ * Concatenates a component list into one line array, reusing the previous
+ * result while nothing changed.
+ *
+ * Components memoize their own output and hand back the very same array as long
+ * as their content and width hold, so array identity is a sound change signal.
+ * Without it, a steady frame still rebuilds the whole transcript: the cost of
+ * every render scales with total content rather than with what actually moved,
+ * and animation timers alone re-run it several times a second.
+ */
+class LineAggregator {
+	private width = -1;
+	private outputs: string[][] = [];
+	private aggregated?: AggregatedLines;
+
+	invalidate(): void {
+		this.aggregated = undefined;
+	}
+
+	aggregate(components: readonly Component[], width: number): AggregatedLines {
+		const rendered = components.map((component) => ({ component, lines: component.render(width) }));
+		const cached = this.aggregated;
+		if (
+			cached &&
+			this.width === width &&
+			this.outputs.length === rendered.length &&
+			rendered.every((entry, index) => this.outputs[index] === entry.lines)
+		) {
+			return cached;
+		}
+
+		const lines: string[] = [];
+		const selectionRegions: TableCellSelectionRegion[] = [];
+		for (const { component, lines: componentLines } of rendered) {
+			const lineOffset = lines.length;
+			for (const region of component.getSelectionRegions?.() ?? []) {
+				selectionRegions.push({
+					...region,
+					line: region.line + lineOffset,
+					tableTop: region.tableTop + lineOffset,
+					tableBottom: region.tableBottom + lineOffset,
+				});
+			}
+			for (const line of componentLines) {
+				lines.push(line);
+			}
+		}
+
+		this.width = width;
+		this.outputs = rendered.map((entry) => entry.lines);
+		this.aggregated = { lines, selectionRegions };
+		return this.aggregated;
+	}
+}
+
 /**
  * Container - a component that contains other components
  */
 export class Container implements Component {
 	children: Component[] = [];
 	private selectionRegions: TableCellSelectionRegion[] = [];
+	private readonly aggregator = new LineAggregator();
 
 	addChild(component: Component): void {
 		this.children.push(component);
@@ -266,29 +327,14 @@ export class Container implements Component {
 
 	invalidate(): void {
 		this.selectionRegions = [];
+		this.aggregator.invalidate();
 		for (const child of this.children) {
 			child.invalidate?.();
 		}
 	}
 
 	render(width: number): string[] {
-		const lines: string[] = [];
-		const selectionRegions: TableCellSelectionRegion[] = [];
-		for (const child of this.children) {
-			const lineOffset = lines.length;
-			const childLines = child.render(width);
-			for (const region of child.getSelectionRegions?.() ?? []) {
-				selectionRegions.push({
-					...region,
-					line: region.line + lineOffset,
-					tableTop: region.tableTop + lineOffset,
-					tableBottom: region.tableBottom + lineOffset,
-				});
-			}
-			for (const line of childLines) {
-				lines.push(line);
-			}
-		}
+		const { lines, selectionRegions } = this.aggregator.aggregate(this.children, width);
 		this.selectionRegions = selectionRegions;
 		return lines;
 	}
@@ -307,6 +353,7 @@ export class TUI extends Container {
 	private previousKittyImageIds = new Set<number>();
 	private previousWidth = 0;
 	private previousHeight = 0;
+	private readonly transcriptAggregator = new LineAggregator();
 	private focusedComponent: Component | null = null;
 	private inputListeners = new Set<InputListener>();
 
@@ -565,6 +612,7 @@ export class TUI extends Container {
 
 	override invalidate(): void {
 		super.invalidate();
+		this.transcriptAggregator.invalidate();
 		for (const overlay of this.overlayStack) overlay.component.invalidate?.();
 	}
 
@@ -1482,22 +1530,14 @@ export class TUI extends Container {
 		this.syncFullscreenMouseTracking();
 		this.overlaySelectionRegions = [];
 
-		const transcript: string[] = [];
-		const selectionRegions: TableCellSelectionRegion[] = [];
+		let transcript: string[] = [];
+		let selectionRegions: TableCellSelectionRegion[] = [];
 		const dock = withFullscreenImageFallback(() => {
-			for (const component of fullscreen.scroll) {
-				const lineOffset = transcript.length;
-				const componentLines = component.render(width);
-				for (const region of component.getSelectionRegions?.() ?? []) {
-					selectionRegions.push({
-						...region,
-						line: region.line + lineOffset,
-						tableTop: region.tableTop + lineOffset,
-						tableBottom: region.tableBottom + lineOffset,
-					});
-				}
-				transcript.push(...componentLines);
-			}
+			// Safe to reuse: composeFrame only slices the visible window out of the
+			// transcript, so nothing downstream writes back into these lines.
+			const aggregated = this.transcriptAggregator.aggregate(fullscreen.scroll, width);
+			transcript = aggregated.lines;
+			selectionRegions = aggregated.selectionRegions;
 			return fullscreen.dock.render(width);
 		});
 
@@ -1557,8 +1597,10 @@ export class TUI extends Container {
 			return targetScreenRow - currentScreenRow;
 		};
 
-		// Render all components to get new lines
-		let newLines = this.render(width);
+		// Render all components to get new lines. Copy: render may hand back a
+		// memoized array, and extractCursorPosition and applyLineResets below
+		// rewrite entries in place.
+		let newLines = [...this.render(width)];
 
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.overlayStack.length > 0) {
