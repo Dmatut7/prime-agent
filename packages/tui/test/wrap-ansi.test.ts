@@ -140,6 +140,33 @@ describe("wrapTextWithAnsi", () => {
 	});
 });
 
+describe("visibleWidth caching", () => {
+	// CJK text has no ASCII fast path, so it is what fills the width cache and
+	// what eviction has to stay correct for.
+	const CJK_DIGITS = "零一二三四五六七八九";
+	const toCjkDigits = (value: number): string =>
+		String(value).replace(/\d/g, (digit) => CJK_DIGITS[Number(digit)] as string);
+
+	it("keeps returning true widths after the character budget evicts entries", () => {
+		const body = "宽度缓存回归测试内容".repeat(200);
+		const first = `${toCjkDigits(0)}${body}`;
+		// Pure CJK, so every grapheme is two columns wide.
+		assert.strictEqual(visibleWidth(first), first.length * 2);
+
+		// Push well past the cache's character budget so eviction has to run.
+		let cachedChars = 0;
+		for (let i = 1; cachedChars < 5_000_000; i++) {
+			const text = `${toCjkDigits(i)}${body}`;
+			assert.strictEqual(visibleWidth(text), text.length * 2);
+			cachedChars += text.length;
+		}
+
+		// The first entry is long gone; recomputing it must agree with the
+		// original answer rather than a stale or corrupted counter.
+		assert.strictEqual(visibleWidth(first), first.length * 2);
+	});
+});
+
 describe("wrapTextWithAnsi with OSC 8 hyperlinks", () => {
 	it("re-emits OSC 8 open at the start of continuation lines", () => {
 		const url = "https://example.com";

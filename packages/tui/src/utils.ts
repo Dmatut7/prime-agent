@@ -33,9 +33,18 @@ const zeroWidthRegex = /^(?:\p{Default_Ignorable_Code_Point}|\p{Control}|\p{Mark
 const leadingNonPrintingRegex = /^[\p{Default_Ignorable_Code_Point}\p{Control}\p{Format}\p{Mark}\p{Surrogate}]+/v;
 const rgiEmojiRegex = /^\p{RGI_Emoji}$/v;
 
-// Cache for non-ASCII strings
-const WIDTH_CACHE_SIZE = 512;
+// Cache for non-ASCII strings.
+//
+// ASCII takes the fast path and never lands here, so this cache carries the
+// entire width workload of non-Latin scripts, where every miss re-runs
+// Intl.Segmenter. A long CJK transcript holds far more distinct strings than a
+// few hundred, so a small cache is evicted before it can be reused and each
+// frame re-segments the same text. Bound it by total cached characters rather
+// than entry count: strings here range from single graphemes to whole
+// unwrapped lines, and an entry cap cannot keep long lines from inflating it.
+const WIDTH_CACHE_MAX_CHARS = 4_000_000;
 const widthCache = new Map<string, number>();
+let widthCacheChars = 0;
 
 function isPrintableAscii(str: string): boolean {
 	for (let i = 0; i < str.length; i++) {
@@ -244,14 +253,16 @@ export function visibleWidth(str: string): number {
 		width += graphemeWidth(segment);
 	}
 
-	// Cache result
-	if (widthCache.size >= WIDTH_CACHE_SIZE) {
-		const firstKey = widthCache.keys().next().value;
-		if (firstKey !== undefined) {
-			widthCache.delete(firstKey);
-		}
-	}
+	// Cache result. A hit returned above, so this key is new and cannot be
+	// double-counted against the character budget.
 	widthCache.set(str, width);
+	widthCacheChars += str.length;
+	while (widthCacheChars > WIDTH_CACHE_MAX_CHARS) {
+		const oldestKey = widthCache.keys().next().value;
+		if (oldestKey === undefined) break;
+		widthCache.delete(oldestKey);
+		widthCacheChars -= oldestKey.length;
+	}
 
 	return width;
 }
