@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	acquireSessionLease,
 	canonicalSessionPath,
+	getPsProcessStartId,
 	getWindowsProcessStartId,
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
@@ -67,6 +69,56 @@ describe("session leases", () => {
 		expect(getWindowsProcessStartId(42, query)).toBeUndefined();
 		expect(getWindowsProcessStartId(0, query)).toBeUndefined();
 		expect(queryCount).toBe(1);
+	});
+
+	it("reads portable ps start identities through an injectable query", () => {
+		const calls: Array<{ command: string; args: string[] }> = [];
+		const processStartId = getPsProcessStartId(42, (command, args) => {
+			calls.push({ command, args });
+			return "Tue Aug 25 13:16:49 2026\n";
+		});
+
+		expect(processStartId).toBe("ps:Tue Aug 25 13:16:49 2026");
+		expect(calls).toEqual([
+			{
+				command: "ps",
+				args: ["-p", "42", "-o", "lstart="],
+			},
+		]);
+	});
+
+	it("rejects invalid portable ps start identities", () => {
+		let queryCount = 0;
+		const query = () => {
+			queryCount++;
+			return "   \n";
+		};
+
+		expect(getPsProcessStartId(42, query)).toBeUndefined();
+		expect(getPsProcessStartId(0, query)).toBeUndefined();
+		expect(queryCount).toBe(1);
+	});
+
+	it("forces C locale when resolving the default ps start identity", () => {
+		if (process.platform === "win32") {
+			return;
+		}
+		const startId = getPsProcessStartId(process.pid);
+		expect(startId).toMatch(/^ps:/);
+		const withChineseLocale = execFileSync("ps", ["-p", String(process.pid), "-o", "lstart="], {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+			env: { ...process.env, LANG: "zh_CN.UTF-8", LC_ALL: "zh_CN.UTF-8", LC_TIME: "zh_CN.UTF-8" },
+		}).trim();
+		const withCLocale = execFileSync("ps", ["-p", String(process.pid), "-o", "lstart="], {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+			env: { ...process.env, LANG: "C", LC_ALL: "C", LC_TIME: "C" },
+		}).trim();
+		expect(startId).toBe(`ps:${withCLocale}`);
+		if (withChineseLocale !== withCLocale) {
+			expect(startId).not.toBe(`ps:${withChineseLocale}`);
+		}
 	});
 
 	it("rejects a second live owner with a typed active-session error", () => {

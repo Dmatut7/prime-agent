@@ -3499,7 +3499,10 @@ export class AgentDaemon {
 				let ownerFingerprint: string;
 				try {
 					ownerFingerprint = await this.assertSupervisorClaimCurrent(claim);
-				} catch {
+				} catch (error) {
+					this.log(
+						`worker_auth rejected as supervisor_generation_stale: ${error instanceof Error ? error.message : String(error)}`,
+					);
 					this.write(client, failure(commandId, "worker_auth", "supervisor_generation_stale"));
 					client.socket.end();
 					return;

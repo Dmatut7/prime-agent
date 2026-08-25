@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+	collectDaemonLaunchEnv,
 	createDaemonCommandEnvelope,
 	createDaemonEventEnvelope,
 	createDaemonEventMeta,
@@ -427,5 +428,30 @@ describe("daemon protocol helpers", () => {
 		expect(salvageDaemonCommandId(JSON.stringify({ type: "command", id: 7 }))).toBeUndefined();
 		expect(salvageDaemonCommandId(JSON.stringify("command"))).toBeUndefined();
 		expect(salvageDaemonCommandId("{ not json")).toBeUndefined();
+	});
+
+	it("collects launch env without Prime Agent internal keys", () => {
+		const env = collectDaemonLaunchEnv({
+			HOME: "/tmp/home",
+			LANG: "zh_CN.UTF-8",
+			OPENAI_API_KEY: "secret",
+			PRIME_AGENT_INTERNAL_DAEMON_WORKER: "1",
+			PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR: "/tmp/owners",
+			EMPTY: undefined,
+		} as NodeJS.ProcessEnv);
+
+		expect(env).toEqual({
+			HOME: "/tmp/home",
+			LANG: "zh_CN.UTF-8",
+			OPENAI_API_KEY: "secret",
+		});
+		expect(env).not.toHaveProperty("PRIME_AGENT_INTERNAL_DAEMON_WORKER");
+		expect(env).not.toHaveProperty("PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR");
+	});
+
+	it("only forwards launchEnv for client-owned interactive creates", () => {
+		const source = readFileSync(resolve(__dirname, "../src/main.ts"), "utf8");
+		expect(source).toContain("launchEnv: options.clientOwned ? collectDaemonLaunchEnv() : undefined");
+		expect(source).not.toMatch(/launchEnv:\s*collectDaemonLaunchEnv\(\)/);
 	});
 });
