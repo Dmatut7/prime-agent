@@ -863,6 +863,13 @@ describe("agents view state", () => {
 
 	test("requests only daemon-resident sessions for the agents view refresh", () => {
 		expect(createAgentsViewListCommand()).toEqual({ type: "list" });
+		// The view polls every second and never reads an in-flight assistant
+		// message, so it drops them once the daemon can answer without them.
+		expect(createAgentsViewListCommand({ supportsServerCapability: () => false })).toEqual({ type: "list" });
+		expect(createAgentsViewListCommand({ supportsServerCapability: () => true })).toEqual({
+			type: "list",
+			omitStreamingMessages: true,
+		});
 	});
 
 	test("resolves active summaries by session file path", () => {

@@ -168,6 +168,7 @@ import {
 	isActiveSessionBusy,
 	type SessionSummary,
 	summaryForActiveSession,
+	summaryWithoutStreamingMessage,
 } from "./daemon-session-list.js";
 import { DaemonSessionSummarizer } from "./daemon-session-summarizer.js";
 import {
@@ -1359,6 +1360,22 @@ export class AgentDaemon {
 			seenChildIds.add(passive.entry.childId);
 		}
 		return snapshots;
+	}
+
+	/**
+	 * Name one snapshot transfer.
+	 *
+	 * The id has to identify the transfer, not the position it was taken at. Two
+	 * snapshots can sit on the same event cursor and still hold different bytes,
+	 * because live state moves on without advancing the sequence. The supervisor
+	 * reads a repeated id whose bytes differ as corruption and tears down a
+	 * healthy worker, which leaves it recovering and failing the state reads the
+	 * UI needs. The cursor stays in the id so logs remain readable; the counter
+	 * is what keeps two transfers apart.
+	 */
+	private nextSnapshotId(state: ActiveSessionState): string {
+		state.snapshotTransferSeq = (state.snapshotTransferSeq ?? 0) + 1;
+		return `${state.activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}-${state.snapshotTransferSeq}`;
 	}
 
 	private async buildSessionListWithPassiveRlmSubagents(
@@ -3771,33 +3788,22 @@ export class AgentDaemon {
 			case "list": {
 				const activeSessions = Array.from(this.sessions.values());
 				const scheduledJobs = this.cronStore.list();
-				if (!command.all) {
-					return success(command.id, "list", {
-						sessions: await this.buildSessionListWithPassiveRlmSubagents(activeSessions, [], scheduledJobs),
-					});
+				const listSessionDir = command.sessionDir ?? this.options.defaultSessionConfig.sessionDir;
+				let savedSessions: SessionInfo[] = [];
+				if (command.all) {
+					savedSessions = command.cwd
+						? await SessionManager.list(resolve(command.cwd), listSessionDir)
+						: listSessionDir !== undefined
+							? await SessionManager.listAll(undefined, listSessionDir)
+							: await SessionManager.listAll();
 				}
-				const defaultConfig = this.options.defaultSessionConfig;
-				const listSessionDir = command.sessionDir ?? defaultConfig.sessionDir;
-				if (command.cwd) {
-					const savedSessions = await SessionManager.list(resolve(command.cwd), listSessionDir);
-					return success(command.id, "list", {
-						sessions: await this.buildSessionListWithPassiveRlmSubagents(
-							activeSessions,
-							savedSessions,
-							scheduledJobs,
-						),
-					});
-				}
-				const savedSessions =
-					listSessionDir !== undefined
-						? await SessionManager.listAll(undefined, listSessionDir)
-						: await SessionManager.listAll();
+				const sessions = await this.buildSessionListWithPassiveRlmSubagents(
+					activeSessions,
+					savedSessions,
+					scheduledJobs,
+				);
 				return success(command.id, "list", {
-					sessions: await this.buildSessionListWithPassiveRlmSubagents(
-						activeSessions,
-						savedSessions,
-						scheduledJobs,
-					),
+					sessions: command.omitStreamingMessages ? sessions.map(summaryWithoutStreamingMessage) : sessions,
 				});
 			}
 
@@ -3904,7 +3910,7 @@ export class AgentDaemon {
 					});
 				}
 				if (streamsSnapshot) {
-					const snapshotId = `${state.activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
+					const snapshotId = this.nextSnapshotId(state);
 					let transcript: SnapshotTranscriptChunkSource;
 					try {
 						transcript = createSnapshotTranscriptChunks({
@@ -6660,7 +6666,7 @@ export class AgentDaemon {
 		state: ActiveSessionState,
 		message: Extract<DaemonOutbound, { type: "session_replaced" }>,
 	): void {
-		const snapshotId = `${state.activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
+		const snapshotId = this.nextSnapshotId(state);
 		// Mark before the registry read so later events queue behind this snapshot.
 		const snapshotSignal = markClientSnapshotStreaming(client, state.activeSessionId);
 		void this.prepareReplacementSnapshot(client, state, message, snapshotId, snapshotSignal).catch((error) => {
@@ -6858,7 +6864,7 @@ export class AgentDaemon {
 							),
 						});
 					}
-					const snapshotId = `${activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
+					const snapshotId = this.nextSnapshotId(state);
 					const snapshotSignal = markClientSnapshotStreaming(client, activeSessionId);
 					let transcript: SnapshotTranscriptChunkSource;
 					try {

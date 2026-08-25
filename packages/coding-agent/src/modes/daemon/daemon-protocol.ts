@@ -67,8 +67,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 20 lets cancellation target a prompt the session owns but has not started.
 // Revision 21 adds capability-gated, session-scoped ACP MCP server replacement.
 // Revision 22 scopes ACP MCP replacement and cleanup to a connection owner.
-export const DAEMON_SCHEMA_REVISION = 22;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-22-4d515169dc6b";
+// Revision 23 adds the capability-gated omitStreamingMessages option on list.
+export const DAEMON_SCHEMA_REVISION = 23;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-23-e719bbbdac64";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -113,7 +114,11 @@ export type DaemonServerCapability =
 	| "rlm_quiescence_barrier"
 	| "session_input_pause"
 	| "owned_prompt_cancellation"
-	| "acp_mcp_servers";
+	| "acp_mcp_servers"
+	// The daemon honors omitStreamingMessages on list, leaving each row's
+	// in-flight assistant message out of the response. Senders must check before
+	// relying on the smaller payload.
+	| "list_without_streaming_messages";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -158,6 +163,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"rlm_quiescence_barrier",
 	"session_input_pause",
 	"acp_mcp_servers",
+	"list_without_streaming_messages",
 ];
 
 export interface DaemonRuntimeIdentity {
@@ -375,6 +381,14 @@ export type DaemonCommand =
 			cwd?: string;
 			sessionDir?: string;
 			includeClientOwned?: boolean;
+			/**
+			 * Leave each row's in-flight assistant message out of the response. A
+			 * streaming message grows without bound, so a caller that only reads
+			 * counters and roster state pays megabytes per list for a field it
+			 * discards. Capability-gated: an older daemon ignores the flag and
+			 * answers with the full rows.
+			 */
+			omitStreamingMessages?: boolean;
 	  }
 	| DaemonSavedSessionListCommand
 	| ({
@@ -712,6 +726,11 @@ const SESSION_INPUT_PAUSE_COMMAND = {
 	minSchemaRevision: 19,
 	capability: "session_input_pause",
 } as const;
+const LIST_WITHOUT_STREAMING_MESSAGES_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 23,
+	capability: "list_without_streaming_messages",
+} as const;
 
 export const DAEMON_COMMAND_COMPATIBILITY = {
 	ack_result: LEGACY_DAEMON_COMMAND,
@@ -835,6 +854,9 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 	}
 	if (command.type === "cancel_prompt_admission" && command.cancelOwned === true) {
 		requirements.push(OWNED_PROMPT_CANCELLATION_COMMAND);
+	}
+	if (command.type === "list" && command.omitStreamingMessages === true) {
+		requirements.push(LIST_WITHOUT_STREAMING_MESSAGES_COMMAND);
 	}
 	return [...requirements, DAEMON_COMMAND_COMPATIBILITY[command.type]];
 }

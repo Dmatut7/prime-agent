@@ -208,10 +208,19 @@ export function createAgentsViewResumeConfig(
 	return resumeConfig;
 }
 
-export function createAgentsViewListCommand(): Extract<DaemonCommand, { type: "list" }> {
+export function createAgentsViewListCommand(
+	client?: Pick<DaemonClient, "supportsServerCapability">,
+): Extract<DaemonCommand, { type: "list" }> {
 	// Omitting `all` returns daemon-resident sessions only; on-disk ones come back
 	// through the view's saved-session catalog.
-	return { type: "list" };
+	//
+	// This view polls once a second and never reads an in-flight assistant
+	// message, which grows for the whole turn a session is streaming. Asking the
+	// daemon to leave those out keeps a poll from carrying megabytes per running
+	// agent. An older daemon rejects the field outright, so only send it once the
+	// capability is known.
+	const omit = client?.supportsServerCapability("list_without_streaming_messages") === true;
+	return omit ? { type: "list", omitStreamingMessages: true } : { type: "list" };
 }
 
 export function resolveAgentsViewActiveSummaryForPath(
@@ -1838,8 +1847,9 @@ export class AgentsViewMode implements Component, Focusable {
 			if (this.pendingDeleteAgent?.identity === identity && this.isDeleteConfirmationVisible()) {
 				this.clearDeleteConfirmation({ render: false });
 				try {
+					const listClient = this.requireClient();
 					const latest = expectSessionList(
-						requireDaemonData(await this.requireClient().request(createAgentsViewListCommand())),
+						requireDaemonData(await listClient.request(createAgentsViewListCommand(listClient))),
 					);
 					this.lastListedSummaries = latest;
 					const active = resolveAgentsViewActiveSummaryForPath(row.summary.sessionFile, latest);
@@ -2095,7 +2105,7 @@ export class AgentsViewMode implements Component, Focusable {
 		try {
 			const client = this.requireClient();
 			try {
-				const response = await client.request(createAgentsViewListCommand());
+				const response = await client.request(createAgentsViewListCommand(client));
 				if (generation !== this.liveCatalogGeneration) return false;
 				this.liveCatalogReady = true;
 				this.applySessionList(expectSessionList(requireDaemonData(response)), true);
@@ -2415,7 +2425,7 @@ export class AgentsViewMode implements Component, Focusable {
 			try {
 				await this.options.recoverDaemon?.();
 				await client.reconnect(1000);
-				const response = await client.request(createAgentsViewListCommand());
+				const response = await client.request(createAgentsViewListCommand(client));
 				const data = requireDaemonData(response);
 				const sessions = expectSessionList(data);
 				const heartbeatsRefreshed = await this.refreshHeartbeats({ duringReconnect: true });

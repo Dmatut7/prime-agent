@@ -40,6 +40,8 @@ export interface ActiveSessionState {
 	extensionUiRequests: Map<string, ActiveSessionExtensionUiRequest>;
 	eventGeneration: string;
 	lastEventSequence: DaemonEventSequence;
+	/** Counts snapshot transfers so each one gets an id of its own. */
+	snapshotTransferSeq?: number;
 	unsubscribe?: () => void;
 	/** Latest background status summary, surfaced in the agents view. */
 	summaryState?: AgentStatus;

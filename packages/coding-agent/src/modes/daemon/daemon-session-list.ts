@@ -111,6 +111,17 @@ export function isSessionSummaryBusy(summary: SessionSummary): boolean {
 	return summary.isSessionActive || summary.hasRunningRlmChildren === true;
 }
 
+/**
+ * Drop the in-flight assistant message from a row. The message accumulates
+ * every token of the current turn, so rows for streaming sessions dominate a
+ * list response while `isStreaming` and the counters beside it stay tiny.
+ */
+export function summaryWithoutStreamingMessage(summary: SessionSummary): SessionSummary {
+	if (summary.streamingMessage === undefined) return summary;
+	const { streamingMessage: _streamingMessage, ...rest } = summary;
+	return rest;
+}
+
 export function buildSessionList(
 	activeSessions: readonly ActiveSessionState[],
 	savedSessions: readonly SessionInfo[],

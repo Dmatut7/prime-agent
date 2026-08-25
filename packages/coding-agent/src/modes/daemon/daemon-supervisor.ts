@@ -90,6 +90,7 @@ import {
 	isSessionSummaryBusy,
 	type SessionSummary,
 	summaryForInactiveSession,
+	summaryWithoutStreamingMessage,
 } from "./daemon-session-list.js";
 import {
 	acquireDaemonSocketPathLease,
@@ -2184,10 +2185,14 @@ export class DaemonSupervisor {
 		client: DaemonSocketClient,
 		command: Extract<DaemonCommand, { type: "list" }>,
 	): Promise<DaemonResponse> {
+		// A caller that does not read in-flight assistant messages spares both hops:
+		// the worker leaves them out of its rows, and the rows sent on keep only
+		// what was asked for, never a message this supervisor happens to still hold.
+		const omitStreamingMessages = command.omitStreamingMessages === true;
 		await Promise.all(
 			[...this.workers.values()]
 				.filter((worker) => !this.isWorkerStopping(worker))
-				.map((worker) => this.refreshWorkerSummaries(worker).catch(() => undefined)),
+				.map((worker) => this.refreshWorkerSummaries(worker, { omitStreamingMessages }).catch(() => undefined)),
 		);
 		await this.syncAgentPeers().catch((error) => this.log(`Could not synchronize agent peers: ${String(error)}`));
 		const clientOwnedWorkers = [...this.workers.values()].filter((worker) => !this.isVisibleWorker(worker));
@@ -2199,7 +2204,12 @@ export class DaemonSupervisor {
 					this.isVisibleWorker(worker) ||
 					(command.includeClientOwned === true && this.isWorkerAccessibleToClient(client, worker)),
 			)
-			.flatMap((worker) => [...worker.summaries.values()].map((summary) => this.publicSummary(worker, summary)));
+			.flatMap((worker) =>
+				[...worker.summaries.values()].map((summary) => {
+					const row = this.publicSummary(worker, summary);
+					return omitStreamingMessages ? summaryWithoutStreamingMessage(row) : row;
+				}),
+			);
 		const busyClientOwnedSessionCount = clientOwnedWorkers
 			.flatMap((worker) => [...worker.summaries.values()])
 			.filter(isSessionSummaryBusy).length;
@@ -2587,7 +2597,7 @@ export class DaemonSupervisor {
 			worker.descriptor.rootSessionId = summary.sessionId;
 			worker.descriptor.sessionFile = summary.sessionFile;
 			await this.subscribeWorker(worker, rootActiveSessionId);
-			await this.refreshWorkerSummaries(worker, true);
+			await this.refreshWorkerSummaries(worker, { recovery: true });
 			if (existing && (this.isWorkerRecoveryCancelled(worker) || worker.stopRevision !== recoveryStopRevision)) {
 				throw new Error(`Session worker ${workerId} recovery was cancelled`);
 			}
@@ -2758,7 +2768,7 @@ export class DaemonSupervisor {
 			const observedProcessStartId = getProcessStartId(worker.descriptor.pid);
 			await this.connectWorker(worker, 2000);
 			await this.subscribeWorker(worker, worker.descriptor.rootActiveSessionId);
-			await this.refreshWorkerSummaries(worker, true);
+			await this.refreshWorkerSummaries(worker, { recovery: true });
 			if (worker.descriptor.processStartId === undefined && observedProcessStartId) {
 				worker.descriptor.processStartId = observedProcessStartId;
 			}
@@ -3097,7 +3107,7 @@ export class DaemonSupervisor {
 						try {
 							await this.connectWorker(worker, 1500);
 							await this.subscribeWorker(worker, worker.descriptor.rootActiveSessionId);
-							await this.refreshWorkerSummaries(worker, true);
+							await this.refreshWorkerSummaries(worker, { recovery: true });
 							if (this.isWorkerRecoveryCancelled(worker)) {
 								return;
 							}
@@ -3280,10 +3290,11 @@ export class DaemonSupervisor {
 	 * pass, so the newest event is still reflected without the pile-up.
 	 *
 	 * Coalescing alone still leaves the sustained rate at one refresh per list
-	 * round-trip, and each response carries every session's in-progress assistant
-	 * message. Streaming-driven passes therefore also wait out a floor between
-	 * refreshes. They only move counters and previews, which no client renders
-	 * faster than a frame; roster-level events stay `urgent` and never wait.
+	 * round-trip. Streaming-driven passes therefore also wait out a floor between
+	 * refreshes and ask the worker to leave the in-progress assistant messages
+	 * out of the response. They only move counters and previews, which no client
+	 * renders faster than a frame; roster-level events stay `urgent`, never wait,
+	 * and keep the authoritative rows.
 	 */
 	private scheduleWorkerSummaryRefresh(worker: ResidentWorker, urgent: boolean): void {
 		const pending = worker.summaryRefresh;
@@ -3314,7 +3325,7 @@ export class DaemonSupervisor {
 					}
 					try {
 						worker.lastSummaryRefreshAt = Date.now();
-						await this.refreshWorkerSummaries(worker);
+						await this.refreshWorkerSummaries(worker, { omitStreamingMessages: !pass });
 						await this.syncAgentPeers();
 					} catch {
 						// Transient bookkeeping failure: a queued trailing pass still
@@ -3327,16 +3338,43 @@ export class DaemonSupervisor {
 		})();
 	}
 
-	private async refreshWorkerSummaries(worker: ResidentWorker, recovery = false): Promise<void> {
+	/**
+	 * Reload a worker's session rows.
+	 *
+	 * A row's in-flight assistant message carries the whole turn so far, so on
+	 * the passes that run at streaming cadence those rows are megabytes that only
+	 * counters and previews are read from. `omitStreamingMessages` leaves them
+	 * out. Rows already held keep the message they had, so no reader sees the
+	 * field vanish, and re-seeding the stream reconstructor is left to the passes
+	 * that carry authoritative content.
+	 */
+	private async refreshWorkerSummaries(
+		worker: ResidentWorker,
+		{ recovery = false, omitStreamingMessages = false }: { recovery?: boolean; omitStreamingMessages?: boolean } = {},
+	): Promise<void> {
 		if (this.isWorkerStopping(worker)) {
 			throw new Error("Session worker is stopping");
 		}
 		if (!worker.client) {
 			throw new Error("Session worker is not connected");
 		}
-		const response = await worker.client.request({ type: "list" }, 5000);
+		const omit = omitStreamingMessages && worker.client.supports("list_without_streaming_messages");
+		const response = await worker.client.request(
+			omit ? { type: "list", omitStreamingMessages: true } : { type: "list" },
+			5000,
+		);
 		const summaries = sessionSummariesFromResponse(response);
-		worker.summaries = new Map(summaries.map((summary) => [summary.activeSessionId ?? summary.id, summary]));
+		const previous = worker.summaries;
+		worker.summaries = new Map(
+			summaries.map((summary) => {
+				const activeSessionId = summary.activeSessionId ?? summary.id;
+				if (!omit || summary.streamingMessage !== undefined) {
+					return [activeSessionId, summary];
+				}
+				const streamingMessage = previous.get(activeSessionId)?.streamingMessage;
+				return [activeSessionId, streamingMessage ? { ...summary, streamingMessage } : summary];
+			}),
+		);
 		for (const summary of summaries) {
 			const activeSessionId = summary.activeSessionId ?? summary.id;
 			if (summary.streamingMessage?.role === "assistant") {
