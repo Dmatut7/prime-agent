@@ -122,8 +122,6 @@ export function collectEntriesForBranchSummary(
 function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 	switch (entry.type) {
 		case "message":
-			// Tool-result context remains attached to its assistant tool call.
-			if (entry.message.role === "toolResult") return undefined;
 			return entry.message;
 
 		case "custom_message":

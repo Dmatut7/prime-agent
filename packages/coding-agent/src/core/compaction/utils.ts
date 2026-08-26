@@ -82,6 +82,34 @@ function truncateForSummary(text: string, maxChars: number): string {
 	return `${text.slice(0, maxChars)}\n\n[... ${truncatedChars} more characters truncated]`;
 }
 
+function imagePlaceholder(count: number): string {
+	return count === 1 ? "[image]" : `[${count} images]`;
+}
+
+/**
+ * Flatten user/tool-result content for the summarizer. Images cannot be sent
+ * into a text-only summary call, but they must still appear as a marker so the
+ * summary does not treat a screenshot-only turn as empty.
+ */
+function serializeTextAndImageBlocks(content: string | Array<{ type: string; text?: string }>): string {
+	if (typeof content === "string") {
+		return content;
+	}
+	const parts: string[] = [];
+	let images = 0;
+	for (const block of content) {
+		if (block.type === "text" && block.text) {
+			parts.push(block.text);
+		} else if (block.type === "image") {
+			images++;
+		}
+	}
+	if (images > 0) {
+		parts.push(imagePlaceholder(images));
+	}
+	return parts.join("\n");
+}
+
 /**
  * Serialize LLM messages to text for summarization.
  * This prevents the model from treating it as a conversation to continue.
@@ -95,13 +123,7 @@ export function serializeConversation(messages: Message[]): string {
 
 	for (const msg of messages) {
 		if (msg.role === "user") {
-			const content =
-				typeof msg.content === "string"
-					? msg.content
-					: msg.content
-							.filter((c): c is { type: "text"; text: string } => c.type === "text")
-							.map((c) => c.text)
-							.join("");
+			const content = serializeTextAndImageBlocks(msg.content);
 			if (content) parts.push(`[User]: ${content}`);
 		} else if (msg.role === "assistant") {
 			const textParts: string[] = [];
@@ -132,10 +154,7 @@ export function serializeConversation(messages: Message[]): string {
 				parts.push(`[Assistant tool calls]: ${toolCalls.join("; ")}`);
 			}
 		} else if (msg.role === "toolResult") {
-			const content = msg.content
-				.filter((c): c is { type: "text"; text: string } => c.type === "text")
-				.map((c) => c.text)
-				.join("");
+			const content = serializeTextAndImageBlocks(msg.content);
 			if (content) {
 				parts.push(`[Tool result]: ${truncateForSummary(content, TOOL_RESULT_MAX_CHARS)}`);
 			}

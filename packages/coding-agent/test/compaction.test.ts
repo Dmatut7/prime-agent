@@ -14,6 +14,7 @@ import {
 	estimateTokens,
 	findCutPoint,
 	getLastAssistantUsage,
+	prepareBranchEntries,
 	prepareCompaction,
 	shouldCompact,
 } from "../src/core/compaction/index.js";
@@ -742,4 +743,30 @@ describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("LLM summarization", () => {
 		console.log("Original messages:", loaded.messages.length);
 		console.log("After compaction:", reloaded.messages.length);
 	}, 60000);
+});
+
+describe("prepareBranchEntries includes tool results", () => {
+	it("feeds tool results to the branch summarizer", () => {
+		const toolResult: AgentMessage = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			content: [{ type: "text", text: "export function shouldCompact() {}" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("read the compaction helper")),
+			createMessageEntry(createAssistantMessage("reading it")),
+			createMessageEntry(toolResult),
+		];
+
+		const prepared = prepareBranchEntries(entries);
+
+		expect(prepared.messages.some((message) => message.role === "toolResult")).toBe(true);
+		expect(prepared.messages.find((message) => message.role === "toolResult")).toMatchObject({
+			toolName: "read",
+			content: [{ type: "text", text: "export function shouldCompact() {}" }],
+		});
+	});
 });
