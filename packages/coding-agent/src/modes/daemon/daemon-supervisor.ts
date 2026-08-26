@@ -299,6 +299,8 @@ interface ResidentWorker {
 	summaryRefresh?: CoalescedSummaryRefresh;
 	lastSummaryRefreshAt?: number;
 	syncedAgentPeers?: SyncedAgentPeers;
+	/** Durable descriptor already on disk, minus `updatedAt`, so identical rewrites are skipped. */
+	persistedDescriptorFingerprint?: string;
 }
 
 interface CoalescedSummaryRefresh {
@@ -1056,15 +1058,26 @@ export class DaemonSupervisor {
 	}
 
 	private persistWorker(worker: ResidentWorker): void {
-		worker.descriptor.updatedAt = new Date().toISOString();
+		// Every list refresh reaches here, so a descriptor whose durable content
+		// did not move must not touch the disk: the rename alone would wake file
+		// watchers once per worker per poll for no recoverable state.
 		const persisted = durableDaemonWorkerDescriptor(worker.descriptor);
+		const { updatedAt: _persistedAt, ...comparable } = persisted;
+		const fingerprint = JSON.stringify(comparable);
+		if (worker.persistedDescriptorFingerprint === fingerprint) {
+			return;
+		}
+		persisted.updatedAt = new Date().toISOString();
+		worker.descriptor.updatedAt = persisted.updatedAt;
 		const tempPath = `${worker.descriptorPath}.${process.pid}.tmp`;
 		writeFileSync(tempPath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
 		chmodSync(tempPath, 0o600);
 		renameSync(tempPath, worker.descriptorPath);
+		worker.persistedDescriptorFingerprint = fingerprint;
 	}
 
 	private deleteWorkerDescriptor(worker: ResidentWorker): void {
+		worker.persistedDescriptorFingerprint = undefined;
 		try {
 			rmSync(worker.descriptorPath, { force: true });
 			rmSync(worker.descriptor.recoveryJournalPath, { force: true });

@@ -1,6 +1,15 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -132,6 +141,21 @@ function readWorkerDescriptor(agentDir: string): DaemonWorkerDescriptor {
 		}
 	}
 	throw new Error("Worker descriptor was not persisted");
+}
+
+/** Descriptor identity per file, so a rewrite is visible even when the content is unchanged. */
+function readWorkerDescriptorStats(agentDir: string): Map<string, { mtimeMs: number; ino: number }> {
+	const stats = new Map<string, { mtimeMs: number; ino: number }>();
+	const workersRoot = join(agentDir, "daemon-workers");
+	for (const directory of readdirSync(workersRoot)) {
+		const descriptorDirectory = join(workersRoot, directory);
+		for (const name of readdirSync(descriptorDirectory)) {
+			if (!name.endsWith(".json")) continue;
+			const stat = statSync(join(descriptorDirectory, name));
+			stats.set(`${directory}/${name}`, { mtimeMs: stat.mtimeMs, ino: Number(stat.ino) });
+		}
+	}
+	return stats;
 }
 
 function countWorkerDescriptors(agentDir: string): number {
@@ -330,6 +354,51 @@ async function startBlockingBash(client: DaemonClient, activeSessionId: string, 
 }
 
 describe("daemon supervisor resident workers", () => {
+	it("does not rewrite worker descriptors while repeated list polls find nothing changed", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(tmpdir(), `prime-supervisor-churn-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
+		mkdirSync(projectDir, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const created = await client.request({
+			type: "create",
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const summary = requireSummary(created.data);
+		if (!summary.workerPid) throw new Error("Worker did not expose its pid");
+		workerPids.add(summary.workerPid);
+
+		// One settling poll first: the initial refresh legitimately records the
+		// worker's session identity, which the create response predates.
+		await client.request({ type: "list" });
+		const before = readWorkerDescriptorStats(agentDir);
+		expect(before.size).toBe(1);
+
+		for (let poll = 0; poll < 8; poll++) {
+			const response = await client.request({ type: "list" });
+			if (!response.success) throw new Error(response.error);
+			// Advance past filesystem mtime granularity so a rewrite would show.
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+		}
+
+		const after = readWorkerDescriptorStats(agentDir);
+		expect([...after.keys()]).toEqual([...before.keys()]);
+		for (const [name, stats] of after) {
+			expect(stats).toEqual(before.get(name));
+		}
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForProcessGone(summary.workerPid);
+		workerPids.delete(summary.workerPid);
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
 	it("accepts the canonical socket path when launched with duplicate slashes", async () => {
 		if (process.platform === "win32") return;
 		const root = tempDir();
