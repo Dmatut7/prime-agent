@@ -223,63 +223,74 @@ export function shouldCompact(contextTokens: number, contextWindow: number, sett
 	return contextTokens > contextWindow - settings.reserveTokens;
 }
 /**
- * Estimate token count for a message using chars/4 heuristic.
+ * Size unit for token estimation. BPE tokenizers segment UTF-8 bytes, so
+ * bytes/4 holds across scripts while chars/4 only holds for ASCII: a Chinese
+ * character is three bytes and costs roughly one token, which chars/4 undercounts
+ * about fourfold. ASCII is unaffected because its byte length equals its
+ * character length.
+ */
+function textBytes(text: string): number {
+	return Buffer.byteLength(text, "utf8");
+}
+
+/**
+ * Estimate token count for a message using a bytes/4 heuristic.
  * This is conservative (overestimates tokens).
  */
 export function estimateTokens(message: AgentMessage): number {
-	let chars = 0;
+	let bytes = 0;
 
 	switch (message.role) {
 		case "user": {
 			const content = (message as { content: string | Array<{ type: string; text?: string }> }).content;
 			if (typeof content === "string") {
-				chars = content.length;
+				bytes = textBytes(content);
 			} else if (Array.isArray(content)) {
 				for (const block of content) {
 					if (block.type === "text" && block.text) {
-						chars += block.text.length;
+						bytes += textBytes(block.text);
 					}
 				}
 			}
-			return Math.ceil(chars / 4);
+			return Math.ceil(bytes / 4);
 		}
 		case "assistant": {
 			const assistant = message as AssistantMessage;
 			for (const block of assistant.content) {
 				if (block.type === "text") {
-					chars += block.text.length;
+					bytes += textBytes(block.text);
 				} else if (block.type === "thinking") {
-					chars += block.thinking.length;
+					bytes += textBytes(block.thinking);
 				} else if (block.type === "toolCall") {
-					chars += block.name.length + JSON.stringify(block.arguments).length;
+					bytes += textBytes(block.name) + textBytes(JSON.stringify(block.arguments));
 				}
 			}
-			return Math.ceil(chars / 4);
+			return Math.ceil(bytes / 4);
 		}
 		case "custom":
 		case "toolResult": {
 			if (typeof message.content === "string") {
-				chars = message.content.length;
+				bytes = textBytes(message.content);
 			} else {
 				for (const block of message.content) {
 					if (block.type === "text" && block.text) {
-						chars += block.text.length;
+						bytes += textBytes(block.text);
 					}
 					if (block.type === "image") {
-						chars += 4800; // Estimate images as 4000 chars, or 1200 tokens
+						bytes += 4800; // Estimate images as 1200 tokens
 					}
 				}
 			}
-			return Math.ceil(chars / 4);
+			return Math.ceil(bytes / 4);
 		}
 		case "bashExecution": {
-			chars = message.command.length + message.output.length;
-			return Math.ceil(chars / 4);
+			bytes = textBytes(message.command) + textBytes(message.output);
+			return Math.ceil(bytes / 4);
 		}
 		case "branchSummary":
 		case "compactionSummary": {
-			chars = message.summary.length;
-			return Math.ceil(chars / 4);
+			bytes = textBytes(message.summary);
+			return Math.ceil(bytes / 4);
 		}
 	}
 

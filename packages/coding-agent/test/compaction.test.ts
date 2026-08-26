@@ -253,6 +253,82 @@ describe("getLastAssistantUsage", () => {
 	});
 });
 
+describe("estimateTokens sizes text by UTF-8 bytes", () => {
+	it("leaves ASCII estimates unchanged", () => {
+		// Byte length equals character length for ASCII, so existing sessions keep
+		// the exact estimate they had under the chars/4 heuristic.
+		expect(estimateTokens(createUserMessage("a".repeat(400)))).toBe(100);
+		expect(estimateTokens(createUserMessage("hello"))).toBe(2);
+	});
+
+	it("counts a three-byte CJK character as three, not one", () => {
+		const chineseChars = 100;
+		const estimate = estimateTokens(createUserMessage("你".repeat(chineseChars)));
+
+		expect(estimate).toBe(75);
+		expect(estimate).toBe(3 * Math.ceil(chineseChars / 4));
+	});
+
+	it("counts astral characters by their four bytes", () => {
+		expect(estimateTokens(createUserMessage("😀".repeat(10)))).toBe(10);
+	});
+
+	it("sizes mixed scripts by their own byte costs", () => {
+		const mixed = `${"a".repeat(400)}${"好".repeat(100)}`;
+		expect(estimateTokens(createUserMessage(mixed))).toBe(175);
+	});
+
+	it("applies to assistant, tool result, bash, and summary messages", () => {
+		const chinese = "字".repeat(100);
+		expect(estimateTokens(createAssistantMessage(chinese))).toBe(75);
+		expect(
+			estimateTokens({
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text", text: chinese }],
+				isError: false,
+				timestamp: Date.now(),
+			} as AgentMessage),
+		).toBe(75);
+		expect(
+			estimateTokens({
+				role: "bashExecution",
+				command: chinese,
+				output: chinese,
+				timestamp: Date.now(),
+			} as AgentMessage),
+		).toBe(150);
+		expect(
+			estimateTokens({
+				role: "compactionSummary",
+				summary: chinese,
+				timestamp: Date.now(),
+			} as AgentMessage),
+		).toBe(75);
+	});
+
+	it("keeps a CJK transcript's recent window near the configured budget", () => {
+		const entries: SessionEntry[] = [];
+		for (let i = 0; i < 40; i++) {
+			entries.push(createMessageEntry(createUserMessage(`问题${i}${"内".repeat(400)}`)));
+			entries.push(createMessageEntry(createAssistantMessage(`回答${i}${"容".repeat(400)}`)));
+		}
+
+		const keepRecentTokens = 4000;
+		const cut = findCutPoint(entries, 0, entries.length, keepRecentTokens);
+		// Measured independently of estimateTokens so the cut decision cannot
+		// validate itself: three-byte characters cost three bytes either way.
+		const keptBytes = entries
+			.slice(cut.firstKeptEntryIndex)
+			.filter((entry): entry is SessionMessageEntry => entry.type === "message")
+			.reduce((total, entry) => total + Buffer.byteLength(JSON.stringify(entry.message), "utf8"), 0);
+
+		expect(keptBytes).toBeGreaterThanOrEqual(keepRecentTokens * 4);
+		expect(keptBytes).toBeLessThan(keepRecentTokens * 4 * 1.5);
+	});
+});
+
 describe("aborted and errored turns are not charged to the context", () => {
 	// transformMessages drops these turns before the request leaves for the
 	// provider, so counting them would compact real history away early.

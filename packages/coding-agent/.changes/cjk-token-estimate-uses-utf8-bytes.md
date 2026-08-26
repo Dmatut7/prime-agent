@@ -1,0 +1,1 @@
+- Changed context-size estimates to count UTF-8 bytes instead of JavaScript characters, so Chinese and Japanese text is no longer treated as a quarter of its real token cost when deciding how much recent history to keep. ASCII sessions are unchanged because their byte length equals their character length.
