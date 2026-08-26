@@ -110,6 +110,7 @@ import {
 	waitForDaemonStartupFence,
 } from "./daemon-supervisor-ownership.js";
 import { DaemonWorkerClient } from "./daemon-worker-client.js";
+import { applySupervisorIdentityEnvFence } from "./daemon-worker-env.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
 	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
@@ -298,6 +299,8 @@ interface ResidentWorker {
 	summaryRefresh?: CoalescedSummaryRefresh;
 	lastSummaryRefreshAt?: number;
 	syncedAgentPeers?: SyncedAgentPeers;
+	/** Durable descriptor already on disk, minus `updatedAt`, so identical rewrites are skipped. */
+	persistedDescriptorFingerprint?: string;
 }
 
 interface CoalescedSummaryRefresh {
@@ -1055,15 +1058,26 @@ export class DaemonSupervisor {
 	}
 
 	private persistWorker(worker: ResidentWorker): void {
-		worker.descriptor.updatedAt = new Date().toISOString();
+		// Every list refresh reaches here, so a descriptor whose durable content
+		// did not move must not touch the disk: the rename alone would wake file
+		// watchers once per worker per poll for no recoverable state.
 		const persisted = durableDaemonWorkerDescriptor(worker.descriptor);
+		const { updatedAt: _persistedAt, ...comparable } = persisted;
+		const fingerprint = JSON.stringify(comparable);
+		if (worker.persistedDescriptorFingerprint === fingerprint) {
+			return;
+		}
+		persisted.updatedAt = new Date().toISOString();
+		worker.descriptor.updatedAt = persisted.updatedAt;
 		const tempPath = `${worker.descriptorPath}.${process.pid}.tmp`;
 		writeFileSync(tempPath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
 		chmodSync(tempPath, 0o600);
 		renameSync(tempPath, worker.descriptorPath);
+		worker.persistedDescriptorFingerprint = fingerprint;
 	}
 
 	private deleteWorkerDescriptor(worker: ResidentWorker): void {
+		worker.persistedDescriptorFingerprint = undefined;
 		try {
 			rmSync(worker.descriptorPath, { force: true });
 			rmSync(worker.descriptor.recoveryJournalPath, { force: true });
@@ -2457,19 +2471,21 @@ export class DaemonSupervisor {
 		const orphanProcessJournalPath =
 			existing?.descriptor.orphanProcessJournalPath ?? join(this.descriptorDir, `${workerId}.orphans.jsonl`);
 		const launch = createCliSubprocessLaunchSpec(["--mode", "daemon", "--daemon-socket", socketPath]);
-		const workerEnvironment = createCliSubprocessEnv({
-			...process.env,
-			...launchEnv,
-			[DAEMON_WORKER_ROLE_ENV]: "1",
-			[DAEMON_WORKER_TOKEN_ENV]: token,
-			[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: rootActiveSessionId,
-			[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: this.socketPath,
-			[DAEMON_WORKER_RECOVERY_JOURNAL_ENV]: recoveryJournalPath,
-			[DAEMON_WORKER_STARTUP_GATE_FD_ENV]: String(WORKER_STARTUP_GATE_FD),
-			[ORPHAN_PROCESS_JOURNAL_ENV]: orphanProcessJournalPath,
-			[SESSION_LEASES_ENABLED_ENV]: "1",
-			[SESSION_LEASE_OWNER_ID_ENV]: rootActiveSessionId,
-		});
+		const workerEnvironment = createCliSubprocessEnv(
+			applySupervisorIdentityEnvFence({
+				...process.env,
+				...launchEnv,
+				[DAEMON_WORKER_ROLE_ENV]: "1",
+				[DAEMON_WORKER_TOKEN_ENV]: token,
+				[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: rootActiveSessionId,
+				[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: this.socketPath,
+				[DAEMON_WORKER_RECOVERY_JOURNAL_ENV]: recoveryJournalPath,
+				[DAEMON_WORKER_STARTUP_GATE_FD_ENV]: String(WORKER_STARTUP_GATE_FD),
+				[ORPHAN_PROCESS_JOURNAL_ENV]: orphanProcessJournalPath,
+				[SESSION_LEASES_ENABLED_ENV]: "1",
+				[SESSION_LEASE_OWNER_ID_ENV]: rootActiveSessionId,
+			}),
+		);
 		delete workerEnvironment.RLM_DEPTH;
 		await this.assertRecoveryAllowed();
 		const child: ChildProcess = spawn(launch.command, launch.args, {

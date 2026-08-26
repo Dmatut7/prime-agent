@@ -104,14 +104,15 @@ class DaemonSupervisorAlreadyRunningError extends Error {
 class DaemonSupervisorOwnershipLostError extends Error {
 	readonly code = "supervisor_generation_stale" as const;
 
-	constructor(generation: string, details: { socketPath?: string; registryDir?: string } = {}) {
+	constructor(generation: string, details: { socketPath?: string; registryDir?: string; reason?: string } = {}) {
 		const context = [
+			details.reason,
 			details.socketPath ? `socket: ${details.socketPath}` : undefined,
 			details.registryDir ? `registry: ${details.registryDir}` : undefined,
 		].filter((part) => part !== undefined);
 		super(
-			`Daemon supervisor generation ${generation} no longer owns its registry entry ` +
-				`(record on disk is missing or was replaced)${context.length > 0 ? `; ${context.join("; ")}` : ""}; ` +
+			`Daemon supervisor generation ${generation} no longer owns its registry entry` +
+				`${context.length > 0 ? ` (${context.join("; ")})` : ""}; ` +
 				"restart the daemon to recover — sessions are preserved",
 		);
 		this.name = "DaemonSupervisorOwnershipLostError";
@@ -481,18 +482,33 @@ export async function assertDaemonSupervisorOwnerCurrent(
 	const current =
 		readOwnerRecord(ownerDirectoryPath(registryDir, owner.generation)) ??
 		(legacyRegistryDir ? readOwnerRecord(ownerDirectoryPath(legacyRegistryDir, owner.generation)) : undefined);
-	if (
-		!current ||
-		current.pid !== owner.pid ||
-		current.processStartId !== owner.processStartId ||
-		current.socketPath !== normalizeSocketPath(owner.socketPath) ||
-		!isProcessAlive(current.pid)
-	) {
-		throw new DaemonSupervisorOwnershipLostError(owner.generation, { socketPath: owner.socketPath, registryDir });
+	const normalizedSocketPath = normalizeSocketPath(owner.socketPath);
+	let mismatchReason: string | undefined;
+	if (!current) {
+		mismatchReason = "owner record missing";
+	} else if (current.pid !== owner.pid) {
+		mismatchReason = `pid mismatch claimed=${owner.pid} recorded=${current.pid}`;
+	} else if (current.processStartId !== owner.processStartId) {
+		mismatchReason = `processStartId mismatch claimed=${owner.processStartId ?? "<none>"} recorded=${current.processStartId ?? "<none>"}`;
+	} else if (current.socketPath !== normalizedSocketPath) {
+		mismatchReason = `socketPath mismatch claimed=${normalizedSocketPath} recorded=${current.socketPath}`;
+	} else if (!isProcessAlive(current.pid)) {
+		mismatchReason = `recorded pid ${current.pid} is not alive`;
+	}
+	if (mismatchReason || !current) {
+		throw new DaemonSupervisorOwnershipLostError(owner.generation, {
+			socketPath: owner.socketPath,
+			registryDir,
+			reason: mismatchReason ?? "owner record missing",
+		});
 	}
 	const fingerprint = ownerRecordFingerprint(current);
 	if (fingerprint !== validatedFingerprint && !isProcessIdentityAlive(current)) {
-		throw new DaemonSupervisorOwnershipLostError(owner.generation, { socketPath: owner.socketPath, registryDir });
+		throw new DaemonSupervisorOwnershipLostError(owner.generation, {
+			socketPath: owner.socketPath,
+			registryDir,
+			reason: "owner process identity is not alive",
+		});
 	}
 	return fingerprint;
 }

@@ -1,0 +1,1 @@
+- Fixed starting a second interactive session when another terminal already had Prime Agent open, by keeping worker identity checks independent of the new terminal's locale and home environment.

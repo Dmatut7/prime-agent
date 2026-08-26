@@ -1,6 +1,15 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -65,7 +74,7 @@ afterEach(async () => {
 	}
 	workerPids.clear();
 	for (const directory of tempDirs.splice(0)) {
-		rmSync(directory, { recursive: true, force: true });
+		rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
 
@@ -132,6 +141,21 @@ function readWorkerDescriptor(agentDir: string): DaemonWorkerDescriptor {
 		}
 	}
 	throw new Error("Worker descriptor was not persisted");
+}
+
+/** Descriptor identity per file, so a rewrite is visible even when the content is unchanged. */
+function readWorkerDescriptorStats(agentDir: string): Map<string, { mtimeMs: number; ino: number }> {
+	const stats = new Map<string, { mtimeMs: number; ino: number }>();
+	const workersRoot = join(agentDir, "daemon-workers");
+	for (const directory of readdirSync(workersRoot)) {
+		const descriptorDirectory = join(workersRoot, directory);
+		for (const name of readdirSync(descriptorDirectory)) {
+			if (!name.endsWith(".json")) continue;
+			const stat = statSync(join(descriptorDirectory, name));
+			stats.set(`${directory}/${name}`, { mtimeMs: stat.mtimeMs, ino: Number(stat.ino) });
+		}
+	}
+	return stats;
 }
 
 function countWorkerDescriptors(agentDir: string): number {
@@ -278,6 +302,48 @@ function quoteShellArgument(argument: string): string {
 	return `'${argument.replaceAll("'", `'"'"'`)}'`;
 }
 
+function foreignSecondWindowLaunchEnv(foreignHome: string): Record<string, string> {
+	return {
+		HOME: foreignHome,
+		LANG: "zh_CN.UTF-8",
+		LC_ALL: "zh_CN.UTF-8",
+		LC_TIME: "zh_CN.UTF-8",
+		TZ: "Asia/Shanghai",
+		OPENAI_API_KEY: "second-window-key",
+		TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
+	};
+}
+
+function trackWorkerPid(summary: SessionSummary): void {
+	if (summary.workerPid) {
+		workerPids.add(summary.workerPid);
+	}
+}
+
+async function expectQuickCreate(
+	client: DaemonClient,
+	request: Parameters<DaemonClient["request"]>[0],
+	agentDir: string,
+	label: string,
+	timeoutMs = 15_000,
+	maxElapsedMs = 12_000,
+): Promise<SessionSummary> {
+	const startedAt = Date.now();
+	const response = await client.request(request, timeoutMs);
+	const elapsedMs = Date.now() - startedAt;
+	if (!response.success) {
+		throw new Error(`${label} failed after ${elapsedMs}ms: ${response.error}\n${readDaemonLogs(agentDir)}`);
+	}
+	expect(elapsedMs).toBeLessThan(maxElapsedMs);
+	const summary = requireSummary(response.data);
+	trackWorkerPid(summary);
+	return summary;
+}
+
+function residentCreateConfig(projectDir: string, agentDir: string) {
+	return { cwd: projectDir, agentDir, noTools: true, noExtensions: true };
+}
+
 async function startBlockingBash(client: DaemonClient, activeSessionId: string, readyPath: string): Promise<void> {
 	const command = [process.execPath, blockingProcessPath, readyPath].map(quoteShellArgument).join(" ");
 	const response = await client.request({ type: "execute_bash", activeSessionId, command });
@@ -288,6 +354,51 @@ async function startBlockingBash(client: DaemonClient, activeSessionId: string, 
 }
 
 describe("daemon supervisor resident workers", () => {
+	it("does not rewrite worker descriptors while repeated list polls find nothing changed", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = join(tmpdir(), `prime-supervisor-churn-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
+		mkdirSync(projectDir, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const created = await client.request({
+			type: "create",
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const summary = requireSummary(created.data);
+		if (!summary.workerPid) throw new Error("Worker did not expose its pid");
+		workerPids.add(summary.workerPid);
+
+		// One settling poll first: the initial refresh legitimately records the
+		// worker's session identity, which the create response predates.
+		await client.request({ type: "list" });
+		const before = readWorkerDescriptorStats(agentDir);
+		expect(before.size).toBe(1);
+
+		for (let poll = 0; poll < 8; poll++) {
+			const response = await client.request({ type: "list" });
+			if (!response.success) throw new Error(response.error);
+			// Advance past filesystem mtime granularity so a rewrite would show.
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+		}
+
+		const after = readWorkerDescriptorStats(agentDir);
+		expect([...after.keys()]).toEqual([...before.keys()]);
+		for (const [name, stats] of after) {
+			expect(stats).toEqual(before.get(name));
+		}
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForProcessGone(summary.workerPid);
+		workerPids.delete(summary.workerPid);
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
 	it("accepts the canonical socket path when launched with duplicate slashes", async () => {
 		if (process.platform === "win32") return;
 		const root = tempDir();
@@ -542,6 +653,327 @@ describe("daemon supervisor resident workers", () => {
 			"Client-owned worker descriptor was not removed",
 		);
 		expect((await readSessionInfo(sessionFile))?.state?.status).not.toBe("archived");
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
+	it("accepts a second create when launchEnv carries a foreign HOME and LANG", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const foreignHome = join(root, "foreign-home");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-second-window-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+		mkdirSync(foreignHome, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], {
+			HOME: join(root, "supervisor-home"),
+			LANG: "C.UTF-8",
+			LC_ALL: "C",
+			LC_TIME: "C",
+		});
+		mkdirSync(join(root, "supervisor-home"), { recursive: true });
+		const client = await connectEventually(socketPath, supervisor);
+
+		const firstSummary = await expectQuickCreate(
+			client,
+			{ type: "create", config: residentCreateConfig(projectDir, agentDir) },
+			agentDir,
+			"first resident create",
+		);
+
+		const secondSummary = await expectQuickCreate(
+			client,
+			{
+				type: "create",
+				lifecycle: "client_owned",
+				noSession: true,
+				launchEnv: foreignSecondWindowLaunchEnv(foreignHome),
+				config: residentCreateConfig(projectDir, agentDir),
+			},
+			agentDir,
+			"second client-owned create with foreign launchEnv",
+		);
+		expect(secondSummary.sessionId).toBeTruthy();
+		expect(secondSummary.activeSessionId).toBeTruthy();
+		expect(secondSummary.activeSessionId).not.toBe(firstSummary.activeSessionId);
+
+		const publicList = await client.request({ type: "list" });
+		expect(publicList.success).toBe(true);
+		expect(requireSessionList(publicList.success ? publicList.data : undefined).length).toBeGreaterThanOrEqual(1);
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
+	it("accepts a second resident create from another client without launchEnv", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-second-resident-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], {
+			HOME: join(root, "supervisor-home"),
+			LANG: "C.UTF-8",
+			LC_ALL: "C",
+		});
+		mkdirSync(join(root, "supervisor-home"), { recursive: true });
+
+		const firstClient = await connectEventually(socketPath, supervisor);
+		const secondClient = await connectEventually(socketPath, supervisor);
+		const createConfig = residentCreateConfig(projectDir, agentDir);
+
+		const firstSummary = await expectQuickCreate(
+			firstClient,
+			{ type: "create", config: createConfig },
+			agentDir,
+			"first terminal resident create",
+		);
+		const secondSummary = await expectQuickCreate(
+			secondClient,
+			{ type: "create", config: createConfig },
+			agentDir,
+			"second terminal resident create",
+		);
+
+		expect(secondSummary.sessionId).toBeTruthy();
+		expect(secondSummary.activeSessionId).toBeTruthy();
+		expect(secondSummary.activeSessionId).not.toBe(firstSummary.activeSessionId);
+
+		const publicList = await firstClient.request({ type: "list" });
+		expect(publicList.success).toBe(true);
+		expect(requireSessionList(publicList.success ? publicList.data : undefined).length).toBeGreaterThanOrEqual(2);
+
+		await firstClient.request({ type: "shutdown" });
+		firstClient.close();
+		secondClient.close();
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
+	it("accepts concurrent creates when one client-owned worker carries foreign launchEnv", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const foreignHome = join(root, "foreign-home");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-concurrent-second-window-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+		mkdirSync(foreignHome, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], {
+			HOME: join(root, "supervisor-home"),
+			LANG: "C.UTF-8",
+			LC_ALL: "C",
+			LC_TIME: "C",
+		});
+		mkdirSync(join(root, "supervisor-home"), { recursive: true });
+
+		const residentClient = await connectEventually(socketPath, supervisor);
+		const ownedClient = await connectEventually(socketPath, supervisor);
+		const createConfig = residentCreateConfig(projectDir, agentDir);
+		const startedAt = Date.now();
+
+		const [residentSummary, ownedSummary] = await Promise.all([
+			expectQuickCreate(
+				residentClient,
+				{ type: "create", config: createConfig },
+				agentDir,
+				"concurrent resident create",
+			),
+			expectQuickCreate(
+				ownedClient,
+				{
+					type: "create",
+					lifecycle: "client_owned",
+					noSession: true,
+					launchEnv: foreignSecondWindowLaunchEnv(foreignHome),
+					config: createConfig,
+				},
+				agentDir,
+				"concurrent client-owned create with foreign launchEnv",
+			),
+		]);
+
+		expect(Date.now() - startedAt).toBeLessThan(15_000);
+		expect(residentSummary.activeSessionId).toBeTruthy();
+		expect(ownedSummary.activeSessionId).toBeTruthy();
+		expect(residentSummary.activeSessionId).not.toBe(ownedSummary.activeSessionId);
+		expect(countWorkerDescriptors(agentDir)).toBeGreaterThanOrEqual(2);
+		expect(readDaemonLogs(agentDir)).not.toContain("supervisor_generation_stale");
+
+		await residentClient.request({ type: "shutdown" });
+		residentClient.close();
+		ownedClient.close();
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
+	it("accepts mixed resident and client-owned creates under a zh_CN supervisor locale", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const foreignHome = join(root, "foreign-home");
+		const socketPath = join(tmpdir(), `prime-supervisor-zh-locale-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
+		mkdirSync(projectDir, { recursive: true });
+		mkdirSync(foreignHome, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], {
+			HOME: join(root, "supervisor-home"),
+			LANG: "zh_CN.UTF-8",
+			LC_ALL: "zh_CN.UTF-8",
+			LC_TIME: "zh_CN.UTF-8",
+			TZ: "Asia/Shanghai",
+		});
+		mkdirSync(join(root, "supervisor-home"), { recursive: true });
+
+		const client = await connectEventually(socketPath, supervisor);
+		const createConfig = residentCreateConfig(projectDir, agentDir);
+		const summaries: SessionSummary[] = [];
+
+		for (let index = 0; index < 3; index++) {
+			summaries.push(
+				await expectQuickCreate(
+					client,
+					{ type: "create", config: createConfig },
+					agentDir,
+					`resident create ${index + 1} under zh_CN supervisor`,
+				),
+			);
+		}
+		summaries.push(
+			await expectQuickCreate(
+				client,
+				{
+					type: "create",
+					lifecycle: "client_owned",
+					noSession: true,
+					launchEnv: foreignSecondWindowLaunchEnv(foreignHome),
+					config: createConfig,
+				},
+				agentDir,
+				"client-owned create with foreign launchEnv under zh_CN supervisor",
+			),
+		);
+
+		const activeSessionIds = new Set(summaries.map((summary) => summary.activeSessionId).filter(Boolean));
+		expect(activeSessionIds.size).toBe(summaries.length);
+		expect(readDaemonLogs(agentDir)).not.toContain("supervisor_generation_stale");
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 90_000);
+
+	it("ignores foreign identity keys in launchEnv on resident create", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const foreignHome = join(root, "foreign-home");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-resident-launch-env-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+		mkdirSync(foreignHome, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], {
+			HOME: join(root, "supervisor-home"),
+			LANG: "C.UTF-8",
+			LC_ALL: "C",
+		});
+		mkdirSync(join(root, "supervisor-home"), { recursive: true });
+		const client = await connectEventually(socketPath, supervisor);
+		const createConfig = residentCreateConfig(projectDir, agentDir);
+
+		await expectQuickCreate(client, { type: "create", config: createConfig }, agentDir, "baseline resident create");
+		await expectQuickCreate(
+			client,
+			{
+				type: "create",
+				launchEnv: foreignSecondWindowLaunchEnv(foreignHome),
+				config: createConfig,
+			},
+			agentDir,
+			"legacy resident create with foreign launchEnv",
+		);
+		expect(readDaemonLogs(agentDir)).not.toContain("supervisor_generation_stale");
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
+	it("recovers a client-owned worker after crash when launchEnv carries foreign identity keys", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const foreignHome = join(root, "foreign-home");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-owned-recovery-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+		mkdirSync(foreignHome, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], {
+			HOME: join(root, "supervisor-home"),
+			LANG: "C.UTF-8",
+			LC_ALL: "C",
+			LC_TIME: "C",
+		});
+		mkdirSync(join(root, "supervisor-home"), { recursive: true });
+		const client = await connectEventually(socketPath, supervisor);
+		const createConfig = residentCreateConfig(projectDir, agentDir);
+		const summary = await expectQuickCreate(
+			client,
+			{
+				type: "create",
+				lifecycle: "client_owned",
+				noSession: true,
+				launchEnv: foreignSecondWindowLaunchEnv(foreignHome),
+				config: createConfig,
+			},
+			agentDir,
+			"client-owned create with foreign launchEnv",
+		);
+		if (!summary.workerPid || !summary.activeSessionId) {
+			throw new Error("Client-owned worker did not expose its process identity");
+		}
+
+		process.kill(summary.workerPid, "SIGKILL");
+		await waitForProcessGone(summary.workerPid);
+		workerPids.delete(summary.workerPid);
+
+		const recoveryDeadline = Date.now() + 20_000;
+		let recoveredSummary: SessionSummary | undefined;
+		while (Date.now() < recoveryDeadline) {
+			const response = await client.request({ type: "list", includeClientOwned: true });
+			if (response.success) {
+				recoveredSummary = requireSessionList(response.data).find(
+					(entry) => (entry.activeSessionId ?? entry.id) === (summary.activeSessionId ?? summary.id),
+				);
+				if (recoveredSummary?.workerState === "ready" && recoveredSummary.workerPid !== summary.workerPid) {
+					break;
+				}
+			}
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+		}
+		if (!recoveredSummary?.workerPid) {
+			throw new Error(`Client-owned worker did not recover:\n${readDaemonLogs(agentDir)}`);
+		}
+		workerPids.add(recoveredSummary.workerPid);
+		expect(readDaemonLogs(agentDir)).not.toContain("supervisor_generation_stale");
 
 		await client.request({ type: "shutdown" });
 		client.close();

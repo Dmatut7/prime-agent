@@ -1,0 +1,1 @@
+- Changed compaction and branch summaries to keep a visible `[image]` marker for screenshot-only turns, and to include tool results when summarizing a branch that is being left, so the next model no longer loses that those images existed or what a tool actually returned.

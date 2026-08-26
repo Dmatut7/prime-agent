@@ -75,4 +75,47 @@ describe("serializeConversation", () => {
 		expect(result).not.toContain("truncated");
 		expect(result).toContain(longText);
 	});
+
+	it("keeps a marker when a user turn is image-only", () => {
+		const result = serializeConversation([
+			{
+				role: "user",
+				content: [{ type: "image", data: "abc", mimeType: "image/png" }],
+				timestamp: Date.now(),
+			},
+		]);
+
+		expect(result).toBe("[User]: [image]");
+	});
+
+	it("keeps text and an image count when a user turn mixes both", () => {
+		const result = serializeConversation([
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "look at these" },
+					{ type: "image", data: "a", mimeType: "image/png" },
+					{ type: "image", data: "b", mimeType: "image/png" },
+				],
+				timestamp: Date.now(),
+			},
+		]);
+
+		expect(result).toBe("[User]: look at these\n[2 images]");
+	});
+
+	it("keeps a marker when a tool result is image-only", () => {
+		const result = serializeConversation([
+			{
+				role: "toolResult",
+				toolCallId: "tc1",
+				toolName: "ipython",
+				content: [{ type: "image", data: "abc", mimeType: "image/png" }],
+				isError: false,
+				timestamp: Date.now(),
+			},
+		]);
+
+		expect(result).toBe("[Tool result]: [image]");
+	});
 });

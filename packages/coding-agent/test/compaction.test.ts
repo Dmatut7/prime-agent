@@ -11,8 +11,10 @@ import {
 	compact,
 	DEFAULT_COMPACTION_SETTINGS,
 	estimateContextTokens,
+	estimateTokens,
 	findCutPoint,
 	getLastAssistantUsage,
+	prepareBranchEntries,
 	prepareCompaction,
 	shouldCompact,
 } from "../src/core/compaction/index.js";
@@ -249,6 +251,143 @@ describe("getLastAssistantUsage", () => {
 	it("should return undefined if no assistant messages", () => {
 		const entries: SessionEntry[] = [createMessageEntry(createUserMessage("Hello"))];
 		expect(getLastAssistantUsage(entries)).toBeUndefined();
+	});
+});
+
+describe("estimateTokens sizes text by UTF-8 bytes", () => {
+	it("leaves ASCII estimates unchanged", () => {
+		// Byte length equals character length for ASCII, so existing sessions keep
+		// the exact estimate they had under the chars/4 heuristic.
+		expect(estimateTokens(createUserMessage("a".repeat(400)))).toBe(100);
+		expect(estimateTokens(createUserMessage("hello"))).toBe(2);
+	});
+
+	it("counts a three-byte CJK character as three, not one", () => {
+		const chineseChars = 100;
+		const estimate = estimateTokens(createUserMessage("你".repeat(chineseChars)));
+
+		expect(estimate).toBe(75);
+		expect(estimate).toBe(3 * Math.ceil(chineseChars / 4));
+	});
+
+	it("counts astral characters by their four bytes", () => {
+		expect(estimateTokens(createUserMessage("😀".repeat(10)))).toBe(10);
+	});
+
+	it("sizes mixed scripts by their own byte costs", () => {
+		const mixed = `${"a".repeat(400)}${"好".repeat(100)}`;
+		expect(estimateTokens(createUserMessage(mixed))).toBe(175);
+	});
+
+	it("applies to assistant, tool result, bash, and summary messages", () => {
+		const chinese = "字".repeat(100);
+		expect(estimateTokens(createAssistantMessage(chinese))).toBe(75);
+		expect(
+			estimateTokens({
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text", text: chinese }],
+				isError: false,
+				timestamp: Date.now(),
+			} as AgentMessage),
+		).toBe(75);
+		expect(
+			estimateTokens({
+				role: "bashExecution",
+				command: chinese,
+				output: chinese,
+				timestamp: Date.now(),
+			} as AgentMessage),
+		).toBe(150);
+		expect(
+			estimateTokens({
+				role: "compactionSummary",
+				summary: chinese,
+				timestamp: Date.now(),
+			} as AgentMessage),
+		).toBe(75);
+	});
+
+	it("keeps a CJK transcript's recent window near the configured budget", () => {
+		const entries: SessionEntry[] = [];
+		for (let i = 0; i < 40; i++) {
+			entries.push(createMessageEntry(createUserMessage(`问题${i}${"内".repeat(400)}`)));
+			entries.push(createMessageEntry(createAssistantMessage(`回答${i}${"容".repeat(400)}`)));
+		}
+
+		const keepRecentTokens = 4000;
+		const cut = findCutPoint(entries, 0, entries.length, keepRecentTokens);
+		// Measured independently of estimateTokens so the cut decision cannot
+		// validate itself: three-byte characters cost three bytes either way.
+		const keptBytes = entries
+			.slice(cut.firstKeptEntryIndex)
+			.filter((entry): entry is SessionMessageEntry => entry.type === "message")
+			.reduce((total, entry) => total + Buffer.byteLength(JSON.stringify(entry.message), "utf8"), 0);
+
+		expect(keptBytes).toBeGreaterThanOrEqual(keepRecentTokens * 4);
+		expect(keptBytes).toBeLessThan(keepRecentTokens * 4 * 1.5);
+	});
+});
+
+describe("aborted and errored turns are not charged to the context", () => {
+	// transformMessages drops these turns before the request leaves for the
+	// provider, so counting them would compact real history away early.
+	function createStoppedAssistant(text: string, stopReason: AssistantMessage["stopReason"]): AssistantMessage {
+		return { ...createAssistantMessage(text, createMockUsage(0, 0)), stopReason };
+	}
+
+	it("excludes an aborted turn from the trailing estimate", () => {
+		const anchored = createAssistantMessage("anchor", createMockUsage(1000, 0));
+		const withoutAbort = estimateContextTokens([createUserMessage("hello"), anchored, createUserMessage("next")]);
+		const withAbort = estimateContextTokens([
+			createUserMessage("hello"),
+			anchored,
+			createStoppedAssistant("x".repeat(40_000), "aborted"),
+			createUserMessage("next"),
+		]);
+
+		expect(withoutAbort.tokens).toBe(withAbort.tokens);
+		expect(withAbort.trailingTokens).toBe(withoutAbort.trailingTokens);
+	});
+
+	it("excludes an errored turn from the trailing estimate", () => {
+		const anchored = createAssistantMessage("anchor", createMockUsage(1000, 0));
+		const baseline = estimateContextTokens([anchored, createUserMessage("next")]);
+		const withError = estimateContextTokens([
+			anchored,
+			createStoppedAssistant("y".repeat(40_000), "error"),
+			createUserMessage("next"),
+		]);
+
+		expect(withError.tokens).toBe(baseline.tokens);
+	});
+
+	it("excludes aborted turns when no usage anchors the estimate", () => {
+		const estimate = estimateContextTokens([
+			createUserMessage("hello"),
+			createStoppedAssistant("z".repeat(40_000), "aborted"),
+		]);
+
+		expect(estimate.tokens).toBe(Math.ceil("hello".length / 4));
+	});
+
+	it("does not let aborted turns consume the keep-recent budget", () => {
+		const entries: SessionEntry[] = [];
+		for (let i = 0; i < 6; i++) {
+			entries.push(createMessageEntry(createUserMessage(`real question ${i} ${"q".repeat(4000)}`)));
+			entries.push(createMessageEntry(createAssistantMessage(`real answer ${i} ${"a".repeat(4000)}`)));
+			entries.push(createMessageEntry(createStoppedAssistant(`abandoned ${i} ${"b".repeat(40_000)}`, "aborted")));
+		}
+
+		const cut = findCutPoint(entries, 0, entries.length, 4000);
+		const keptRealTokens = entries
+			.slice(cut.firstKeptEntryIndex)
+			.filter((entry): entry is SessionMessageEntry => entry.type === "message")
+			.filter((entry) => entry.message.role !== "assistant" || entry.message.stopReason === "stop")
+			.reduce((total, entry) => total + estimateTokens(entry.message), 0);
+
+		expect(keptRealTokens).toBeGreaterThanOrEqual(4000);
 	});
 });
 
@@ -604,4 +743,30 @@ describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("LLM summarization", () => {
 		console.log("Original messages:", loaded.messages.length);
 		console.log("After compaction:", reloaded.messages.length);
 	}, 60000);
+});
+
+describe("prepareBranchEntries includes tool results", () => {
+	it("feeds tool results to the branch summarizer", () => {
+		const toolResult: AgentMessage = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			content: [{ type: "text", text: "export function shouldCompact() {}" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("read the compaction helper")),
+			createMessageEntry(createAssistantMessage("reading it")),
+			createMessageEntry(toolResult),
+		];
+
+		const prepared = prepareBranchEntries(entries);
+
+		expect(prepared.messages.some((message) => message.role === "toolResult")).toBe(true);
+		expect(prepared.messages.find((message) => message.role === "toolResult")).toMatchObject({
+			toolName: "read",
+			content: [{ type: "text", text: "export function shouldCompact() {}" }],
+		});
+	});
 });

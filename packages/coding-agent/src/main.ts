@@ -1006,7 +1006,7 @@ async function createDaemonClientConnection(options: {
 			noSession: options.noSession,
 			env: collectDaemonClientEnv(),
 			lifecycle: options.clientOwned ? "client_owned" : "resident",
-			launchEnv: collectDaemonLaunchEnv(),
+			launchEnv: options.clientOwned ? collectDaemonLaunchEnv() : undefined,
 		});
 		if (!response.success) {
 			throw deserializeDaemonError(response);
