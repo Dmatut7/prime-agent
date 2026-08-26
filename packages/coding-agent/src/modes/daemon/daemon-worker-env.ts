@@ -1,6 +1,7 @@
 /** Identity and locale keys that must stay aligned with the supervisor process. */
 export const SUPERVISOR_IDENTITY_ENV_KEYS = [
 	"HOME",
+	"USERPROFILE",
 	"USER",
 	"LOGNAME",
 	"LANG",

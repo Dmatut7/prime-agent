@@ -122,7 +122,7 @@ function runProcessQuery(command: string, args: string[], env?: NodeJS.ProcessEn
 
 /** Force C locale so macOS/BSD `ps -o lstart=` matches owner records regardless of the caller's LANG. */
 function runProcessQueryWithCLocale(command: string, args: string[]): string {
-	return runProcessQuery(command, args, { ...process.env, LC_ALL: "C", LANG: "C" });
+	return runProcessQuery(command, args, { ...process.env, LC_ALL: "C", LANG: "C", LC_TIME: "C" });
 }
 
 export function getWindowsProcessStartId(pid: number, query: ProcessQuery = runProcessQuery): string | undefined {

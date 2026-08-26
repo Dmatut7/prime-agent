@@ -806,6 +806,111 @@ describe("daemon supervisor resident workers", () => {
 		await waitForSocketGone(socketPath);
 	}, 90_000);
 
+	it("ignores foreign identity keys in launchEnv on resident create", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const foreignHome = join(root, "foreign-home");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-resident-launch-env-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+		mkdirSync(foreignHome, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], {
+			HOME: join(root, "supervisor-home"),
+			LANG: "C.UTF-8",
+			LC_ALL: "C",
+		});
+		mkdirSync(join(root, "supervisor-home"), { recursive: true });
+		const client = await connectEventually(socketPath, supervisor);
+		const createConfig = residentCreateConfig(projectDir, agentDir);
+
+		await expectQuickCreate(client, { type: "create", config: createConfig }, agentDir, "baseline resident create");
+		await expectQuickCreate(
+			client,
+			{
+				type: "create",
+				launchEnv: foreignSecondWindowLaunchEnv(foreignHome),
+				config: createConfig,
+			},
+			agentDir,
+			"legacy resident create with foreign launchEnv",
+		);
+		expect(readDaemonLogs(agentDir)).not.toContain("supervisor_generation_stale");
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
+	it("recovers a client-owned worker after crash when launchEnv carries foreign identity keys", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const foreignHome = join(root, "foreign-home");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-owned-recovery-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+		mkdirSync(foreignHome, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], {
+			HOME: join(root, "supervisor-home"),
+			LANG: "C.UTF-8",
+			LC_ALL: "C",
+			LC_TIME: "C",
+		});
+		mkdirSync(join(root, "supervisor-home"), { recursive: true });
+		const client = await connectEventually(socketPath, supervisor);
+		const createConfig = residentCreateConfig(projectDir, agentDir);
+		const summary = await expectQuickCreate(
+			client,
+			{
+				type: "create",
+				lifecycle: "client_owned",
+				noSession: true,
+				launchEnv: foreignSecondWindowLaunchEnv(foreignHome),
+				config: createConfig,
+			},
+			agentDir,
+			"client-owned create with foreign launchEnv",
+		);
+		if (!summary.workerPid || !summary.activeSessionId) {
+			throw new Error("Client-owned worker did not expose its process identity");
+		}
+
+		process.kill(summary.workerPid, "SIGKILL");
+		await waitForProcessGone(summary.workerPid);
+		workerPids.delete(summary.workerPid);
+
+		const recoveryDeadline = Date.now() + 20_000;
+		let recoveredSummary: SessionSummary | undefined;
+		while (Date.now() < recoveryDeadline) {
+			const response = await client.request({ type: "list", includeClientOwned: true });
+			if (response.success) {
+				recoveredSummary = requireSessionList(response.data).find(
+					(entry) => (entry.activeSessionId ?? entry.id) === (summary.activeSessionId ?? summary.id),
+				);
+				if (recoveredSummary?.workerState === "ready" && recoveredSummary.workerPid !== summary.workerPid) {
+					break;
+				}
+			}
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+		}
+		if (!recoveredSummary?.workerPid) {
+			throw new Error(`Client-owned worker did not recover:\n${readDaemonLogs(agentDir)}`);
+		}
+		workerPids.add(recoveredSummary.workerPid);
+		expect(readDaemonLogs(agentDir)).not.toContain("supervisor_generation_stale");
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
 	it("releases an adopted client-owned worker when disposal races supervisor replacement", async () => {
 		const root = tempDir();
 		const agentDir = join(root, "agent");

@@ -42,6 +42,24 @@ describe("applySupervisorIdentityEnvFence", () => {
 		expect(fenced.CUSTOM_TOKEN).toBe("keep-me");
 	});
 
+	it("restores USERPROFILE from the supervisor environment", () => {
+		const supervisorEnv = {
+			HOME: "C:\\Users\\supervisor",
+			USERPROFILE: "C:\\Users\\supervisor",
+		};
+		const merged = {
+			HOME: "C:\\Users\\other",
+			USERPROFILE: "C:\\Users\\other",
+			OPENAI_API_KEY: "client-key",
+		};
+
+		const fenced = applySupervisorIdentityEnvFence(merged, supervisorEnv);
+
+		expect(fenced.HOME).toBe("C:\\Users\\supervisor");
+		expect(fenced.USERPROFILE).toBe("C:\\Users\\supervisor");
+		expect(fenced.OPENAI_API_KEY).toBe("client-key");
+	});
+
 	it("restores supervisor PRIME_AGENT_INTERNAL_* without wiping worker internals", () => {
 		const supervisorEnv = {
 			HOME: "/Users/supervisor",
