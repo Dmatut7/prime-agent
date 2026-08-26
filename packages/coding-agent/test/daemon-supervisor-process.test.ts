@@ -548,6 +548,76 @@ describe("daemon supervisor resident workers", () => {
 		await waitForSocketGone(socketPath);
 	}, 60_000);
 
+	it("accepts a second create when launchEnv carries a foreign HOME and LANG", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const foreignHome = join(root, "foreign-home");
+		const socketPath = join(
+			tmpdir(),
+			`prime-supervisor-second-window-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+		);
+		mkdirSync(projectDir, { recursive: true });
+		mkdirSync(foreignHome, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], {
+			HOME: join(root, "supervisor-home"),
+			LANG: "C.UTF-8",
+			LC_ALL: "C",
+			LC_TIME: "C",
+		});
+		mkdirSync(join(root, "supervisor-home"), { recursive: true });
+		const client = await connectEventually(socketPath, supervisor);
+
+		const first = await client.request({
+			type: "create",
+			config: { cwd: projectDir, agentDir, noTools: true, noExtensions: true },
+		});
+		if (!first.success) {
+			throw new Error(`first create failed: ${first.error}\n${readDaemonLogs(agentDir)}`);
+		}
+		const firstSummary = requireSummary(first.data);
+		if (firstSummary.workerPid) {
+			workerPids.add(firstSummary.workerPid);
+		}
+
+		const startedAt = Date.now();
+		const second = await client.request(
+			{
+				type: "create",
+				lifecycle: "client_owned",
+				noSession: true,
+				launchEnv: {
+					HOME: foreignHome,
+					LANG: "zh_CN.UTF-8",
+					LC_ALL: "zh_CN.UTF-8",
+					LC_TIME: "zh_CN.UTF-8",
+					OPENAI_API_KEY: "second-window-key",
+					TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
+				},
+				config: { cwd: projectDir, agentDir, noTools: true, noExtensions: true },
+			},
+			15_000,
+		);
+		const elapsedMs = Date.now() - startedAt;
+		if (!second.success) {
+			throw new Error(`second create failed after ${elapsedMs}ms: ${second.error}\n${readDaemonLogs(agentDir)}`);
+		}
+		expect(elapsedMs).toBeLessThan(12_000);
+		const secondSummary = requireSummary(second.data);
+		if (secondSummary.workerPid) {
+			workerPids.add(secondSummary.workerPid);
+		}
+
+		const publicList = await client.request({ type: "list" });
+		expect(publicList.success).toBe(true);
+		expect(requireSessionList(publicList.success ? publicList.data : undefined).length).toBeGreaterThanOrEqual(1);
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
 	it("releases an adopted client-owned worker when disposal races supervisor replacement", async () => {
 		const root = tempDir();
 		const agentDir = join(root, "agent");
