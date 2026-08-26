@@ -1,0 +1,1 @@
+- Fixed aborted and errored turns counting toward the context estimate even though they are dropped before the request reaches the model, which triggered compaction earlier than the real context required and let abandoned output consume the keep-recent budget that decides how much recent history survives.

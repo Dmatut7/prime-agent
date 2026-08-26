@@ -11,6 +11,7 @@ import {
 	compact,
 	DEFAULT_COMPACTION_SETTINGS,
 	estimateContextTokens,
+	estimateTokens,
 	findCutPoint,
 	getLastAssistantUsage,
 	prepareCompaction,
@@ -249,6 +250,67 @@ describe("getLastAssistantUsage", () => {
 	it("should return undefined if no assistant messages", () => {
 		const entries: SessionEntry[] = [createMessageEntry(createUserMessage("Hello"))];
 		expect(getLastAssistantUsage(entries)).toBeUndefined();
+	});
+});
+
+describe("aborted and errored turns are not charged to the context", () => {
+	// transformMessages drops these turns before the request leaves for the
+	// provider, so counting them would compact real history away early.
+	function createStoppedAssistant(text: string, stopReason: AssistantMessage["stopReason"]): AssistantMessage {
+		return { ...createAssistantMessage(text, createMockUsage(0, 0)), stopReason };
+	}
+
+	it("excludes an aborted turn from the trailing estimate", () => {
+		const anchored = createAssistantMessage("anchor", createMockUsage(1000, 0));
+		const withoutAbort = estimateContextTokens([createUserMessage("hello"), anchored, createUserMessage("next")]);
+		const withAbort = estimateContextTokens([
+			createUserMessage("hello"),
+			anchored,
+			createStoppedAssistant("x".repeat(40_000), "aborted"),
+			createUserMessage("next"),
+		]);
+
+		expect(withoutAbort.tokens).toBe(withAbort.tokens);
+		expect(withAbort.trailingTokens).toBe(withoutAbort.trailingTokens);
+	});
+
+	it("excludes an errored turn from the trailing estimate", () => {
+		const anchored = createAssistantMessage("anchor", createMockUsage(1000, 0));
+		const baseline = estimateContextTokens([anchored, createUserMessage("next")]);
+		const withError = estimateContextTokens([
+			anchored,
+			createStoppedAssistant("y".repeat(40_000), "error"),
+			createUserMessage("next"),
+		]);
+
+		expect(withError.tokens).toBe(baseline.tokens);
+	});
+
+	it("excludes aborted turns when no usage anchors the estimate", () => {
+		const estimate = estimateContextTokens([
+			createUserMessage("hello"),
+			createStoppedAssistant("z".repeat(40_000), "aborted"),
+		]);
+
+		expect(estimate.tokens).toBe(Math.ceil("hello".length / 4));
+	});
+
+	it("does not let aborted turns consume the keep-recent budget", () => {
+		const entries: SessionEntry[] = [];
+		for (let i = 0; i < 6; i++) {
+			entries.push(createMessageEntry(createUserMessage(`real question ${i} ${"q".repeat(4000)}`)));
+			entries.push(createMessageEntry(createAssistantMessage(`real answer ${i} ${"a".repeat(4000)}`)));
+			entries.push(createMessageEntry(createStoppedAssistant(`abandoned ${i} ${"b".repeat(40_000)}`, "aborted")));
+		}
+
+		const cut = findCutPoint(entries, 0, entries.length, 4000);
+		const keptRealTokens = entries
+			.slice(cut.firstKeptEntryIndex)
+			.filter((entry): entry is SessionMessageEntry => entry.type === "message")
+			.filter((entry) => entry.message.role !== "assistant" || entry.message.stopReason === "stop")
+			.reduce((total, entry) => total + estimateTokens(entry.message), 0);
+
+		expect(keptRealTokens).toBeGreaterThanOrEqual(4000);
 	});
 });
 

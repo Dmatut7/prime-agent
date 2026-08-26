@@ -167,6 +167,17 @@ function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; in
 }
 
 /**
+ * Whether a message reaches the model at all. Assistant turns that ended aborted
+ * or errored are dropped before the request leaves for the provider, so they
+ * occupy no context and must not be accounted for as if they did.
+ */
+export function occupiesModelContext(message: AgentMessage): boolean {
+	if (message.role !== "assistant") return true;
+	const stopReason = (message as AssistantMessage).stopReason;
+	return stopReason !== "aborted" && stopReason !== "error";
+}
+
+/**
  * Estimate context tokens from messages, using the last assistant usage when available.
  * If there are messages after the last usage, estimate their tokens with estimateTokens.
  */
@@ -176,6 +187,7 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 	if (!usageInfo) {
 		let estimated = 0;
 		for (const message of messages) {
+			if (!occupiesModelContext(message)) continue;
 			estimated += estimateTokens(message);
 		}
 		return {
@@ -189,7 +201,9 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 	const usageTokens = calculateContextTokens(usageInfo.usage);
 	let trailingTokens = 0;
 	for (let i = usageInfo.index + 1; i < messages.length; i++) {
-		trailingTokens += estimateTokens(messages[i]);
+		const message = messages[i];
+		if (!occupiesModelContext(message)) continue;
+		trailingTokens += estimateTokens(message);
 	}
 
 	return {
@@ -381,6 +395,9 @@ export function findCutPoint(
 	for (let i = endIndex - 1; i >= startIndex; i--) {
 		const entry = entries[i];
 		if (entry.type !== "message") continue;
+		// Aborted and errored turns cost the model nothing, so they must not eat
+		// the keep-recent budget that decides how much real history survives.
+		if (!occupiesModelContext(entry.message)) continue;
 		const messageTokens = estimateTokens(entry.message);
 		accumulatedTokens += messageTokens;
 		if (accumulatedTokens >= keepRecentTokens) {

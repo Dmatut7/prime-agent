@@ -64,8 +64,16 @@ describe("threshold compaction deferred by an aborted turn", () => {
 		expect(harness.eventsOfType("compaction_start")).toHaveLength(0);
 
 		const observed: string[] = [];
-		const unsubscribe = harness.session.subscribe((event) => observed.push(event.type));
-		harness.setResponses([slowSummarizerStep("reply after deferred compaction"), slowSummarizerStep("unused")]);
+		const reasons: string[] = [];
+		const unsubscribe = harness.session.subscribe((event) => {
+			observed.push(event.type);
+			if (event.type === "compaction_start") reasons.push(event.reason);
+		});
+		harness.setResponses([
+			slowSummarizerStep("reply after deferred compaction"),
+			slowSummarizerStep("unused"),
+			slowSummarizerStep("unused"),
+		]);
 
 		const startedAt = Date.now();
 		await harness.session.prompt("what did we decide?");
@@ -77,7 +85,8 @@ describe("threshold compaction deferred by an aborted turn", () => {
 		expect(compactionIndex).toBeGreaterThanOrEqual(0);
 		expect(agentStartIndex).toBeGreaterThanOrEqual(0);
 		expect(compactionIndex).toBeLessThan(agentStartIndex);
-		expect(harness.eventsOfType("compaction_start").at(-1)).toMatchObject({ reason: "threshold" });
+		// The deferred one is the first this turn; later ones belong to the turn itself.
+		expect(reasons[0]).toBe("threshold");
 		// The summarization round trip is inside the user's wait, not beside it.
 		expect(elapsedMs).toBeGreaterThanOrEqual(SUMMARIZER_DELAY_MS);
 	});
