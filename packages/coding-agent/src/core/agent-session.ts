@@ -4607,9 +4607,12 @@ export class AgentSession {
 		// Resume only when actually suspended: an idle session must keep its
 		// queue-and-wait semantics instead of starting a turn immediately. The
 		// idle-and-suspended branch of acceptAgentMessagePrompt goes through _prompt
-		// with resumeIfIdle: false and keeps failing loudly.
+		// with resumeIfIdle: false and keeps failing loudly. Never resume a pump
+		// suspended by abortForUpdateRestart: queued work must survive into the
+		// restart manifest instead of starting a new turn during teardown, so the
+		// message stays queued behind the fence (mirrors the triggerTurn guard).
 		const resumeSuspendedPump = () => {
-			if (!this._sessionInputPumpSuspended) return;
+			if (!this._sessionInputPumpSuspended || this._sessionInputSuspendedForUpdateRestart) return;
 			this._resumeSessionInputAdmission();
 			this._scheduleSessionInputPump();
 		};
