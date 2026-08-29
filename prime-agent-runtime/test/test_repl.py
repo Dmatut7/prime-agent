@@ -623,6 +623,42 @@ class ReplTest(unittest.TestCase):
             events = self.repl.execute("chk", "'In' in dir()")
             self.assertEqual(one(events, "result")["text"], "False")
 
+    def test_restore_truncated_file_reports_load_failure_and_applies_nothing(self):
+        import dill
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            payload = {"x": dill.dumps(1)}
+            with open(path, "wb") as fh:
+                dill.dump(payload, fh)
+            data = open(path, "rb").read()
+            with open(path, "wb") as fh:
+                fh.write(data[: max(1, len(data) // 2)])  # simulate a torn write
+            self.repl.send({"type": "restore", "id": "r0", "path": path})
+            done = one(self.repl.until_done("r0"), "done")
+            self.assertEqual(done["status"], "error")
+            self.assertIn("load failed", done["reason"])
+            events = self.repl.execute("chk", "'x' in dir()")
+            self.assertEqual(one(events, "result")["text"], "False")
+
+    def test_restore_partial_blob_failure_reports_failed_and_applies_rest(self):
+        import dill
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            good = dill.dumps(1)
+            payload = {"x": good, "bad": good[: max(1, len(good) // 2)]}
+            with open(path, "wb") as fh:
+                dill.dump(payload, fh)
+            self.repl.send({"type": "restore", "id": "r1", "path": path})
+            done = one(self.repl.until_done("r1"), "done")
+            self.assertEqual(done["status"], "ok")
+            self.assertEqual(done["restored"], ["x"])
+            self.assertEqual([f["name"] for f in done["failed"]], ["bad"])
+            self.assertTrue(done["failed"][0]["reason"])
+            events = self.repl.execute("chk", "x + 1")
+            self.assertEqual(one(events, "result")["text"], "2")
+
     def test_snapshot_prune_oversized(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "kernel-state.dill")

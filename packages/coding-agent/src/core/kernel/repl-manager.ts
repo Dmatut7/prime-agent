@@ -180,6 +180,9 @@ export class ReplKernelManager {
 	private pendingRebootstrap = false;
 	/** Restore the saved namespace on that fresh start too (false when the snapshot itself is the declared culprit). */
 	private pendingRestore = false;
+	/** A restore attempt failed (whole load or individual names): the namespace is older than the
+	 * on-disk snapshot, so no snapshot (debounced, explicit, prune, or dispose flush) may overwrite it. */
+	private restoreFailed = false;
 	private rebootstrapPromise?: Promise<boolean>;
 	private teardownInFlight = 0;
 
@@ -1343,6 +1346,14 @@ export class ReplKernelManager {
 	): Promise<SnapshotResult | null> {
 		const cfg = this.options.snapshot;
 		if (!cfg || !this.isRunning) return null;
+		// Hard guard behind every snapshot write (debounced, explicit, prune, dispose
+		// flush): a namespace revived incompletely is older than the on-disk snapshot.
+		if (this.restoreFailed) {
+			this.appendKernelDiagnostic(
+				"state snapshot skipped: the last restore failed, so the on-disk snapshot is preserved",
+			);
+			return null;
+		}
 		try {
 			const r = await this.enqueueRequest(
 				{
@@ -1386,7 +1397,7 @@ export class ReplKernelManager {
 		return this.performRestore(false);
 	}
 
-	/** Repair restores bypass the repair gate and are bounded so a stalled kernel cannot wedge it. */
+	/** Every restore (resume and repair alike) is bounded so a stalled kernel cannot wedge it. */
 	private async performRestore(protocolRepair: boolean): Promise<RestoreResult | null> {
 		const cfg = this.options.snapshot;
 		if (!cfg) return null;
@@ -1395,21 +1406,27 @@ export class ReplKernelManager {
 				{ type: "restore", path: cfg.path },
 				"",
 				{ internal: true, protocolRepair },
-				protocolRepair ? REPAIR_STEP_TIMEOUT_MS : undefined,
+				REPAIR_STEP_TIMEOUT_MS,
 			);
 			if (r.status !== "ok" || !r.doneFields) {
+				// Whole-load failure: the namespace stayed empty; the on-disk snapshot is
+				// the only copy of the prior state and must survive untouched.
+				this.restoreFailed = true;
 				this.appendKernelDiagnostic(
 					`state restore ${r.status === "aborted" ? "timed out" : "failed"}: ${r.error?.evalue ?? r.stderr}`,
 				);
 				return null;
 			}
 			this.pendingRestore = false;
-			return {
-				restored: asStringArray(r.doneFields.restored),
-				failed: asReasonArray(r.doneFields.failed),
-				path: cfg.path,
-			};
+			const restored = asStringArray(r.doneFields.restored);
+			const failed = asReasonArray(r.doneFields.failed);
+			// A partial revive is a failure for snapshot purposes too: the namespace is
+			// missing names the on-disk snapshot still carries, so it must not overwrite it.
+			// A later fully successful restore clears the flag.
+			this.restoreFailed = failed.length > 0;
+			return { restored, failed, path: cfg.path };
 		} catch (error) {
+			this.restoreFailed = true;
 			this.appendKernelDiagnostic(`state restore error: ${errorMessage(error)}`);
 			return null;
 		}
@@ -1433,7 +1450,8 @@ export class ReplKernelManager {
 
 	private scheduleSnapshot(): void {
 		const cfg = this.options.snapshot;
-		if (!cfg) return;
+		// A failed restore makes the namespace older than the on-disk snapshot; never overwrite it.
+		if (!cfg || this.restoreFailed) return;
 		if (this.snapshotTimer) clearTimeout(this.snapshotTimer);
 		this.snapshotTimer = globalThis.setTimeout(() => {
 			this.snapshotTimer = undefined;
@@ -1463,9 +1481,9 @@ export class ReplKernelManager {
 
 	private async runSnapshotFlushForDispose(): Promise<void> {
 		if (!this.options.snapshot || !this.isRunning) return;
-		// A kernel that never restored the saved namespace must not overwrite it:
-		// the on-disk snapshot is strictly fresher than this namespace.
-		if (this.pendingRestore) return;
+		// A kernel that never restored the saved namespace — or failed to — must not
+		// overwrite it: the on-disk snapshot is strictly fresher than this namespace.
+		if (this.pendingRestore || this.restoreFailed) return;
 		// Block new external executions so none can splice ahead of the final snapshot and stall dispose.
 		this.flushingSnapshotForDispose = true;
 		try {

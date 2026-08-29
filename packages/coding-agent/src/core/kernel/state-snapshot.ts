@@ -34,6 +34,9 @@ export interface RestoreResult {
 	/** Names present in the snapshot that failed to revive, with a short reason. */
 	failed: { name: string; reason: string }[];
 	path: string;
+	/** Present when the whole restore attempt failed (corrupt payload, timeout): the saved
+	 * namespace was not revived and the on-disk snapshot is preserved untouched. */
+	error?: string;
 }
 
 /** Absolute path to the dill payload within a session's artifact directory. */
