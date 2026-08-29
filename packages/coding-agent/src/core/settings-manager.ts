@@ -8,6 +8,18 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
 
+/** Abort a provider stream after this long without any events (0 = disabled). */
+export const DEFAULT_STREAM_STALL_TIMEOUT_MS = 300_000;
+
+/** Session stall watchdog: warn after this long without any session activity. */
+export const DEFAULT_STALL_WARN_AFTER_SECONDS = 300;
+
+/**
+ * Session stall watchdog: abort the turn after this long without any session
+ * activity. Must be greater than the warn threshold when both are enabled.
+ */
+export const DEFAULT_STALL_ABORT_AFTER_SECONDS = 900;
+
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
@@ -31,6 +43,7 @@ export interface ProviderRetrySettings {
 	timeoutMs?: number; // SDK/provider request timeout in milliseconds
 	maxRetries?: number; // SDK/provider retry attempts
 	maxRetryDelayMs?: number; // default: 60000 (max server-requested delay before failing)
+	streamStallTimeoutMs?: number; // default: 300000 (5 min with zero stream events => abort + retryable error); 0 disables
 }
 
 export interface RetrySettings {
@@ -38,6 +51,20 @@ export interface RetrySettings {
 	maxRetries?: number; // default: 3
 	baseDelayMs?: number; // default: 2000 (exponential backoff: 2s, 4s, 8s)
 	provider?: ProviderRetrySettings;
+}
+
+/**
+ * Last-resort protection against sessions that go quiet mid-turn (dead provider
+ * stream, wedged tool, loop that never settles). While a turn is running, the
+ * watchdog warns after `warnAfterSeconds` without any session event and aborts
+ * the turn after `abortAfterSeconds`. Both thresholds count from the last
+ * observed activity; timer escalations are deferred while compaction, branch
+ * summaries, or serialized refinement own the turn boundary.
+ */
+export interface StallWatchdogSettings {
+	enabled?: boolean; // default: true
+	warnAfterSeconds?: number; // default: 300 (5 min silent => warning + diagnostics)
+	abortAfterSeconds?: number; // default: 900 (15 min silent => auto-abort); must exceed warnAfterSeconds
 }
 
 export interface TerminalSettings {
@@ -140,6 +167,7 @@ export interface Settings {
 	followUpMode?: "all" | "one-at-a-time";
 	theme?: string;
 	compaction?: CompactionSettings;
+	stallWatchdog?: StallWatchdogSettings;
 	autoRefine?: AutoRefineSettings;
 	agentTraces?: AgentTracesSettings;
 	telemetry?: TelemetrySettings;
@@ -921,6 +949,18 @@ export class SettingsManager {
 		this.save();
 	}
 
+	getStallWatchdogSettings(): { enabled: boolean; warnAfterSeconds: number; abortAfterSeconds: number } {
+		const enabled = this.settings.stallWatchdog?.enabled ?? true;
+		const warnAfterSeconds = this.settings.stallWatchdog?.warnAfterSeconds ?? DEFAULT_STALL_WARN_AFTER_SECONDS;
+		let abortAfterSeconds = this.settings.stallWatchdog?.abortAfterSeconds ?? DEFAULT_STALL_ABORT_AFTER_SECONDS;
+		// 0 means "warn-only" (no auto-abort). Any other value at or below the warn
+		// threshold would fire both stages at once; keep an escalation gap instead.
+		if (abortAfterSeconds !== 0 && abortAfterSeconds <= warnAfterSeconds) {
+			abortAfterSeconds = warnAfterSeconds * 2;
+		}
+		return { enabled, warnAfterSeconds, abortAfterSeconds };
+	}
+
 	getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number } {
 		return {
 			enabled: this.getRetryEnabled(),
@@ -929,11 +969,17 @@ export class SettingsManager {
 		};
 	}
 
-	getProviderRetrySettings(): { timeoutMs?: number; maxRetries?: number; maxRetryDelayMs: number } {
+	getProviderRetrySettings(): {
+		timeoutMs?: number;
+		maxRetries?: number;
+		maxRetryDelayMs: number;
+		streamStallTimeoutMs: number;
+	} {
 		return {
 			timeoutMs: this.settings.retry?.provider?.timeoutMs,
 			maxRetries: this.settings.retry?.provider?.maxRetries,
 			maxRetryDelayMs: this.settings.retry?.provider?.maxRetryDelayMs ?? 60000,
+			streamStallTimeoutMs: this.settings.retry?.provider?.streamStallTimeoutMs ?? DEFAULT_STREAM_STALL_TIMEOUT_MS,
 		};
 	}
 

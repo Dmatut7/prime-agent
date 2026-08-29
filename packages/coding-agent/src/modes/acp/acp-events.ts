@@ -303,6 +303,26 @@ export function acpUpdatesForSessionEvent(
 				},
 			];
 
+		case "stall_warning":
+			return [
+				{
+					sessionUpdate: "session_info_update",
+					_meta: primeAgentMeta({
+						stallWatchdog: { status: "warning", message: event.message, silentMs: event.silentMs },
+					}),
+				},
+			];
+
+		case "stall_abort":
+			return [
+				{
+					sessionUpdate: "session_info_update",
+					_meta: primeAgentMeta({
+						stallWatchdog: { status: "aborted", message: event.message, silentMs: event.silentMs },
+					}),
+				},
+			];
+
 		case "ipython_sent_agent_message":
 			return [
 				{

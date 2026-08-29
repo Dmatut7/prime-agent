@@ -28,6 +28,7 @@ import type {
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
+	getLogger,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	modelsAreEqual,
@@ -272,6 +273,7 @@ import {
 	type SlashCommandInfo,
 } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
+import { StallWatchdog, type StallWatchdogOptions, type StallWatchdogStageInfo } from "./stall-watchdog.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
@@ -312,6 +314,29 @@ export interface RlmChildAgentSnapshot {
 }
 
 export type CompactionReason = "manual" | "threshold" | "overflow" | "requested";
+
+const sessionLog = getLogger("coding-agent.agent-session");
+
+/**
+ * Forensic snapshot taken when the stall watchdog fires. All timestamps are
+ * epoch milliseconds; elapsed fields are derived against `Date.now()` at
+ * collection time.
+ */
+export interface StallDiagnostics {
+	/** Milliseconds without any observed session activity. */
+	silentMs: number;
+	busy: {
+		streaming: boolean;
+		compacting: boolean;
+		retrying: boolean;
+		bashRunning: boolean;
+	};
+	lastEvent: { type: string; at: number; ageMs: number } | undefined;
+	inFlightToolCalls: Array<{ toolCallId: string; toolName: string; startedAt: number; elapsedMs: number }>;
+	pump: { suspended: boolean; requested: boolean; epoch: number };
+	/** Unfinished session actions (queued/in-flight turns, commands, dispatches). */
+	unfinishedActions: number;
+}
 
 export type AgentSessionEvent =
 	| AgentEvent
@@ -380,7 +405,21 @@ export type AgentSessionEvent =
 	  }
 	| { type: "refine_complete"; result: RefinementResult }
 	| { type: "refine_failed"; error: string }
-	| { type: "session_persist_failed"; error: string };
+	| { type: "session_persist_failed"; error: string }
+	| {
+			type: "stall_warning";
+			message: string;
+			silentMs: number;
+			thresholdMs: number;
+			diagnostics: StallDiagnostics;
+	  }
+	| {
+			type: "stall_abort";
+			message: string;
+			silentMs: number;
+			thresholdMs: number;
+			diagnostics: StallDiagnostics;
+	  };
 
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
@@ -1204,6 +1243,9 @@ export class AgentSession {
 	private _autoRefineInProgress = false;
 	private readonly _autoRefineOperations = new Set<Promise<void>>();
 	private readonly _scheduledAutoRefineTimers = new Set<ReturnType<typeof setTimeout>>();
+	private _stallWatchdog: StallWatchdog | undefined;
+	private _stallLastEvent: { type: string; at: number } | undefined;
+	private readonly _stallInFlightTools = new Map<string, { toolName: string; startedAt: number }>();
 	private _compactAutoRefinePending = false;
 	private _turnIntervalAutoRefinePending = false;
 	private _postCompactionContinuationScheduled = false;
@@ -1305,6 +1347,8 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+
+		this._stallWatchdog = this._createStallWatchdog();
 	}
 
 	/** Refreshes MCP provider registrations without rebuilding the session runtime. */
@@ -3452,6 +3496,7 @@ export class AgentSession {
 	}
 
 	private _handleAgentEvent = (event: AgentEvent): void => {
+		this._recordStallWatchdogActivity(event);
 		this._createRetryPromiseForAgentEnd(event);
 		if (event.type === "message_start" || event.type === "message_end") {
 			for (const action of this._actionStore.ownedActions()) {
@@ -3514,6 +3559,125 @@ export class AgentSession {
 		);
 		this._agentEventQueue.catch(() => {});
 	};
+
+	private _createStallWatchdog(): StallWatchdog {
+		const settings = this.settingsManager.getStallWatchdogSettings();
+		const options: StallWatchdogOptions = {
+			enabled: settings.enabled,
+			warnAfterMs: settings.warnAfterSeconds * 1000,
+			abortAfterMs: settings.abortAfterSeconds > 0 ? settings.abortAfterSeconds * 1000 : undefined,
+			isPaused: () =>
+				this._disposed ||
+				this._disposing ||
+				this.isCompacting ||
+				this._branchSummaryOperation !== undefined ||
+				this._autoRefineInProgress,
+			onStage: (info) => this._handleStallWatchdogStage(info),
+		};
+		return new StallWatchdog(options);
+	}
+
+	/**
+	 * Feeds the stall watchdog: every agent event counts as activity. `agent_start`
+	 * arms it, `agent_end` disarms it, so the watchdog only runs while a turn (or a
+	 * multi-turn run) is in flight.
+	 */
+	private _recordStallWatchdogActivity(event: AgentEvent): void {
+		const watchdog = this._stallWatchdog;
+		if (!watchdog) return;
+		const now = Date.now();
+		this._stallLastEvent = { type: event.type, at: now };
+		if (event.type === "tool_execution_start") {
+			this._stallInFlightTools.set(event.toolCallId, { toolName: event.toolName, startedAt: now });
+		} else if (event.type === "tool_execution_end") {
+			this._stallInFlightTools.delete(event.toolCallId);
+		}
+		if (event.type === "agent_start") {
+			this._stallInFlightTools.clear();
+			watchdog.arm();
+			return;
+		}
+		if (event.type === "agent_end") {
+			this._stallInFlightTools.clear();
+			watchdog.disarm();
+			return;
+		}
+		watchdog.touch();
+	}
+
+	private _collectStallDiagnostics(silentMs: number): StallDiagnostics {
+		const now = Date.now();
+		const lastEvent = this._stallLastEvent;
+		return {
+			silentMs,
+			busy: {
+				streaming: this.isStreaming,
+				compacting: this.isCompacting,
+				retrying: this.isRetrying,
+				bashRunning: this.isBashRunning,
+			},
+			lastEvent: lastEvent ? { ...lastEvent, ageMs: now - lastEvent.at } : undefined,
+			inFlightToolCalls: [...this._stallInFlightTools.entries()].map(([toolCallId, entry]) => ({
+				toolCallId,
+				toolName: entry.toolName,
+				startedAt: entry.startedAt,
+				elapsedMs: now - entry.startedAt,
+			})),
+			pump: {
+				suspended: this._sessionInputPumpSuspended,
+				requested: this._sessionInputPumpRequested,
+				epoch: this._sessionInputPumpEpoch,
+			},
+			unfinishedActions: this._actionStore.unfinishedActions().length,
+		};
+	}
+
+	private _handleStallWatchdogStage(info: StallWatchdogStageInfo): void {
+		const settings = this.settingsManager.getStallWatchdogSettings();
+		const diagnostics = this._collectStallDiagnostics(info.silentMs);
+		const silentSeconds = Math.max(1, Math.round(info.silentMs / 1000));
+		const logFields = {
+			stage: info.stage,
+			silentMs: info.silentMs,
+			sessionId: this.sessionManager.getSessionId(),
+			diagnostics,
+		};
+		if (info.stage === "warn") {
+			const message = `Possible stall: no session activity for ${silentSeconds}s while a turn is running. If nothing recovers, the turn will be aborted automatically after ${settings.abortAfterSeconds}s of silence.`;
+			sessionLog.warn("stall watchdog: no activity while turn running", logFields);
+			this._emit({
+				type: "stall_warning",
+				message,
+				silentMs: info.silentMs,
+				thresholdMs: settings.warnAfterSeconds * 1000,
+				diagnostics,
+			});
+			return;
+		}
+		if (info.stage === "abort") {
+			const message = `Suspected stall: no session activity for ${silentSeconds}s. The current turn is being aborted automatically; diagnostics were logged.`;
+			sessionLog.error("stall watchdog: aborting silent turn", logFields);
+			this._emit({
+				type: "stall_abort",
+				message,
+				silentMs: info.silentMs,
+				thresholdMs: settings.abortAfterSeconds * 1000,
+				diagnostics,
+			});
+			this.requestAbort();
+			return;
+		}
+		// abort_unsettled: the abort fired but the run never produced agent_end.
+		const message = `Suspected stall: auto-abort fired ${silentSeconds}s into silence but the run did not settle; the session may need a restart. Diagnostics were logged.`;
+		sessionLog.error("stall watchdog: abort did not settle the turn", logFields);
+		this._emit({
+			type: "stall_warning",
+			message,
+			silentMs: info.silentMs,
+			thresholdMs: settings.abortAfterSeconds * 1000,
+			diagnostics,
+		});
+	}
 
 	private _createRetryPromiseForAgentEnd(event: AgentEvent): void {
 		if (event.type !== "agent_end" || this._retryPromise) {
@@ -4118,6 +4282,7 @@ export class AgentSession {
 			return;
 		}
 		this._disposed = true;
+		this._stallWatchdog?.dispose();
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._sessionActionCommitDisposeAbortController.abort();

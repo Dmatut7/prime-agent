@@ -150,6 +150,48 @@ function getTerminalMessage(event: Extract<AssistantMessageEvent, { type: "done"
 	return event.type === "done" ? event.message : event.error;
 }
 
+/**
+ * Raised by the stream stall timer when the assistant response stream produces no
+ * events for `AgentLoopConfig.streamStallTimeoutMs`. The loop settles the turn with
+ * a `stopReason: "error"` assistant message instead of hanging on a dead connection.
+ */
+export class StreamStallError extends Error {
+	readonly timeoutMs: number;
+
+	constructor(timeoutMs: number) {
+		super(`Stream stalled: no events for ${timeoutMs}ms`);
+		this.name = "StreamStallError";
+		this.timeoutMs = timeoutMs;
+	}
+}
+
+function formatStreamStallErrorMessage(timeoutMs: number): string {
+	const seconds = Math.max(1, Math.round(timeoutMs / 1000));
+	return (
+		`Stream stalled: no response events arrived for ${seconds}s, so the provider request was aborted as likely dead. ` +
+		"This usually indicates a dead or half-open provider connection and a retry normally succeeds. " +
+		"If this repeats on a healthy but slow provider, raise streamStallTimeoutMs or set it to 0 to disable."
+	);
+}
+
+function createStalledAssistantMessage(
+	config: AgentLoopConfig,
+	partialMessage: AssistantMessage | null,
+	timeoutMs: number,
+): AssistantMessage {
+	return {
+		role: "assistant",
+		content: partialMessage ? cloneAssistantContent(partialMessage.content) : [{ type: "text", text: "" }],
+		api: partialMessage?.api ?? config.model.api,
+		provider: partialMessage?.provider ?? config.model.provider,
+		model: partialMessage?.model ?? config.model.id,
+		usage: cloneUsage(partialMessage?.usage ?? EMPTY_USAGE),
+		stopReason: "error",
+		errorMessage: formatStreamStallErrorMessage(timeoutMs),
+		timestamp: Date.now(),
+	};
+}
+
 function endAgentStreamOnError(
 	stream: EventStream<AgentEvent, AgentMessage[]>,
 	promise: Promise<AgentMessage[]>,
@@ -469,6 +511,49 @@ async function streamAssistantResponse(
 		return finalMessage;
 	};
 
+	const streamStallTimeoutMs =
+		typeof config.streamStallTimeoutMs === "number" && config.streamStallTimeoutMs > 0
+			? config.streamStallTimeoutMs
+			: undefined;
+	const stallController = streamStallTimeoutMs !== undefined ? new AbortController() : undefined;
+	let stallTimer: ReturnType<typeof setTimeout> | undefined;
+	let stallReject!: (error: StreamStallError) => void;
+	const stallPromise = new Promise<never>((_resolve, reject) => {
+		stallReject = reject;
+	});
+	const clearStallTimer = (): void => {
+		if (stallTimer !== undefined) {
+			clearTimeout(stallTimer);
+			stallTimer = undefined;
+		}
+	};
+	const armStallTimer = (): void => {
+		if (streamStallTimeoutMs === undefined) return;
+		clearStallTimer();
+		const timeoutMs = streamStallTimeoutMs;
+		stallTimer = setTimeout(() => {
+			stallTimer = undefined;
+			const error = new StreamStallError(timeoutMs);
+			// Kill the provider request too, so the dead connection doesn't linger.
+			stallController?.abort(error);
+			stallReject(error);
+		}, timeoutMs);
+	};
+	const raceStall = <T>(operation: Promise<T>): Promise<T> =>
+		streamStallTimeoutMs === undefined ? operation : Promise.race([operation, stallPromise]);
+	let closeIterator: (() => void) | undefined;
+	const finishStalledMessage = async (error: StreamStallError) => {
+		const finalMessage = createStalledAssistantMessage(config, partialMessage, error.timeoutMs);
+		if (addedPartial) {
+			context.messages[context.messages.length - 1] = finalMessage;
+		} else {
+			context.messages.push(finalMessage);
+			await emit({ type: "message_start", message: { ...finalMessage } });
+		}
+		await emit({ type: "message_end", message: finalMessage });
+		return finalMessage;
+	};
+
 	try {
 		throwIfAborted(signal);
 		let messages = context.messages;
@@ -491,28 +576,39 @@ async function streamAssistantResponse(
 			tools: context.tools,
 		};
 
-		const response = await maybePromiseWithAbort(
-			streamFunction(config.model, llmContext, {
-				...config,
-				apiKey: resolvedApiKey,
+		// The stall deadline covers the provider call itself and every gap between
+		// events; the run signal aborts the race like before, the stall controller
+		// additionally reaches the provider so a dead connection is torn down.
+		const streamSignal =
+			signal && stallController
+				? AbortSignal.any([signal, stallController.signal])
+				: (signal ?? stallController?.signal);
+
+		armStallTimer();
+		const response = await raceStall(
+			maybePromiseWithAbort(
+				streamFunction(config.model, llmContext, {
+					...config,
+					apiKey: resolvedApiKey,
+					signal: streamSignal,
+				}),
 				signal,
-			}),
-			signal,
+			),
 		);
 		const iterator = response[Symbol.asyncIterator]();
-		const closeIterator = () => {
+		closeIterator = () => {
 			void Promise.resolve(iterator.return?.()).catch(() => undefined);
 		};
 		while (true) {
-			const next = await raceWithAbort<IteratorResult<AssistantMessageEvent>>(
-				iterator.next(),
-				signal,
-				closeIterator,
+			const next = await raceStall(
+				raceWithAbort<IteratorResult<AssistantMessageEvent>>(iterator.next(), signal, closeIterator),
 			);
 			if (next.done) {
+				clearStallTimer();
 				break;
 			}
 			const event = next.value;
+			armStallTimer();
 			switch (event.type) {
 				case "start":
 					partialMessage = event.partial;
@@ -543,6 +639,7 @@ async function streamAssistantResponse(
 
 				case "done":
 				case "error": {
+					clearStallTimer();
 					let finalMessage = getTerminalMessage(event);
 					try {
 						finalMessage = await maybePromiseWithAbort(response.result(), signal);
@@ -575,8 +672,15 @@ async function streamAssistantResponse(
 		await emit({ type: "message_end", message: finalMessage });
 		return finalMessage;
 	} catch (error) {
+		clearStallTimer();
 		if (signal?.aborted && isAbortError(error)) {
 			return finishAbortedMessage();
+		}
+		if (error instanceof StreamStallError || (stallController?.signal.aborted && isAbortError(error))) {
+			closeIterator?.();
+			return finishStalledMessage(
+				error instanceof StreamStallError ? error : new StreamStallError(streamStallTimeoutMs ?? 0),
+			);
 		}
 		throw error;
 	}

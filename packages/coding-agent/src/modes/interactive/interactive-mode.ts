@@ -5769,6 +5769,14 @@ export class InteractiveMode {
 				this.showError(`Session persistence failed: ${event.error}`);
 				break;
 
+			case "stall_warning":
+				this.showError(event.message);
+				break;
+
+			case "stall_abort":
+				this.showError(event.message);
+				break;
+
 			case "refine_complete":
 				break;
 		}
