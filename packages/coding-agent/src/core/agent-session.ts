@@ -266,6 +266,7 @@ import {
 	SessionManager,
 } from "./session-manager.js";
 import type { SessionStats } from "./session-stats.js";
+import { resolveCompleteToolPairLeaf } from "./session-tool-pair.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
 import {
@@ -12134,6 +12135,10 @@ export class AgentSession {
 								.join("");
 			} else {
 				newLeafId = targetId;
+			}
+
+			if (newLeafId) {
+				newLeafId = resolveCompleteToolPairLeaf(this.sessionManager.getBranch(newLeafId))?.id ?? null;
 			}
 
 			let summaryEntry: BranchSummaryEntry | undefined;

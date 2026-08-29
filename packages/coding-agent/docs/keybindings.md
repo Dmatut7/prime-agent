@@ -43,8 +43,8 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
-| `tui.editor.deleteCharBackward` | `backspace` | Delete character backward |
-| `tui.editor.deleteCharForward` | `delete`, `ctrl+d` | Delete character forward |
+| `tui.editor.deleteCharBackward` | `backspace`, `shift+backspace` | Delete character backward |
+| `tui.editor.deleteCharForward` | `delete`, `ctrl+d`, `shift+delete` | Delete character forward |
 | `tui.editor.deleteWordBackward` | `ctrl+w`, `alt+backspace` | Delete word backward |
 | `tui.editor.deleteWordForward` | `alt+d`, `alt+delete` | Delete word forward |
 | `tui.editor.deleteToLineStart` | `ctrl+u` | Delete to line start |
@@ -65,6 +65,7 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | `tui.editor.yank` | `ctrl+y` | Paste most recently deleted text |
 | `tui.editor.yankPop` | `alt+y` | Cycle through deleted text after yank |
 | `tui.editor.undo` | `ctrl+-` | Undo last edit |
+| `tui.editor.insertSpace` | `shift+space` | Insert a space from shifted space |
 
 ### TUI Clipboard and Selection
 
@@ -77,6 +78,10 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | `tui.select.pageDown` | `pageDown` | Page down in list |
 | `tui.select.confirm` | `enter` | Confirm selection |
 | `tui.select.cancel` | `escape`, `ctrl+c` | Cancel selection |
+| `tui.select.toggle` | `space` | Toggle or activate the selected item |
+| `tui.select.upSecondary` | `k` | Move selection up (secondary) |
+| `tui.select.downSecondary` | `j` | Move selection down (secondary) |
+| `tui.debug.dump` | `shift+ctrl+d` | Dump TUI debug information |
 
 ### TUI Fullscreen Transcript
 
@@ -124,6 +129,7 @@ Use `tab` to cycle forward and `shift+tab` to cycle backward through Providers, 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
 | `app.configuration.previousTab` | `shift+tab` | Select the previous configuration tab |
+| `app.configuration.exit` | `ctrl+c` | Exit the configuration selector |
 
 ### Display and Message Queue
 
@@ -166,6 +172,7 @@ Used inside the scoped models selector (opened via `/scoped-models`).
 | `app.models.toggleProvider` | `ctrl+p` | Toggle all models for the current provider |
 | `app.models.reorderUp` | `alt+up` | Move the selected model up in the cycle order |
 | `app.models.reorderDown` | `alt+down` | Move the selected model down in the cycle order |
+| `app.models.clearSearch` | `ctrl+c` | Clear model search, or cancel if search is empty |
 
 ## Custom Configuration
 
