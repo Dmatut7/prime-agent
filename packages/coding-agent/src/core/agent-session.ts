@@ -6885,6 +6885,19 @@ export class AgentSession {
 		return this._hasSelectableSessionInput();
 	}
 
+	/**
+	 * Resume requested by a live connection (TUI Enter on an empty editor, the
+	 * daemon resume_queue command). Never lifts the update-restart fence: queued
+	 * work must survive into the restart manifest instead of starting a new turn
+	 * during teardown (mirrors the triggerTurn and agent-message wake guards).
+	 * Recovery flows (post-restart restore, in-process unwedge) call
+	 * resumeQueuedWork() directly.
+	 */
+	resumeQueuedWorkFromConnection(): boolean {
+		if (this._sessionInputPumpSuspended && this._sessionInputSuspendedForUpdateRestart) return false;
+		return this.resumeQueuedWork();
+	}
+
 	async waitForSessionInputIdle(): Promise<void> {
 		while (true) {
 			const pump = this._sessionInputPump;

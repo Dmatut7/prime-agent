@@ -4138,7 +4138,9 @@ export class AgentDaemon {
 
 			case "resume_queue": {
 				const state = this.getSessionState(command.activeSessionId);
-				if (!state.runtime.session.resumeQueuedWork()) {
+				// Connection-facing resume: the update-restart fence stays up (the
+				// false result maps to the "No queued work to resume" no-op below).
+				if (!state.runtime.session.resumeQueuedWorkFromConnection()) {
 					const error = new Error("No queued work to resume");
 					return failure(command.id, "resume_queue", error, serializeDaemonError(error));
 				}
