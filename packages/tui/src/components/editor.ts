@@ -1113,15 +1113,21 @@ export class Editor implements Component, Focusable {
 		return { line: this.state.cursorLine, col: this.state.cursorCol };
 	}
 
-	setText(text: string): void {
+	setText(text: string, options?: { clearUndo?: boolean }): void {
 		this.cancelAutocomplete();
 		this.lastAction = null;
 		this.historyIndex = -1; // Exit history browsing mode
 		const normalized = this.normalizeText(text);
 		if (normalized.length === 0) {
-			// Session reset and other external clears must not leave the previous
-			// buffer reachable via undo.
-			this.undoStack.clear();
+			if (options?.clearUndo === false) {
+				// Manual clear (Ctrl+C / Esc): keep undo so the user can restore the draft.
+				if (this.getText().length > 0) {
+					this.pushUndoSnapshot();
+				}
+			} else {
+				// Session reset and slash commands must not leave the previous buffer reachable.
+				this.undoStack.clear();
+			}
 		} else if (this.getText() !== normalized) {
 			this.pushUndoSnapshot();
 		}

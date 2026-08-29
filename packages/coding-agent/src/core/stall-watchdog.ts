@@ -168,6 +168,8 @@ export class StallWatchdog {
 		this.timerHandle = undefined;
 		if (this.state !== "warned") return;
 		if (this.options.isPaused?.()) {
+			// Same snooze as fireWarn: paused silence is not stall evidence.
+			this.lastActivityAt = this.timers.now();
 			this.state = "armed";
 			this.scheduleWarn();
 			return;

@@ -186,6 +186,39 @@ describe("StallWatchdog", () => {
 		expect(stages).toEqual(["warn", "abort"]);
 	});
 
+	it("rebases lastActivityAt when abort fires while paused", () => {
+		const clock = new FakeClock();
+		const stages: string[] = [];
+		let paused = false;
+		const watchdog = new StallWatchdog({
+			enabled: true,
+			warnAfterMs: 1000,
+			abortAfterMs: 3000,
+			timers: clock.timersImpl,
+			isPaused: () => paused,
+			onStage: (info) => stages.push(info.stage),
+		});
+
+		watchdog.arm();
+		clock.advance(1000);
+		expect(stages).toEqual(["warn"]);
+
+		paused = true;
+		clock.advance(2000);
+		expect(stages).toEqual(["warn"]);
+		expect(watchdog.currentState).toBe("armed");
+
+		paused = false;
+		clock.advance(999);
+		expect(stages).toEqual(["warn"]);
+		clock.advance(1);
+		expect(stages).toEqual(["warn", "warn"]);
+		clock.advance(1999);
+		expect(stages).toEqual(["warn", "warn"]);
+		clock.advance(1);
+		expect(stages).toEqual(["warn", "warn", "abort"]);
+	});
+
 	it("reads warn/abort thresholds live from getter functions", () => {
 		const clock = new FakeClock();
 		const stages: string[] = [];

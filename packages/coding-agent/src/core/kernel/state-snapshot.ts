@@ -6,6 +6,7 @@
 // Snapshotting is best-effort and per-variable: each top-level name is pickled
 // with `dill` independently, so a single unpicklable object (open file, socket,
 // GPU tensor, …) is skipped and reported rather than aborting the whole snapshot.
+import { renameSync } from "node:fs";
 import { join } from "node:path";
 
 /** Default ceiling on a snapshot payload. Over-cap variables are skipped + reported. */
@@ -47,4 +48,26 @@ export function snapshotPathIn(artifactDir: string): string {
 /** Absolute path to the JSON manifest within a session's artifact directory. */
 export function manifestPathIn(artifactDir: string): string {
 	return join(artifactDir, `${KERNEL_STATE_BASENAME}.json`);
+}
+
+function renameIfExists(from: string, to: string): string | null {
+	try {
+		renameSync(from, to);
+		return to;
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
+		throw error;
+	}
+}
+
+/** Move a failed snapshot aside so a later write can replace the original path. */
+export function isolateCorruptSnapshot(
+	path: string,
+	manifestPath?: string,
+): { isolatedPath: string | null; isolatedManifestPath: string | null } {
+	const stamp = Date.now();
+	return {
+		isolatedPath: renameIfExists(path, `${path}.corrupt-${stamp}`),
+		isolatedManifestPath: manifestPath ? renameIfExists(manifestPath, `${manifestPath}.corrupt-${stamp}`) : null,
+	};
 }

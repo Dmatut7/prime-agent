@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReplKernelManager } from "../src/core/kernel/index.js";
 
 async function waitForCalls(mock: { mock: { calls: unknown[][] } }, count: number): Promise<void> {
@@ -12,6 +15,14 @@ async function waitForCalls(mock: { mock: { calls: unknown[][] } }, count: numbe
 }
 
 const SNAPSHOT_OPTS = { path: "/tmp/restore-guard.dill", manifestPath: "/tmp/restore-guard.json" };
+
+const restoreDirs: string[] = [];
+afterEach(() => {
+	while (restoreDirs.length > 0) {
+		const directory = restoreDirs.pop();
+		if (directory) rmSync(directory, { recursive: true, force: true });
+	}
+});
 
 function stubRunning(manager: ReplKernelManager, extra: Record<string, unknown> = {}): void {
 	Object.assign(manager as unknown as Record<string, unknown>, {
@@ -61,7 +72,7 @@ describe("ReplKernelManager restore failure guards", () => {
 
 			await vi.advanceTimersByTimeAsync(1);
 			await expect(restore).resolves.toBeNull();
-			expect((manager as unknown as { restoreFailed: boolean }).restoreFailed).toBe(true);
+			expect((manager as unknown as { restoreFailed: boolean }).restoreFailed).toBe(false);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -136,5 +147,57 @@ describe("ReplKernelManager restore failure guards", () => {
 		const restore = await manager.restoreState();
 		expect(restore?.failed).toEqual([{ name: "sock", reason: "bad" }]);
 		expect((manager as unknown as { restoreFailed: boolean }).restoreFailed).toBe(true);
+	});
+
+	it("isolates a corrupt snapshot so later work can persist again", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-restore-isolate-"));
+		restoreDirs.push(directory);
+		const path = join(directory, "kernel-state.dill");
+		const manifestPath = join(directory, "kernel-state.json");
+		writeFileSync(path, "corrupt-payload");
+		writeFileSync(manifestPath, '{"saved":["x"]}');
+
+		const manager = new ReplKernelManager({ cwd: process.cwd(), snapshot: { path, manifestPath } });
+		const enqueueRequest = vi.fn(async (request: { type: string }) => {
+			if (request.type === "restore") {
+				return {
+					stdout: "",
+					stderr: "bad pickle",
+					status: "error" as const,
+					durationMs: 0,
+					error: { ename: "ValueError", evalue: "bad pickle", traceback: [] },
+				};
+			}
+			return {
+				stdout: "",
+				stderr: "",
+				status: "ok" as const,
+				durationMs: 0,
+				doneFields: { saved: ["y"], skipped: [], bytes: 4 },
+			};
+		});
+		stubRunning(manager, { enqueueRequest });
+
+		await expect(manager.restoreState()).resolves.toBeNull();
+		expect((manager as unknown as { restoreFailed: boolean }).restoreFailed).toBe(false);
+
+		const names = readdirSync(directory);
+		const isolatedPayload = names.find((name) => name.startsWith("kernel-state.dill.corrupt-"));
+		const isolatedManifest = names.find((name) => name.startsWith("kernel-state.json.corrupt-"));
+		expect(isolatedPayload).toBeDefined();
+		expect(isolatedManifest).toBeDefined();
+		expect(readFileSync(join(directory, isolatedPayload!), "utf8")).toBe("corrupt-payload");
+		expect(readFileSync(join(directory, isolatedManifest!), "utf8")).toBe('{"saved":["x"]}');
+		expect(names).not.toContain("kernel-state.dill");
+		expect(names).not.toContain("kernel-state.json");
+
+		await expect(manager.snapshotState()).resolves.toEqual({
+			saved: ["y"],
+			skipped: [],
+			pruned: undefined,
+			bytes: 4,
+			path,
+		});
+		expect(enqueueRequest.mock.calls.some((call) => call[0]?.type === "snapshot")).toBe(true);
 	});
 });

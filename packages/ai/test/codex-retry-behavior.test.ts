@@ -204,4 +204,32 @@ describe("openai-codex SSE retry behavior", () => {
 		expect(codexFetchCount(fetchMock)).toBe(1);
 		expect(elapsedMs).toBeLessThan(500);
 	});
+
+	it("caps exponential backoff when fetch throws", async () => {
+		vi.useFakeTimers();
+		try {
+			const fetchMock = installFetchMock(async (input) => {
+				if (!isCodexResponsesUrl(input)) {
+					return new Response("not found", { status: 404 });
+				}
+				throw new Error("socket hang up");
+			});
+
+			const resultPromise = streamOpenAICodexResponses(createModel(), createContext(), {
+				apiKey: mockToken(),
+				transport: "sse",
+				maxRetries: 5,
+				maxRetryDelayMs: 1000,
+			}).result();
+
+			await vi.runAllTimersAsync();
+			const result = await resultPromise;
+
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toMatch(/exceeds maxRetryDelayMs 1000ms/);
+			expect(codexFetchCount(fetchMock)).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });

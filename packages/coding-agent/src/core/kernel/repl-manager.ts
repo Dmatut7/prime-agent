@@ -45,6 +45,7 @@ import {
 import {
 	DEFAULT_SNAPSHOT_MAX_BYTES,
 	DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
+	isolateCorruptSnapshot,
 	type RestoreResult,
 	type SnapshotResult,
 } from "./state-snapshot.js";
@@ -184,8 +185,9 @@ export class ReplKernelManager {
 	private pendingRebootstrap = false;
 	/** Restore the saved namespace on that fresh start too (false when the snapshot itself is the declared culprit). */
 	private pendingRestore = false;
-	/** A restore attempt failed (whole load or individual names): the namespace is older than the
-	 * on-disk snapshot, so no snapshot (debounced, explicit, prune, or dispose flush) may overwrite it. */
+	/** A restore attempt failed and the on-disk snapshot has not been isolated: the namespace is
+	 * older than that snapshot, so no snapshot write may overwrite it. Whole-load failures isolate
+	 * the file and clear this flag so a rebuilt namespace can persist again. */
 	private restoreFailed = false;
 	private rebootstrapPromise?: Promise<boolean>;
 	private teardownInFlight = 0;
@@ -1418,12 +1420,13 @@ export class ReplKernelManager {
 	): Promise<SnapshotResult | null> {
 		const cfg = this.options.snapshot;
 		if (!cfg || !this.isRunning) return null;
-		// Hard guard behind every snapshot write (debounced, explicit, prune, dispose
-		// flush): a namespace never (or incompletely) revived is older than the
-		// on-disk snapshot.
-		if (this.restoreFailed || this.pendingRestore) {
+		// Hard guard: skip writes while restore is still pending, or while a failed
+		// restore has not isolated the previous snapshot.
+		if (this.pendingRestore || this.restoreFailed) {
 			this.appendKernelDiagnostic(
-				"state snapshot skipped: the last restore failed, so the on-disk snapshot is preserved",
+				this.pendingRestore
+					? "state snapshot skipped: restore has not completed, so the on-disk snapshot is preserved"
+					: "state snapshot skipped: the last restore failed, so the on-disk snapshot is preserved",
 			);
 			return null;
 		}
@@ -1482,12 +1485,9 @@ export class ReplKernelManager {
 				REPAIR_STEP_TIMEOUT_MS,
 			);
 			if (r.status !== "ok" || !r.doneFields) {
-				// Whole-load failure: the namespace stayed empty; the on-disk snapshot is
-				// the only copy of the prior state and must survive untouched.
-				this.restoreFailed = true;
-				this.appendKernelDiagnostic(
-					`state restore ${r.status === "aborted" ? "timed out" : "failed"}: ${r.error?.evalue ?? r.stderr}`,
-				);
+				const reason = r.status === "aborted" ? "timed out" : "failed";
+				this.appendKernelDiagnostic(`state restore ${reason}: ${r.error?.evalue ?? r.stderr}`);
+				this.isolateFailedSnapshot(cfg, r.error?.evalue ?? r.stderr ?? reason);
 				return null;
 			}
 			this.pendingRestore = false;
@@ -1499,9 +1499,25 @@ export class ReplKernelManager {
 			this.restoreFailed = failed.length > 0;
 			return { restored, failed, path: cfg.path };
 		} catch (error) {
-			this.restoreFailed = true;
 			this.appendKernelDiagnostic(`state restore error: ${errorMessage(error)}`);
+			this.isolateFailedSnapshot(cfg, errorMessage(error));
 			return null;
+		}
+	}
+
+	/** Rename a snapshot that failed to load so a later write can replace it. */
+	private isolateFailedSnapshot(cfg: { path: string; manifestPath: string }, reason: string): void {
+		try {
+			const isolated = isolateCorruptSnapshot(cfg.path, cfg.manifestPath);
+			this.restoreFailed = false;
+			this.pendingRestore = false;
+			const isolatedPath = isolated.isolatedPath ?? `${cfg.path} (missing)`;
+			this.appendKernelDiagnostic(`state restore failed; isolated corrupt snapshot to ${isolatedPath}: ${reason}`);
+		} catch (error) {
+			this.restoreFailed = true;
+			this.appendKernelDiagnostic(
+				`state restore failed; could not isolate snapshot at ${cfg.path}: ${errorMessage(error)}`,
+			);
 		}
 	}
 

@@ -17,8 +17,8 @@ export interface EditorComponent extends Component {
 	/** Get the current text content */
 	getText(): string;
 
-	/** Set the text content */
-	setText(text: string): void;
+	/** Set the text content. Empty text clears undo unless `{ clearUndo: false }`. */
+	setText(text: string, options?: { clearUndo?: boolean }): void;
 
 	/** Handle raw terminal input (key presses, paste sequences, etc.) */
 	handleInput(data: string): void;

@@ -1679,6 +1679,20 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getText(), "");
 		});
 
+		it("preserves undo on a manual empty setText so Ctrl+- restores the draft", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+
+			editor.handleInput("h");
+			editor.handleInput("i");
+			assert.strictEqual(editor.getText(), "hi");
+
+			editor.setText("", { clearUndo: false });
+			assert.strictEqual(editor.getText(), "");
+
+			editor.handleInput("\x1b[45;5u"); // Ctrl+- (undo)
+			assert.strictEqual(editor.getText(), "hi");
+		});
+
 		it("clears undo stack on submit", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			let submitted = "";

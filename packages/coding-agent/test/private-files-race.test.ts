@@ -48,7 +48,6 @@ vi.mock("node:fs", async (importOriginal) => {
 import {
 	ensurePrivateDirectory,
 	ensurePrivateFile,
-	PRIVATE_FILE_SYSTEM_UNSUPPORTED_ERROR,
 	readPrivateFile,
 	requireNoFollow,
 } from "../src/utils/private-files.js";
@@ -65,9 +64,8 @@ afterEach(() => {
 });
 
 describe("private filesystem capability", () => {
-	it("requires O_NOFOLLOW support", () => {
-		expect(PRIVATE_FILE_SYSTEM_UNSUPPORTED_ERROR).toContain("O_NOFOLLOW");
-		expect(() => requireNoFollow(undefined)).toThrow(PRIVATE_FILE_SYSTEM_UNSUPPORTED_ERROR);
+	it("degrades missing O_NOFOLLOW to 0 instead of throwing", () => {
+		expect(requireNoFollow(undefined)).toBe(0);
 	});
 });
 

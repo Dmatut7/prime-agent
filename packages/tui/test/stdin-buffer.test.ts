@@ -265,7 +265,8 @@ describe("StdinBuffer", () => {
 			assert.deepStrictEqual(emittedSequences, []);
 			await wait(5);
 			processInput("\x1b");
-			assert.deepStrictEqual(emittedSequences, ["\x1b", "\x1b"]);
+			assert.deepStrictEqual(emittedSequences, ["\x1b"]);
+			assert.deepStrictEqual(buffer.flush(), ["\x1b"]);
 		});
 
 		it("keeps ESC plus a letter as alt+letter within the sequence timeout", async () => {
@@ -277,7 +278,13 @@ describe("StdinBuffer", () => {
 
 		it("splits a single chunk of two ESC bytes into two escape keys", () => {
 			processInput("\x1b\x1b");
-			assert.deepStrictEqual(emittedSequences, ["\x1b", "\x1b"]);
+			assert.deepStrictEqual(emittedSequences, ["\x1b"]);
+			assert.deepStrictEqual(buffer.flush(), ["\x1b"]);
+		});
+
+		it("keeps CSI after a double ESC in the same chunk as Escape then arrow", () => {
+			processInput("\x1b\x1b[A");
+			assert.deepStrictEqual(emittedSequences, ["\x1b", "\x1b[A"]);
 		});
 	});
 

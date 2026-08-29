@@ -23,11 +23,14 @@ import { basename, dirname, join, parse, resolve } from "node:path";
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
-export const PRIVATE_FILE_SYSTEM_UNSUPPORTED_ERROR = "Private file storage requires O_NOFOLLOW support";
 
+/**
+ * `O_NOFOLLOW` is undefined on win32. Degrade to 0 so private writes still work;
+ * lstat-before-open and fstat-after-open keep rejecting symlinks. The remaining
+ * unprotected window is open→fstat on platforms without the flag.
+ */
 export function requireNoFollow(flag: number | undefined): number {
-	if (flag === undefined || flag === null) throw new Error(PRIVATE_FILE_SYSTEM_UNSUPPORTED_ERROR);
-	return flag;
+	return flag ?? 0;
 }
 
 const NONBLOCK_FLAG = constants.O_NONBLOCK ?? 0;
