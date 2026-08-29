@@ -19,6 +19,7 @@ class BenchmarkTerminal implements Terminal {
 	start(_onInput: (data: string) => void, _onResize: () => void): void {}
 	stop(_options?: TerminalStopOptions): void {}
 	async drainInput(): Promise<void> {}
+	abortPendingInput(): void {}
 	write(_data: string): void {}
 	moveBy(_lines: number): void {}
 	hideCursor(): void {}

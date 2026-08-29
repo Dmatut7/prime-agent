@@ -478,6 +478,19 @@ describe("StdinBuffer", () => {
 			assert.deepStrictEqual(emittedSequences, []);
 		});
 
+		it("aborts in-flight paste so a later 201~ does not emit into the new session", () => {
+			processInput("\x1b[200~hello");
+			assert.strictEqual(buffer.isPasteMode(), true);
+
+			buffer.abortPendingInput();
+			assert.strictEqual(buffer.isPasteMode(), false);
+
+			processInput("\x1b[201~");
+			assert.deepStrictEqual(emittedPaste, []);
+			processInput("x");
+			assert.ok(emittedSequences.includes("x"));
+		});
+
 		it("discards an unterminated paste on a lone trailing ESC", async () => {
 			processInput("\x1b[200~hello");
 			processInput("\x1b");

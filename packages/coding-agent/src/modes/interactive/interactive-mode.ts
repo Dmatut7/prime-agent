@@ -2869,6 +2869,7 @@ export class InteractiveMode {
 			this.editor.clearHistory?.();
 			this.editor.setText("");
 		}
+		this.ui.terminal.abortPendingInput();
 		const keepImageIds = this.liveImageMarkerIds();
 		for (const markerId of this.pastedImages.keys()) {
 			if (!keepImageIds.has(markerId)) {

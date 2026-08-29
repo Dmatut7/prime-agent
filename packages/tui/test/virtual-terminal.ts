@@ -33,6 +33,8 @@ export class VirtualTerminal implements Terminal {
 
 	async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
 
+	abortPendingInput(): void {}
+
 	stop(_options?: TerminalStopOptions): void {
 		this.xterm.write("\x1b[?2004l");
 		this.inputHandler = undefined;

@@ -464,6 +464,15 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.pendingKittyPrintableCodepoint = undefined;
 	}
 
+	/** Drop in-flight paste and incomplete sequences without emitting them. */
+	abortPendingInput(): void {
+		this.clear();
+	}
+
+	isPasteMode(): boolean {
+		return this.pasteMode;
+	}
+
 	getBuffer(): string {
 		return this.buffer;
 	}

@@ -3680,6 +3680,19 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getText(), "hello");
 		});
 
+		it("does not apply a late 201~ after abortPendingInput", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			for (const ch of "hello") editor.handleInput(ch);
+			const stdin = new StdinBuffer({ timeout: 10 });
+			attach(editor, stdin);
+
+			stdin.process("\x1b[200~abc");
+			stdin.abortPendingInput();
+			stdin.process("\x1b[201~");
+
+			assert.strictEqual(editor.getText(), "hello");
+		});
+
 		it("applies a timed-out paste as one undo unit", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			for (const ch of "hello") editor.handleInput(ch);
