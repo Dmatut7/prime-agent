@@ -170,6 +170,55 @@ interface InlineStyleContext {
 	stylePrefix: string;
 }
 
+/** Max rendered markdown blocks kept in the per-instance LRU. */
+export const MARKDOWN_BLOCK_CACHE_LIMIT = 256;
+
+/**
+ * Insertion-order LRU. `get`/`set` move a key to most-recent; inserting past
+ * `maxEntries` deletes the least-recent key. Map iteration is oldest-first.
+ */
+export class LruCache<K, V> {
+	private readonly entries = new Map<K, V>();
+
+	constructor(private readonly maxEntries: number) {}
+
+	get size(): number {
+		return this.entries.size;
+	}
+
+	keys(): IterableIterator<K> {
+		return this.entries.keys();
+	}
+
+	get(key: K): V | undefined {
+		if (!this.entries.has(key)) {
+			return undefined;
+		}
+		const value = this.entries.get(key) as V;
+		this.entries.delete(key);
+		this.entries.set(key, value);
+		return value;
+	}
+
+	set(key: K, value: V): void {
+		if (this.entries.has(key)) {
+			this.entries.delete(key);
+		}
+		this.entries.set(key, value);
+		while (this.entries.size > this.maxEntries) {
+			const oldest = this.entries.keys().next().value;
+			if (oldest === undefined) {
+				break;
+			}
+			this.entries.delete(oldest);
+		}
+	}
+
+	clear(): void {
+		this.entries.clear();
+	}
+}
+
 export class Markdown implements Component {
 	private text: string;
 	private paddingX: number; // Left/right padding
@@ -184,9 +233,9 @@ export class Markdown implements Component {
 	private selectionRegions: TableCellSelectionRegion[] = [];
 	private tableIdentities: object[] = [];
 	// Per-block render cache so streaming appends only re-render the changing
-	// final block instead of the whole document. Keyed by width/type/nextType/raw;
-	// rebuilt each render so it stays bounded to the current document's blocks.
-	private blockCache = new Map<string, string[]>();
+	// final block instead of the whole document. Keyed by width/type/nextType/raw.
+	// Capped with LRU eviction so a long document cannot grow it without bound.
+	private blockCache = new LruCache<string, string[]>(MARKDOWN_BLOCK_CACHE_LIMIT);
 
 	constructor(
 		text: string,
@@ -219,7 +268,17 @@ export class Markdown implements Component {
 		this.selectionRegions = [];
 		// External invalidation (e.g. theme change) affects rendered output, so
 		// the per-block cache must go too.
-		this.blockCache = new Map();
+		this.blockCache.clear();
+	}
+
+	/** Visible for tests: current LRU occupancy. */
+	getBlockCacheSize(): number {
+		return this.blockCache.size;
+	}
+
+	/** Visible for tests: cache keys from least- to most-recently used. */
+	getBlockCacheKeys(): string[] {
+		return [...this.blockCache.keys()];
 	}
 
 	render(width: number): string[] {
@@ -251,23 +310,21 @@ export class Markdown implements Component {
 		// served from the cache. The final block is never cached: while streaming,
 		// appended text can reinterpret it (unterminated fences, growing lists);
 		// once a block is no longer last, its raw text is final.
-		const nextCache = new Map<string, string[]>();
 		const contentLines: string[] = [];
 		for (let i = 0; i < tokens.length; i++) {
 			const token = tokens[i];
 			const nextTokenType = tokens[i + 1]?.type;
 			const useCache = cacheable && i < tokens.length - 1;
 			const key = useCache ? `${width}|${token.type}|${nextTokenType ?? ""}|${token.raw}` : "";
-			let blockLines = useCache ? (nextCache.get(key) ?? this.blockCache.get(key)) : undefined;
+			let blockLines = useCache ? this.blockCache.get(key) : undefined;
 			if (!blockLines) {
 				blockLines = this.renderBlock(token, nextTokenType, width, contentWidth);
-			}
-			if (useCache) {
-				nextCache.set(key, blockLines);
+				if (useCache) {
+					this.blockCache.set(key, blockLines);
+				}
 			}
 			contentLines.push(...blockLines);
 		}
-		this.blockCache = nextCache;
 
 		const bgFn = this.defaultTextStyle?.bgColor;
 		const emptyLine = " ".repeat(width);
