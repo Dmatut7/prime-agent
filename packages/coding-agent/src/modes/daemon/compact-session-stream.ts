@@ -1,19 +1,10 @@
 import { type AssistantMessage, type AssistantMessageEvent, parseStreamingJson } from "@earendil-works/pi-ai";
-import type { DaemonEventMeta, DaemonOutbound } from "./daemon-protocol.js";
+import type { CompactAssistantDelta, CompactAssistantMessageEvent, DaemonOutbound } from "./daemon-protocol.js";
+
+export type { CompactAssistantDelta, CompactAssistantMessageEvent };
 
 type SessionEvent = Extract<DaemonOutbound, { type: "session_event" }>["event"];
 type MessageUpdateEvent = Extract<SessionEvent, { type: "message_update" }>;
-type WithoutPartial<T> = T extends { partial: AssistantMessage } ? Omit<T, "partial"> : T;
-type CompactAssistantMessageEvent = WithoutPartial<MessageUpdateEvent["assistantMessageEvent"]>;
-
-export interface CompactAssistantDelta {
-	type: "assistant_stream_delta";
-	activeSessionId: string;
-	assistantMessageEvent: CompactAssistantMessageEvent;
-	contentStart?: AssistantMessage["content"][number];
-	toolCallArguments?: Record<string, unknown>;
-	meta?: DaemonEventMeta;
-}
 
 export function createCompactAssistantDelta(message: DaemonOutbound): CompactAssistantDelta | undefined {
 	if (message.type !== "session_event" || message.event.type !== "message_update") {

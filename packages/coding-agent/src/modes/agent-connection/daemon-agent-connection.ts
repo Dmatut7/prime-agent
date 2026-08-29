@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { ImageContent, ServiceTier, Transport } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent, ServiceTier, Transport } from "@earendil-works/pi-ai";
 import { appendRotatingLog, getAgentLogPath, getDaemonLogPath } from "../../config.js";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { AgentSessionEvent } from "../../core/agent-session.js";
@@ -20,6 +20,7 @@ import type { RefinementResult } from "../../core/refinement/index.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { SessionAlreadyActiveError } from "../../core/session-lease.js";
 import type { SessionStats } from "../../core/session-stats.js";
+import { CompactAssistantStreamReconstructor } from "../daemon/compact-session-stream.js";
 import {
 	DaemonCapabilityUnavailableError,
 	type DaemonClient,
@@ -226,6 +227,12 @@ export class DaemonAgentConnection implements AgentConnection {
 	private childRosterSequence: number | undefined;
 	private latestSnapshot: AgentConnectionSnapshot | undefined;
 	private latestSnapshotIsFresh = false;
+	/**
+	 * Accumulates compact assistant_stream_delta events into the streaming
+	 * assistant message, mirroring the supervisor-side reconstruction. Seeded
+	 * from message_start events and from snapshots that carry a streamingMessage.
+	 */
+	private readonly streamReconstructor = new CompactAssistantStreamReconstructor();
 	private attachedSessionId: string | undefined;
 	private attachedSessionFile: string | undefined;
 	private daemonLogPath: string | undefined;
@@ -329,6 +336,7 @@ export class DaemonAgentConnection implements AgentConnection {
 				...(supportsExtensionUi ? (["extension_ui"] as const) : []),
 				"slim_attach",
 				"chunked_snapshot",
+				"streaming_deltas",
 				...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
 			],
 			env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
@@ -377,6 +385,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			this.latestSnapshot = undefined;
 			this.latestSnapshotIsFresh = false;
 		}
+		this.reseedStreamReconstructor();
 	}
 
 	subscribe(listener: AgentConnectionEventListener): () => void {
@@ -1284,6 +1293,7 @@ export class DaemonAgentConnection implements AgentConnection {
 					...(supportsExtensionUi ? (["extension_ui"] as const) : []),
 					"slim_attach",
 					"chunked_snapshot",
+					"streaming_deltas",
 					...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
 				],
 				env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
@@ -1318,6 +1328,7 @@ export class DaemonAgentConnection implements AgentConnection {
 				this.lastEventSequence = previousState.lastEventSequence;
 				this.latestSnapshot = previousState.latestSnapshot;
 				this.latestSnapshotIsFresh = previousState.latestSnapshotIsFresh;
+				this.reseedStreamReconstructor();
 				this.retiredEventGenerations.clear();
 				for (const generation of previousState.retiredEventGenerations) {
 					this.retiredEventGenerations.add(generation);
@@ -1609,6 +1620,35 @@ export class DaemonAgentConnection implements AgentConnection {
 		}
 		this.observeDaemonEventSequence(message);
 
+		if (message.type === "assistant_stream_delta") {
+			const reconstructed = this.streamReconstructor.reconstruct(message);
+			// An unreconstructable delta means the seed was missed (attach raced
+			// the stream); the event-sequence machinery and the next snapshot
+			// resync recover full state, so drop rather than emit partial data.
+			if (
+				!reconstructed ||
+				reconstructed.type !== "session_event" ||
+				reconstructed.event.type !== "message_update"
+			) {
+				return;
+			}
+			// The reconstructor mutates one partial message in place; hand every
+			// observer an independent snapshot, matching the old serialized wire
+			// behavior where each update was a distinct object.
+			// reconstruct() only rebuilds assistant streaming messages, but the
+			// wire type is the wider AgentMessage union; narrow before cloning.
+			const accumulated = reconstructed.event.message as AssistantMessage;
+			const event = {
+				...reconstructed.event,
+				message: { ...accumulated, content: accumulated.content.map((block) => ({ ...block })) },
+			};
+			this.observeStreamingMessage(event);
+			this.latestSnapshotIsFresh = false;
+			await this.emit({ type: "session_event", event });
+			return;
+		}
+		this.streamReconstructor.observe(message);
+
 		if (message.type === "session_event") {
 			if (message.event.type !== "refine_complete" && message.event.type !== "refine_failed") {
 				this.observeStreamingMessage(message.event);
@@ -1650,6 +1690,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			if (this.lastEventCursor) {
 				this.latestSnapshot.lastEventCursor = this.lastEventCursor;
 			}
+			this.reseedStreamReconstructor();
 			this.latestSnapshotIsFresh = true;
 			await this.emit({ type: "session_resynced", snapshot: this.latestSnapshot });
 			return;
@@ -1672,6 +1713,7 @@ export class DaemonAgentConnection implements AgentConnection {
 				latestSnapshot.lastEventCursor = this.lastEventCursor;
 			}
 			this.latestSnapshot = latestSnapshot;
+			this.reseedStreamReconstructor();
 			this.childRosterSequence = undefined;
 			this.latestSnapshotIsFresh = true;
 			await this.emit({ type: "session_replaced", state: message.state, messages: message.messages });
@@ -1963,6 +2005,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		this.attachedSessionFile = snapshot.state.sessionFile;
 		this.latestSnapshot = mapDaemonSessionSnapshot(snapshot, replay);
 		this.childRosterSequence = Array.isArray(snapshot.children) ? snapshot.lastEventSequence : undefined;
+		this.reseedStreamReconstructor();
 		this.latestSnapshotIsFresh = true;
 	}
 
@@ -2024,6 +2067,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		this.attachedSessionId = snapshot.state.sessionId;
 		this.attachedSessionFile = snapshot.state.sessionFile;
 		this.latestSnapshot = mapDaemonSessionSnapshot(snapshot);
+		this.reseedStreamReconstructor();
 		this.latestSnapshotIsFresh = true;
 		assembly.resolve(snapshot);
 		const purpose = assembly.begin.purpose ?? "attach";
@@ -2073,6 +2117,20 @@ export class DaemonAgentConnection implements AgentConnection {
 			const { streamingMessage: _streamingMessage, ...snapshot } = this.latestSnapshot;
 			this.latestSnapshot = snapshot;
 		}
+	}
+
+	/**
+	 * Reseed the delta reconstructor after a snapshot replaced the streaming
+	 * state: a snapshot carrying a streamingMessage becomes the accumulation
+	 * seed, otherwise any stale partial state is dropped.
+	 */
+	private reseedStreamReconstructor(): void {
+		const streamingMessage = this.latestSnapshot?.streamingMessage;
+		if (streamingMessage && streamingMessage.role === "assistant") {
+			this.streamReconstructor.seed(this.activeSessionId, streamingMessage);
+			return;
+		}
+		this.streamReconstructor.clear(this.activeSessionId);
 	}
 
 	private isMessageForActiveSession(message: DaemonOutbound): boolean {
