@@ -120,15 +120,18 @@ export interface StreamOptions {
 	timeoutMs?: number;
 	/**
 	 * Maximum retry attempts for providers/SDKs that support client-side retries.
-	 * For example, OpenAI and Anthropic SDK clients default to 2.
+	 * OpenAI and Anthropic SDK clients default to 2. Codex SSE defaults to 3.
+	 * Set to 0 for a single attempt. Ignored by Mistral, Google, and Vertex AI
+	 * (those clients currently do not retry 429).
 	 */
 	maxRetries?: number;
 	/**
 	 * Maximum delay in milliseconds to wait for a retry when the server requests a long wait.
-	 * If the server's requested delay exceeds this value, the request fails immediately
-	 * with an error containing the requested delay, allowing higher-level retry logic
-	 * to handle it with user visibility.
+	 * Codex SSE uses this as the cap on `Retry-After`. If the server's requested delay
+	 * exceeds this value, the request fails immediately with an error containing the
+	 * requested delay, allowing higher-level retry logic to handle it with user visibility.
 	 * Default: 60000 (60 seconds). Set to 0 to disable the cap.
+	 * Ignored by Mistral, Google, and Vertex AI (those clients currently do not retry 429).
 	 */
 	maxRetryDelayMs?: number;
 	/**

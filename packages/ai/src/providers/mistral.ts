@@ -214,6 +214,8 @@ function buildRequestOptions(model: Model<"mistral-conversations">, options?: Mi
 		retries: { strategy: "none" };
 		headers?: Record<string, string>;
 	} = {
+		// SDK retries are forced off. This provider currently does not retry HTTP 429;
+		// StreamOptions.maxRetries / maxRetryDelayMs are ignored here.
 		retries: { strategy: "none" },
 	};
 	if (options?.signal) requestOptions.signal = options.signal;

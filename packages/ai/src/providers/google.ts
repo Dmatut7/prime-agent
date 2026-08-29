@@ -49,6 +49,8 @@ export interface GoogleOptions extends StreamOptions {
 
 let toolCallCounter = 0;
 
+// This provider has no client-side retry loop. HTTP 429 is not retried;
+// StreamOptions.maxRetries / maxRetryDelayMs are ignored here.
 export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions> = (
 	model: Model<"google-generative-ai">,
 	context: Context,

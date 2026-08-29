@@ -15,6 +15,7 @@ export function buildBaseOptions(model: Model<Api>, options?: SimpleStreamOption
 		onResponse: options?.onResponse,
 		timeoutMs: options?.timeoutMs,
 		maxRetries: options?.maxRetries,
+		// Consumed by Codex SSE Retry-After; Mistral/Google/Vertex currently ignore this.
 		maxRetryDelayMs: options?.maxRetryDelayMs,
 		metadata: options?.metadata,
 	};
