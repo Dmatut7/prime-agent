@@ -9680,8 +9680,8 @@ export class AgentSession {
 
 	private _createKernelHostHandlers(): HostRequestHandlers {
 		const handlers: HostRequestHandlers = {
-			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }) => ({
-				...(await this.runRlmChild(prompt, kwargs, cellSourceCode)),
+			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }, signal) => ({
+				...(await this.runRlmChild(prompt, kwargs, cellSourceCode, signal)),
 			})),
 			"rlm.find_models": createRlmFindModelsHostHandler((query, limit) => this.findRlmModels(query, limit)),
 			"rlm.list_subagents": createRlmListSubagentsHostHandler(() => this.listRlmSubagents()),
@@ -10050,6 +10050,12 @@ export class AgentSession {
 	}
 
 	private _cancelRlmChildRun(run: RlmChildRun, reason: string): boolean {
+		// Cancellation is an idempotent terminal transition while the detached
+		// run remains tracked. Concurrent callers must not mistake a previously
+		// accepted cancellation for a completed child and start conflicting cleanup.
+		if (run.status === "cancelled") {
+			return true;
+		}
 		if (run.status !== "running" && run.status !== "queued") {
 			return false;
 		}
@@ -10876,7 +10882,9 @@ export class AgentSession {
 		prompt: string,
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
+		signal?: AbortSignal,
 	): Promise<RlmSpawnHandle> {
+		signal?.throwIfAborted();
 		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
@@ -10904,6 +10912,7 @@ export class AgentSession {
 		} finally {
 			if (requestedSessionName) this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
 		}
+		signal?.throwIfAborted();
 		if (requestedThinkingLevel !== undefined) {
 			const supported = getSupportedThinkingLevels(modelSelection.model) as ThinkingLevel[];
 			if (!supported.includes(requestedThinkingLevel)) {
@@ -10918,6 +10927,7 @@ export class AgentSession {
 		const childNodeId = basename(childSessionDir);
 		const sessionName = requestedSessionName ?? createDefaultRlmSubagentSessionName(prompt, childNodeId);
 		if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
+		signal?.throwIfAborted();
 		const startedAt = Date.now();
 		const parentAssistantForUsage = this._findLastAssistantMessage();
 		let runningToolCount = 0;
@@ -10941,6 +10951,17 @@ export class AgentSession {
 		};
 		this._activeRlmChildRuns.set(run.id, run);
 		this._unsettledRlmChildRuns.add(run);
+		// The kernel host aborts its in-flight requests on teardown; cancel the
+		// admitted run with it so a disposed host never leaves a live child behind.
+		const abortFromHost = () => {
+			const reason = signal?.reason;
+			this._cancelRlmChildRun(run, reason instanceof Error ? reason.message : "IPython kernel host request aborted");
+		};
+		if (signal?.aborted) {
+			abortFromHost();
+		} else {
+			signal?.addEventListener("abort", abortFromHost, { once: true });
+		}
 		const emitChildUpdate = () => {
 			this._emit({ type: "rlm_child_update", child: this._rlmChildSnapshotForRun(run) });
 		};
@@ -11198,6 +11219,7 @@ export class AgentSession {
 					}
 				}
 			} finally {
+				signal?.removeEventListener("abort", abortFromHost);
 				if (run.detachedDeletion) {
 					run.deletionRunFinished = true;
 					if (!run.settled) {
@@ -11250,8 +11272,9 @@ export class AgentSession {
 		prompt: string,
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
+		signal?: AbortSignal,
 	): Promise<RlmSpawnHandle> {
-		return this._startRlmChildRun(prompt, kwargs, spawnCode);
+		return this._startRlmChildRun(prompt, kwargs, spawnCode, signal);
 	}
 
 	private _isRetryableError(message: AssistantMessage): boolean {
