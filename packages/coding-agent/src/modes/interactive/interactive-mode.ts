@@ -6666,13 +6666,11 @@ export class InteractiveMode {
 	 * a windowed rebuild: the same initialRenderMessages path used on session open,
 	 * including its toolCall/toolResult pairing repair, so the evicted components
 	 * (and their result data) can be collected. Only runs at settle points;
-	 * streaming, compacting, or running bash own components a rebuild would detach.
+	 * interruptible work (streaming, bash, permission confirm, retries) owns components a rebuild would detach.
 	 */
 	private liveChatCapBlocked(): boolean {
 		return (
-			this.isAgentStreaming() ||
-			this.isAgentCompacting() ||
-			this.isBashRunning() ||
+			this.hasInterruptibleWork() ||
 			this.streamingComponent !== undefined ||
 			this.activeBashComponent !== undefined ||
 			this.ui.isFullscreenReviewing()

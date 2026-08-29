@@ -29,7 +29,13 @@ type CapHarness = {
 	activeBashComponent: undefined;
 	customHeader: undefined;
 	builtInHeader: undefined;
-	connectionState: { isStreaming: boolean; isCompacting: boolean; isBashRunning: boolean; retryAttempt: number };
+	connectionState: {
+		isStreaming: boolean;
+		isCompacting: boolean;
+		isBashRunning: boolean;
+		retryAttempt: number;
+		sessionActions: { active?: { kind: string } };
+	};
 	chatTranscriptTrimmed: boolean;
 	chatCapRebuildFloor: number;
 	chatCapRebuildInFlight: boolean;
@@ -148,7 +154,13 @@ function createCapHarness(overrides: Partial<CapHarness> = {}): CapHarness {
 		activeBashComponent: undefined,
 		customHeader: undefined,
 		builtInHeader: undefined,
-		connectionState: { isStreaming: false, isCompacting: false, isBashRunning: false, retryAttempt: 0 },
+		connectionState: {
+			isStreaming: false,
+			isCompacting: false,
+			isBashRunning: false,
+			retryAttempt: 0,
+			sessionActions: {},
+		},
 		chatTranscriptTrimmed: false,
 		chatCapRebuildFloor: 0,
 		chatCapRebuildInFlight: false,
@@ -238,6 +250,18 @@ describe("InteractiveMode live chat component cap", () => {
 			expect(getSessionContext).not.toHaveBeenCalled();
 		}
 		expect(harness.chatContainer.children.length).toBe(boundedCount);
+	});
+
+	test("does not trim while a permission confirmation is active", async () => {
+		const harness = createCapHarness();
+		fillOverCap(harness.chatContainer);
+		harness.connectionState.sessionActions = { active: { kind: "permission" } };
+
+		await proto.enforceChatComponentCap.call(harness);
+
+		expect(harness.chatContainer.children.length).toBe(LIVE_CHAT_COMPONENT_LIMIT + 50);
+		expect(harness.chatTranscriptTrimmed).toBe(false);
+		expect(harness.agentConnection.getSessionContext).not.toHaveBeenCalled();
 	});
 
 	test("does not trim while streaming, while reviewing fullscreen, or under the cap", async () => {
