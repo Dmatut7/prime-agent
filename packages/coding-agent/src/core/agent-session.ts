@@ -3615,11 +3615,13 @@ export class AgentSession {
 	};
 
 	private _createStallWatchdog(): StallWatchdog {
-		const settings = this.settingsManager.getStallWatchdogSettings();
 		const options: StallWatchdogOptions = {
-			enabled: settings.enabled,
-			warnAfterMs: settings.warnAfterSeconds * 1000,
-			abortAfterMs: settings.abortAfterSeconds > 0 ? settings.abortAfterSeconds * 1000 : undefined,
+			enabled: () => this.settingsManager.getStallWatchdogSettings().enabled,
+			warnAfterMs: () => this.settingsManager.getStallWatchdogSettings().warnAfterSeconds * 1000,
+			abortAfterMs: () => {
+				const s = this.settingsManager.getStallWatchdogSettings();
+				return s.abortAfterSeconds > 0 ? s.abortAfterSeconds * 1000 : undefined;
+			},
 			isPaused: () =>
 				this._disposed ||
 				this._disposing ||

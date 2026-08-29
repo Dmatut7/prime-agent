@@ -35,14 +35,20 @@ export interface StallWatchdogStageInfo {
 }
 
 export interface StallWatchdogOptions {
-	enabled: boolean;
-	/** Silence duration that fires the `"warn"` stage. Must be > 0 when enabled. */
-	warnAfterMs: number;
+	/** Whether the watchdog is active. Pass a function to read live from settings. */
+	enabled: boolean | (() => boolean);
+	/**
+	 * Silence duration that fires the `"warn"` stage. Must be > 0 when enabled.
+	 * Pass a function to read the threshold live so settings changes take effect
+	 * without re-constructing the watchdog.
+	 */
+	warnAfterMs: number | (() => number);
 	/**
 	 * Silence duration that fires the `"abort"` stage. Must be greater than
 	 * `warnAfterMs`; undefined disables auto-abort (warn-only watchdog).
+	 * Pass a function to read the threshold live so settings changes take effect.
 	 */
-	abortAfterMs?: number;
+	abortAfterMs?: number | (() => number | undefined);
 	/** How long to wait after the abort stage for the run to settle. Default: 10s. */
 	abortSettleGraceMs?: number;
 	/**
@@ -72,6 +78,16 @@ export class StallWatchdog {
 		this.timers = options.timers ?? defaultTimers;
 	}
 
+	private get warnAfterMs(): number {
+		const v = this.options.warnAfterMs;
+		return typeof v === "function" ? v() : v;
+	}
+
+	private get abortAfterMs(): number | undefined {
+		const v = this.options.abortAfterMs;
+		return typeof v === "function" ? v() : v;
+	}
+
 	get currentState(): StallWatchdogState {
 		return this.state;
 	}
@@ -81,7 +97,8 @@ export class StallWatchdog {
 	}
 
 	private get active(): boolean {
-		return this.options.enabled && this.options.warnAfterMs > 0;
+		const enabled = typeof this.options.enabled === "function" ? this.options.enabled() : this.options.enabled;
+		return enabled && this.warnAfterMs > 0;
 	}
 
 	/** Start watching a turn. Re-arming resets the escalation state. */
@@ -125,7 +142,7 @@ export class StallWatchdog {
 
 	private scheduleWarn(): void {
 		this.clearTimer();
-		this.timerHandle = this.timers.setTimeout(() => this.fireWarn(), this.options.warnAfterMs);
+		this.timerHandle = this.timers.setTimeout(() => this.fireWarn(), this.warnAfterMs);
 	}
 
 	private fireWarn(): void {
@@ -141,8 +158,8 @@ export class StallWatchdog {
 		}
 		this.state = "warned";
 		this.emitStage("warn");
-		const abortAfterMs = this.options.abortAfterMs;
-		if (abortAfterMs === undefined || abortAfterMs <= this.options.warnAfterMs) return;
+		const abortAfterMs = this.abortAfterMs;
+		if (abortAfterMs === undefined || abortAfterMs <= this.warnAfterMs) return;
 		const delayMs = Math.max(0, abortAfterMs - (this.timers.now() - this.lastActivityAt));
 		this.timerHandle = this.timers.setTimeout(() => this.fireAbort(), delayMs);
 	}
