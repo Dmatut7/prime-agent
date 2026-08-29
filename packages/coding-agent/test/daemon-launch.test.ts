@@ -70,7 +70,15 @@ async function startFakeDaemon(options: FakeDaemonOptions = {}): Promise<FakeDae
 				};
 				const command = wire.type === "command" && wire.command ? wire.command : wire;
 				options.onCommand?.(command);
-				if (command.type === "list") {
+				if (command.type === "declare_client_capabilities") {
+					send(socket, {
+						type: "response",
+						command: "declare_client_capabilities",
+						id: wire.id,
+						success: true,
+						data: { declared: (command as { capabilities?: unknown }).capabilities ?? [] },
+					});
+				} else if (command.type === "list") {
 					send(socket, {
 						type: "response",
 						command: "list",
@@ -127,13 +135,23 @@ const server = createServer((socket) => {
 	let buffer = "";
 	socket.on("data", (chunk) => {
 		buffer += chunk.toString();
-		const newline = buffer.indexOf("\\n");
-		if (newline === -1) return;
-		const wire = JSON.parse(buffer.slice(0, newline));
-		const command = wire.command ?? wire;
-		if (command.type !== "shutdown") return;
-		send(socket, { type: "response", command: "shutdown", id: wire.id ?? command.id, success: true });
-		socket.end(() => process.kill(process.pid, "SIGKILL"));
+		let newline = buffer.indexOf("\\n");
+		while (newline !== -1) {
+			const line = buffer.slice(0, newline);
+			buffer = buffer.slice(newline + 1);
+			newline = buffer.indexOf("\\n");
+			if (!line.trim()) continue;
+			const wire = JSON.parse(line);
+			const command = wire.command ?? wire;
+			if (command.type === "declare_client_capabilities") {
+				send(socket, { type: "response", command: "declare_client_capabilities", id: wire.id ?? command.id, success: true });
+				continue;
+			}
+			if (command.type !== "shutdown") continue;
+			send(socket, { type: "response", command: "shutdown", id: wire.id ?? command.id, success: true });
+			socket.end(() => process.kill(process.pid, "SIGKILL"));
+			return;
+		}
 	});
 });
 server.listen(socketPath, () => process.stdout.write("ready\\n"));`,
