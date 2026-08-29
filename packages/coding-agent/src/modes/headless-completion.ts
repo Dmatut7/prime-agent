@@ -79,6 +79,14 @@ function autonomousProgressKey(status: AgentAutonomousStatus): string {
 export interface HeadlessCompletionOptions {
 	/** Include descendant settlement and the parent turns caused by their results. */
 	waitForRlmQuiescence?: boolean;
+	/**
+	 * Checked before each autonomous gate continuation prompt. The headless
+	 * completion wait is a read-only daemon command, but gate continuations
+	 * prompt the session; a caller in the middle of an update-restart handoff
+	 * returns true here to stop the mutating part and finish with the current
+	 * status instead of racing the checkpoint.
+	 */
+	shouldStopGateContinuations?: () => boolean;
 }
 
 export async function waitForHeadlessCompletion(
@@ -92,6 +100,12 @@ export async function waitForHeadlessCompletion(
 		else await session.waitForHeadlessIdle();
 		const status = session.getAutonomousStatus();
 		if (!shouldContinueAutonomousGates(status) || !status.lastGateFailure) {
+			return status;
+		}
+		// Gate continuations are the only mutating step of this wait. A handoff in
+		// progress must not be raced by fresh prompts; finish with the current
+		// status (the run reports the still-failing gate) instead.
+		if (options.shouldStopGateContinuations?.()) {
 			return status;
 		}
 		const progressKey = autonomousProgressKey(status);
