@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { closeSync, fchmodSync, fsyncSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
+import { closeSync, constants, fchmodSync, fsyncSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { win32 } from "node:path";
+import { lockSync } from "proper-lockfile";
 import { repairTruncatedTrailingLine } from "../utils/file-lines.js";
 import { getProcessStartId } from "./session-lease.js";
 
@@ -22,6 +23,8 @@ export interface ActiveOrphanProcess {
 	kernelPid?: number;
 	/** Missing on identity-free records: old journals or host writes whose start-id query failed (kernels no longer write pid-only records). */
 	processStartId?: string;
+	/** When the record was written; bounds pid-reuse checks for identity-free records. */
+	recordedAt?: string;
 }
 
 export function recordOrphanProcessState(pid: number, active: boolean): void {
@@ -39,17 +42,49 @@ export function recordOrphanProcessState(pid: number, active: boolean): void {
 		recordedAt: new Date().toISOString(),
 	};
 	try {
-		// A crash can leave a torn final line; readers skip it, so drop it before
-		// the append glues onto it.
-		repairTruncatedTrailingLine(path);
-		const descriptor = openSync(path, "a", 0o600);
+		// Host and kernels append to the same journal; hold the guard across
+		// repair+append so a crash-torn tail from one writer cannot glue onto
+		// another writer's record. Lock failures stay best-effort (outer catch).
+		// proper-lockfile requires the lock target to exist; create it first (a
+		// symlinked journal is refused by O_NOFOLLOW and skipped).
+		const touch = openSync(path, constants.O_WRONLY | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0), 0o600);
+		closeSync(touch);
+		let release: (() => void) | undefined;
+		for (let attempt = 0; attempt < 20; attempt++) {
+			try {
+				release = lockSync(path, {
+					realpath: false,
+					lockfilePath: `${path}.guard`,
+					stale: 5000,
+				});
+				break;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ELOCKED") throw error;
+				if (attempt === 19) throw error;
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+			}
+		}
+		if (!release) throw new Error(`Could not lock orphan process journal: ${path}`);
+		const releaseLock = release;
 		try {
-			// Repair legacy 0644 journals: the create mode only applies to new files.
-			if (process.platform !== "win32") fchmodSync(descriptor, 0o600);
-			writeSync(descriptor, `${JSON.stringify(record)}\n`);
-			fsyncSync(descriptor);
+			// A crash can leave a torn final line; readers skip it, so drop it before
+			// the append glues onto it.
+			repairTruncatedTrailingLine(path);
+			const descriptor = openSync(
+				path,
+				constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0),
+				0o600,
+			);
+			try {
+				// Repair legacy 0644 journals: the create mode only applies to new files.
+				if (process.platform !== "win32") fchmodSync(descriptor, 0o600);
+				writeSync(descriptor, `${JSON.stringify(record)}\n`);
+				fsyncSync(descriptor);
+			} finally {
+				closeSync(descriptor);
+			}
 		} finally {
-			closeSync(descriptor);
+			releaseLock();
 		}
 	} catch {
 		// Process tracking must not make a successfully spawned command fail.
@@ -98,6 +133,7 @@ export function readActiveOrphanProcesses(path: string, ownerPid: number): Activ
 			pid: record.pid,
 			...(Number.isInteger(record.kernelPid) ? { kernelPid: record.kernelPid } : {}),
 			...(typeof record.processStartId === "string" ? { processStartId: record.processStartId } : {}),
+			...(typeof record.recordedAt === "string" ? { recordedAt: record.recordedAt } : {}),
 		}));
 }
 
@@ -107,15 +143,40 @@ export function isOrphanProcessIdentityCurrent(orphan: ActiveOrphanProcess): boo
 }
 
 /**
+ * A reused pid must not be killed for an identity-free record. When the start
+ * id is a ps lstart stamp (macOS/BSD), a process that only started after the
+ * record was written cannot be the journaled one. Unparseable sources keep the
+ * historical best-effort behavior.
+ */
+export function isOrphanPidReused(
+	orphan: ActiveOrphanProcess,
+	query: (pid: number) => string | undefined = getProcessStartId,
+): boolean {
+	if (!orphan.recordedAt) return false;
+	const recorded = Date.parse(orphan.recordedAt);
+	if (Number.isNaN(recorded)) return false;
+	const startId = query(orphan.pid);
+	if (typeof startId !== "string" || !startId.startsWith("ps:")) return false;
+	const started = Date.parse(startId.slice("ps:".length));
+	if (Number.isNaN(started)) return false;
+	return started > recorded;
+}
+
+/**
  * Identity-free records cannot prove the pid still names the journaled process.
  * On win32 the kernel's kill-on-close job already reaped its tree when it died,
  * so a bare-pid taskkill only risks killing a reused pid. POSIX keeps the
  * best-effort kill (group-scoped, and the spawn gate makes pid-only actives
- * host-written rarities there).
+ * host-written rarities there), except when the pid demonstrably belongs to a
+ * process younger than the record.
  */
-export function shouldReapOrphanProcess(orphan: ActiveOrphanProcess): boolean {
+export function shouldReapOrphanProcess(
+	orphan: ActiveOrphanProcess,
+	query: (pid: number) => string | undefined = getProcessStartId,
+): boolean {
 	if (orphan.processStartId === undefined) {
-		return process.platform !== "win32";
+		if (process.platform === "win32") return false;
+		return !isOrphanPidReused(orphan, query);
 	}
 	return isOrphanProcessIdentityCurrent(orphan);
 }

@@ -99,6 +99,7 @@ import { acquireSessionLease, canonicalSessionPath, type SessionLease } from "..
 import {
 	getSessionArtifactPathForFile,
 	readSessionInfo,
+	repairOwnedSessionFile,
 	resolveSessionRlmDepth,
 	type SessionInfo,
 	SessionManager,
@@ -1669,6 +1670,11 @@ export class AgentDaemon {
 		let sessionManager: SessionManager;
 		try {
 			sessionLease = acquireSessionLease(sessionPath, agentDir);
+			// Repair only after lease acquisition and only on the write-owning
+			// branch: the in-memory branch never writes this file back.
+			if (sessionPath && !command.noSession) {
+				repairOwnedSessionFile(sessionPath);
+			}
 			sessionManager = sessionPath
 				? command.noSession
 					? await SessionManager.openInMemoryAsync(sessionPath, config.sessionDir, cwdOverride)
@@ -2903,6 +2909,8 @@ export class AgentDaemon {
 		let sessionLease: SessionLease | undefined;
 		try {
 			sessionLease = acquireSessionLease(entry.sessionFile, parentState.runtime.services.agentDir);
+			// This runtime takes over writing the child transcript: repair under the lease.
+			repairOwnedSessionFile(entry.sessionFile);
 			const sessionManager = await SessionManager.openAsync(entry.sessionFile, entry.sessionDir);
 			const modelRegistry = parentState.runtime.services.modelRegistry;
 			let rehydratedModel: Model<Api> | undefined;

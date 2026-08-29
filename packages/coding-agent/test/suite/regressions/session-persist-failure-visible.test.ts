@@ -79,4 +79,27 @@ describe("issue: session append failures are visible and recoverable", () => {
 		expect(content).toContain("turn two");
 		expect(content).toContain("second reply");
 	});
+
+	it("backs off failure reports exponentially regardless of error text", async () => {
+		harness = await createHarness({ persistSession: true });
+		const events: AgentSessionEvent[] = [];
+		harness.session.subscribe((event) => events.push(event));
+		const session = harness.session as unknown as {
+			_reportSessionPersistFailure(error: unknown): void;
+			_resetSessionPersistFailureBackoff(): void;
+		};
+
+		session._reportSessionPersistFailure(new Error("disk full"));
+		session._reportSessionPersistFailure(new Error("different error text"));
+		session._reportSessionPersistFailure(new Error("disk full"));
+
+		// Distinct errors must not each reach the UI: only the first passes the
+		// backoff window.
+		expect(events.filter((event) => event.type === "session_persist_failed")).toHaveLength(1);
+
+		// A successful write ends the episode: the next failure reports at once.
+		session._resetSessionPersistFailureBackoff();
+		session._reportSessionPersistFailure(new Error("disk full again"));
+		expect(events.filter((event) => event.type === "session_persist_failed")).toHaveLength(2);
+	});
 });

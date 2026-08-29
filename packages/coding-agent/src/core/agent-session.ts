@@ -405,6 +405,13 @@ export type AgentSessionEvent =
 	  }
 	| { type: "refine_complete"; result: RefinementResult }
 	| { type: "refine_failed"; error: string }
+	/**
+	 * A transcript write failed. Emitted from the single SessionManager
+	 * persist-failure hook, so every append path is covered (messages, goal,
+	 * model/thinking/service-tier changes, compaction, bash, session name,
+	 * labels, child usage, refinement). Reports back off exponentially until a
+	 * write succeeds again; the lost entry is backfilled by the next rewrite.
+	 */
 	| { type: "session_persist_failed"; error: string }
 	| {
 			type: "stall_warning";
@@ -970,6 +977,8 @@ interface RlmSubagentModelSelection {
 }
 
 const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
+const SESSION_PERSIST_FAILURE_REPORT_BASE_MS = 30_000;
+const SESSION_PERSIST_FAILURE_REPORT_MAX_MS = 300_000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
 
 function noopRlmChildAbort(): void {}
@@ -1289,6 +1298,12 @@ export class AgentSession {
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
+		// Failed transcript writes are visible on every channel (interactive, ACP,
+		// daemon attach); a successful write resets the report backoff. This single
+		// hook covers every append path (messages, goal, model, thinking, service
+		// tier, compaction, bash, name, labels, child usage, refinement).
+		this.sessionManager.onPersistFailure((error) => this._reportSessionPersistFailure(error));
+		this.sessionManager.onPersist(() => this._resetSessionPersistFailureBackoff());
 		this.settingsManager = config.settingsManager;
 		this._serviceTierPreference = config.serviceTierPreference ?? config.agent.state.serviceTier;
 		this._scopedModels = config.scopedModels ?? [];
@@ -1560,21 +1575,32 @@ export class AgentSession {
 	}
 
 	private _lastSessionPersistFailureAt = 0;
-	private _lastSessionPersistFailureMessage: string | undefined;
+	private _sessionPersistFailureBackoffMs = SESSION_PERSIST_FAILURE_REPORT_BASE_MS;
+
+	/** A successful write ends the failure episode: the next failure reports at once. */
+	private _resetSessionPersistFailureBackoff(): void {
+		this._sessionPersistFailureBackoffMs = SESSION_PERSIST_FAILURE_REPORT_BASE_MS;
+		this._lastSessionPersistFailureAt = 0;
+	}
 
 	/**
-	 * Surface a failed transcript write. A broken disk fails every event, so the
-	 * report is throttled per distinct error; recovery is implicit — the next
-	 * successful persist backfills via a full rewrite.
+	 * Surface a failed transcript write. A broken disk fails every event, so
+	 * reports back off exponentially (30s, 60s, … capped at 5min) regardless of
+	 * the error text — distinct errors must not spam the UI either. Recovery is
+	 * implicit: the next successful persist backfills via a full rewrite and
+	 * resets the backoff.
 	 */
 	private _reportSessionPersistFailure(error: unknown): void {
 		const message = error instanceof Error ? error.message : String(error);
 		const now = Date.now();
-		if (message === this._lastSessionPersistFailureMessage && now - this._lastSessionPersistFailureAt < 30_000) {
+		if (now - this._lastSessionPersistFailureAt < this._sessionPersistFailureBackoffMs) {
 			return;
 		}
 		this._lastSessionPersistFailureAt = now;
-		this._lastSessionPersistFailureMessage = message;
+		this._sessionPersistFailureBackoffMs = Math.min(
+			this._sessionPersistFailureBackoffMs * 2,
+			SESSION_PERSIST_FAILURE_REPORT_MAX_MS,
+		);
 		this._emit({ type: "session_persist_failed", error: message });
 	}
 
