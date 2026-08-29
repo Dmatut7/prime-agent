@@ -170,4 +170,39 @@ describe("compact daemon assistant streaming", () => {
 			},
 		});
 	});
+
+	it("observe does not mutate the original message_start message", () => {
+		const reconstructor = new CompactAssistantStreamReconstructor();
+		const original = assistant([{ type: "text", text: "" }]);
+		reconstructor.observe({
+			type: "session_event",
+			activeSessionId: "active-clone",
+			event: { type: "message_start", message: original },
+		});
+
+		const startFrame = createCompactAssistantDelta({
+			type: "session_event",
+			activeSessionId: "active-clone",
+			event: {
+				type: "message_update",
+				message: assistant([{ type: "text", text: "" }]),
+				assistantMessageEvent: { type: "text_start", contentIndex: 0, partial: original },
+			},
+		});
+		const deltaFrame = createCompactAssistantDelta({
+			type: "session_event",
+			activeSessionId: "active-clone",
+			event: {
+				type: "message_update",
+				message: assistant([{ type: "text", text: "mutated" }]),
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "mutated", partial: original },
+			},
+		});
+
+		reconstructor.reconstruct(startFrame!);
+		reconstructor.reconstruct(deltaFrame!);
+
+		// The original message_start message must not be mutated by reconstruct().
+		expect(original.content[0]).toMatchObject({ type: "text", text: "" });
+	});
 });
