@@ -1,6 +1,7 @@
 import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, ImageContent, Model, ServiceTier, TextContent, Transport, Usage } from "@earendil-works/pi-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
+import type { StallDiagnostics } from "../../core/agent-session.js";
 import type { AuthSourceToken } from "../../core/auth-storage.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import type { BashResult } from "../../core/bash-executor.js";
@@ -609,7 +610,21 @@ export type AgentConnectionSessionEvent =
 	  }
 	| { type: "refine_complete"; result: RefinementResult }
 	| { type: "refine_failed"; error: string }
-	| { type: "session_persist_failed"; error: string };
+	| { type: "session_persist_failed"; error: string }
+	| {
+			type: "stall_warning";
+			message: string;
+			silentMs: number;
+			thresholdMs: number;
+			diagnostics: StallDiagnostics;
+	  }
+	| {
+			type: "stall_abort";
+			message: string;
+			silentMs: number;
+			thresholdMs: number;
+			diagnostics: StallDiagnostics;
+	  };
 
 export type AgentConnectionEvent =
 	| { type: "session_event"; event: AgentConnectionSessionEvent }

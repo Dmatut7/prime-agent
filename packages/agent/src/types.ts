@@ -270,6 +270,19 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * The hook receives the agent abort signal and is responsible for honoring it.
 	 */
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
+
+	/**
+	 * Stream stall detection for the assistant response stream, in milliseconds.
+	 *
+	 * If no response events arrive for this long while streaming, the loop aborts the
+	 * provider request and settles the turn with an assistant message whose
+	 * `stopReason` is `"error"` and whose `errorMessage` describes the stall. Callers
+	 * that treat `stopReason: "error"` as retryable then retry automatically.
+	 *
+	 * A value of `0` (or a negative value) disables stall detection. Undefined means
+	 * the loop applies no stall timeout of its own.
+	 */
+	streamStallTimeoutMs?: number;
 }
 
 /**

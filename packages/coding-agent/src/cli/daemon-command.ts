@@ -1475,6 +1475,12 @@ class DaemonAttachTerminal {
 			case "session_persist_failed":
 				this.writeLine(chalk.red(`Session persistence failed: ${event.error}`));
 				return;
+			case "stall_warning":
+				this.writeLine(chalk.yellow(event.message));
+				return;
+			case "stall_abort":
+				this.writeLine(chalk.red(event.message));
+				return;
 			case "refine_complete":
 				return;
 			case "turn_start":
