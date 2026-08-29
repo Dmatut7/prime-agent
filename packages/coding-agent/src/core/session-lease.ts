@@ -116,6 +116,10 @@ function runProcessQuery(command: string, args: string[]): string {
 	return execFileSync(command, args, {
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "ignore"],
+		// ps renders lstart in the caller's locale and timezone; the start id is
+		// compared by string equality across processes, so pin a stable format or
+		// two processes with different TZ/LC_TIME would reclaim each other's leases.
+		env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
 	});
 }
 
@@ -183,6 +187,19 @@ function isLeaseOwnerAlive(owner: SessionLeaseOwner): boolean {
 	}
 	const currentStartId = getProcessStartId(owner.pid);
 	return currentStartId === undefined || currentStartId === owner.processStartId;
+}
+
+/**
+ * The owner record names this very process under the same owner identity.
+ * That happens when a prior acquire in this process leaked (release failed,
+ * start-id detection unavailable, …). Reclaim instead of deadlocking against
+ * ourselves: only this process can own a record carrying its live pid, and a
+ * different process reusing the pid would have a different process start id
+ * (caught by isLeaseOwnerAlive when present). Distinct logical owners inside
+ * one process (different active-session ids) still conflict.
+ */
+function isOwnLeaseOwner(owner: SessionLeaseOwner, environment: NodeJS.ProcessEnv): boolean {
+	return owner.pid === process.pid && owner.activeSessionId === environment[SESSION_LEASE_OWNER_ID_ENV];
 }
 
 function withLeaseGuard<T>(directory: string, action: () => T): T {
@@ -269,7 +286,7 @@ export function acquireSessionLease(
 					throw error;
 				}
 				const existingOwner = readLeaseOwner(directory);
-				if (existingOwner && isLeaseOwnerAlive(existingOwner)) {
+				if (existingOwner && isLeaseOwnerAlive(existingOwner) && !isOwnLeaseOwner(existingOwner, environment)) {
 					throw new SessionAlreadyActiveError(canonicalPath, existingOwner.activeSessionId);
 				}
 				reclaimStaleLease(directory);
@@ -277,7 +294,7 @@ export function acquireSessionLease(
 		}
 
 		const owner = existsSync(directory) ? readLeaseOwner(directory) : undefined;
-		if (owner && isLeaseOwnerAlive(owner)) {
+		if (owner && isLeaseOwnerAlive(owner) && !isOwnLeaseOwner(owner, environment)) {
 			throw new SessionAlreadyActiveError(canonicalPath, owner.activeSessionId);
 		}
 		throw new Error(`Could not acquire session lease: ${canonicalPath}`);

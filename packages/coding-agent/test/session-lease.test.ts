@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	acquireSessionLease,
 	canonicalSessionPath,
+	getProcessStartId,
 	getWindowsProcessStartId,
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
@@ -94,16 +95,27 @@ describe("session leases", () => {
 	});
 
 	it("lets an interactive launch force leases without a daemon owner id", () => {
-		// Interactive mode enables leases per-acquire (no SESSION_LEASE_OWNER_ID):
-		// a second terminal on the same transcript must collide loudly.
+		// Interactive mode enables leases per-acquire (no SESSION_LEASE_OWNER_ID).
 		const agentDir = createTempDir();
-		const sessionPath = join(agentDir, "interactive.jsonl");
-		const environment: NodeJS.ProcessEnv = { ...process.env, [SESSION_LEASES_ENABLED_ENV]: "1" };
-		// Interactive launches carry no daemon owner identity.
-		delete environment[SESSION_LEASE_OWNER_ID_ENV];
-		const first = acquireSessionLease(sessionPath, agentDir, environment);
-		expect(first).toBeDefined();
+		const sessionPath = canonicalSessionPath(resolve(agentDir, "interactive.jsonl"));
+		const key = createHash("sha256").update(sessionPath).digest("hex");
+		const lockDirectory = join(agentDir, "session-leases", `${key}.lock`);
 
+		// A different live process (pid 1, no start id recorded) owns the lease:
+		// the interactive acquire must collide loudly.
+		mkdirSync(lockDirectory, { recursive: true });
+		writeFileSync(
+			join(lockDirectory, "owner.json"),
+			JSON.stringify({
+				version: 1,
+				token: "other",
+				pid: 1,
+				sessionPath,
+				createdAt: new Date(0).toISOString(),
+			}),
+		);
+		const environment: NodeJS.ProcessEnv = { ...process.env, [SESSION_LEASES_ENABLED_ENV]: "1" };
+		delete environment[SESSION_LEASE_OWNER_ID_ENV];
 		let caught: unknown;
 		try {
 			acquireSessionLease(sessionPath, agentDir, environment);
@@ -113,10 +125,67 @@ describe("session leases", () => {
 		expect(caught).toBeInstanceOf(SessionAlreadyActiveError);
 		expect((caught as SessionAlreadyActiveError).activeSessionId).toBeUndefined();
 
-		first?.release();
-		const second = acquireSessionLease(sessionPath, agentDir, environment);
-		expect(second?.sessionPath).toBe(canonicalSessionPath(sessionPath));
-		second?.release();
+		// Our own (leaked) lease with the same owner identity is taken over.
+		writeFileSync(
+			join(lockDirectory, "owner.json"),
+			JSON.stringify({
+				version: 1,
+				token: "self",
+				pid: process.pid,
+				sessionPath,
+				createdAt: new Date(0).toISOString(),
+			}),
+		);
+		const lease = acquireSessionLease(sessionPath, agentDir, environment);
+		expect(lease?.sessionPath).toBe(sessionPath);
+		lease?.release();
+	});
+
+	it("reclaims a lease owned by this process instead of deadlocking on itself", () => {
+		// A prior acquire in this process can leak its lease (failed release,
+		// unavailable start-id detection). Re-acquiring must take it over rather
+		// than raise SessionAlreadyActiveError against its own pid.
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(resolve(agentDir, "self-owned.jsonl"));
+		const key = createHash("sha256").update(sessionPath).digest("hex");
+		const lockDirectory = join(agentDir, "session-leases", `${key}.lock`);
+		mkdirSync(lockDirectory, { recursive: true });
+		writeFileSync(
+			join(lockDirectory, "owner.json"),
+			JSON.stringify({
+				version: 1,
+				token: "self",
+				pid: process.pid,
+				activeSessionId: "self-session",
+				sessionPath,
+				createdAt: new Date(0).toISOString(),
+			}),
+		);
+
+		const lease = acquireSessionLease(sessionPath, agentDir, enabledEnvironment("self-session"));
+		expect(lease?.sessionPath).toBe(sessionPath);
+		lease?.release();
+	});
+
+	it("keeps the process start id stable across timezone environments", () => {
+		if (process.platform === "win32") {
+			return;
+		}
+		const originalTz = process.env.TZ;
+		try {
+			process.env.TZ = "America/New_York";
+			const first = getProcessStartId(process.pid);
+			process.env.TZ = "Australia/Sydney";
+			const second = getProcessStartId(process.pid);
+			expect(first).toBeDefined();
+			expect(second).toBe(first);
+		} finally {
+			if (originalTz === undefined) {
+				delete process.env.TZ;
+			} else {
+				process.env.TZ = originalTz;
+			}
+		}
 	});
 
 	it("reclaims a lease whose owner process is gone", () => {
