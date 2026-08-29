@@ -33,6 +33,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.js";
+import { resolveCompleteToolPairLeaf } from "./session-tool-pair.js";
 import { cloneUsage } from "./usage.js";
 
 export const CURRENT_SESSION_VERSION = 3;
@@ -2075,7 +2076,7 @@ export class SessionManager {
 		if (!this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
-		this.leafId = branchFromId;
+		this.leafId = resolveCompleteToolPairLeaf(this.getBranch(branchFromId))?.id ?? null;
 	}
 
 	resetLeaf(): void {
@@ -2086,13 +2087,15 @@ export class SessionManager {
 		if (branchFromId !== null && !this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
-		this.leafId = branchFromId;
+		const snappedId =
+			branchFromId === null ? null : (resolveCompleteToolPairLeaf(this.getBranch(branchFromId))?.id ?? null);
+		this.leafId = snappedId;
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
 			id: generateId(this.byId),
-			parentId: branchFromId,
+			parentId: snappedId,
 			timestamp: new Date().toISOString(),
-			fromId: branchFromId ?? "root",
+			fromId: snappedId ?? "root",
 			summary,
 			details,
 			fromHook,
@@ -2108,7 +2111,9 @@ export class SessionManager {
 			throw new Error(`Entry ${leafId} not found`);
 		}
 
-		const pathWithoutLabels = path.filter((e) => e.type !== "label");
+		const snapped = resolveCompleteToolPairLeaf(path);
+		const cutPath = snapped ? path.slice(0, path.indexOf(snapped) + 1) : [];
+		const pathWithoutLabels = cutPath.filter((e) => e.type !== "label");
 
 		const target = this.persist
 			? createUniqueSessionFileTarget(this.getSessionDir())

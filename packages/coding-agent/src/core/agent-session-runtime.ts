@@ -17,6 +17,7 @@ import { assertSessionCwdExists } from "./session-cwd.js";
 import { SessionImportFileNotFoundError } from "./session-import-errors.js";
 import { acquireSessionLease, canonicalSessionPath, type SessionLease } from "./session-lease.js";
 import { SessionManager } from "./session-manager.js";
+import { resolveCompleteToolPairLeaf } from "./session-tool-pair.js";
 
 export { SessionImportFileNotFoundError } from "./session-import-errors.js";
 
@@ -521,6 +522,10 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 			}
 			targetLeafId = selectedEntry.parentId;
 			selectedText = extractUserMessageText(selectedEntry.message.content);
+		}
+
+		if (targetLeafId) {
+			targetLeafId = resolveCompleteToolPairLeaf(this.session.sessionManager.getBranch(targetLeafId))?.id ?? null;
 		}
 
 		const previousSessionFile = this.session.sessionFile;
