@@ -191,7 +191,7 @@ const TOP_LEVEL_OPTION_GROUPS: ReadonlyArray<{ heading: string; options: readonl
 		heading: "Run options",
 		options: [
 			["-p, --print", "Print a response and exit"],
-			["--mode <text|json|rpc|acp|daemon>", "Select the output mode (default: text)"],
+			["--mode <json|rpc|acp|daemon>", "Select a non-default output mode (default: interactive)"],
 			["--cwd <dir>", "Use a specific working directory"],
 			["--offline", "Disable startup network operations"],
 			["--verbose", "Force verbose startup"],

@@ -194,6 +194,7 @@ See [Prime Agent Packages](packages.md) for package sources and security notes.
 | `-p`, `--print` | Print response and exit |
 | `--mode json` | Output all events as JSON lines; see [JSON mode](json.md) |
 | `--mode rpc` | RPC mode over stdin/stdout; see [RPC mode](rpc.md) |
+| `--mode acp` | ACP (Agent Client Protocol) over stdin/stdout |
 
 In print mode, Prime Agent also reads piped stdin and merges it into the initial prompt:
 
