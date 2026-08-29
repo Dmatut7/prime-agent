@@ -1104,7 +1104,7 @@ export class AgentSession {
 	/** Outcome disclosures whose session-file append failed; retained for context rebuilds. */
 	private readonly _unpersistedOutcomes: CustomMessage[] = [];
 
-	private _bashAbortController: AbortController | undefined = undefined;
+	private _bashAbortControllers = new Set<AbortController>();
 	private _userBashRunning = false;
 	private _userBashAbortRequested = false;
 	private _pendingBashMessages: BashExecutionMessage[] = [];
@@ -4600,11 +4600,25 @@ export class AgentSession {
 		customMessage?: AgentSessionMessage,
 	): Promise<boolean> {
 		const agentMessageId = customMessage?.details.id ?? parseAgentSessionMessagePromptId(text);
+		// A pump suspended by requestAbort must be resumed when an agent message is
+		// queued: steer/follow-up actions otherwise only wake on a turn boundary or
+		// external resume, and nothing else resumes the pump after an abort, so the
+		// message would sit unprocessed and the child session would silently stall.
+		// Resume only when actually suspended: an idle session must keep its
+		// queue-and-wait semantics instead of starting a turn immediately. The
+		// idle-and-suspended branch of acceptAgentMessagePrompt goes through _prompt
+		// with resumeIfIdle: false and keeps failing loudly.
+		const resumeSuspendedPump = () => {
+			if (!this._sessionInputPumpSuspended) return;
+			this._resumeSessionInputAdmission();
+			this._scheduleSessionInputPump();
+		};
 		if (streamingBehavior === "steer") {
 			await this._queuePreparedPrompt("steer", text, undefined, {
 				agentMessageId,
 				message: customMessage,
 			});
+			resumeSuspendedPump();
 			if (customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 			return true;
 		}
@@ -4612,6 +4626,7 @@ export class AgentSession {
 			agentMessageId,
 			message: customMessage,
 		});
+		if (queued) resumeSuspendedPump();
 		if (queued && customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 		return queued;
 	}
@@ -10959,7 +10974,9 @@ export class AgentSession {
 			transient?: boolean;
 		},
 	): Promise<BashResult> {
-		this._bashAbortController = new AbortController();
+		// Each invocation owns its controller so abortBash reaches every in-flight command.
+		const abortController = new AbortController();
+		this._bashAbortControllers.add(abortController);
 
 		const prefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
@@ -10972,7 +10989,7 @@ export class AgentSession {
 				options?.operations ?? createLocalBashOperations({ shellPath }),
 				{
 					onChunk,
-					signal: this._bashAbortController.signal,
+					signal: abortController.signal,
 				},
 			);
 
@@ -10981,7 +10998,7 @@ export class AgentSession {
 			}
 			return result;
 		} finally {
-			this._bashAbortController = undefined;
+			this._bashAbortControllers.delete(abortController);
 		}
 	}
 
@@ -11150,14 +11167,17 @@ export class AgentSession {
 	abortBash(): void {
 		// A user bash command may not have spawned yet (extension dispatch in
 		// progress); flag the request so runUserBash cancels before executing.
-		if (this._userBashRunning && this._bashAbortController === undefined) {
+		// runUserBash clears the flag at each start, so a stale flag is harmless.
+		if (this._userBashRunning) {
 			this._userBashAbortRequested = true;
 		}
-		this._bashAbortController?.abort();
+		for (const controller of this._bashAbortControllers) {
+			controller.abort();
+		}
 	}
 
 	get isBashRunning(): boolean {
-		return this._bashAbortController !== undefined || this._userBashRunning;
+		return this._bashAbortControllers.size > 0 || this._userBashRunning;
 	}
 
 	/** Whether there are pending bash messages waiting to be flushed */
