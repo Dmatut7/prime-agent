@@ -39,6 +39,7 @@ type MessageStartHandleMode = {
 	updateWorkingLoaderMessage: () => void;
 	addMessageToChat: (message: AgentMessage) => void;
 	ui: { requestRender: () => void };
+	chatContainer: Container;
 	sessionRecap?: string;
 	renderRecap: () => void;
 	updatePendingMessagesDisplay: () => void;
@@ -84,6 +85,7 @@ function createMessageStartMode(sessionRecap = "previous recap"): MessageStartHa
 		updateWorkingLoaderMessage: vi.fn(),
 		addMessageToChat: vi.fn(),
 		ui: { requestRender: vi.fn() },
+		chatContainer: new Container(),
 		sessionRecap,
 		renderRecap: vi.fn(),
 		updatePendingMessagesDisplay: vi.fn(),
