@@ -185,6 +185,38 @@ describe("StallWatchdog", () => {
 		clock.advance(1);
 		expect(stages).toEqual(["warn", "abort"]);
 	});
+
+	it("touch during aborting does not re-arm the escalation cycle", () => {
+		const clock = new FakeClock();
+		const stages: string[] = [];
+		const watchdog = new StallWatchdog({
+			enabled: true,
+			warnAfterMs: 1000,
+			abortAfterMs: 3000,
+			abortSettleGraceMs: 500,
+			timers: clock.timersImpl,
+			onStage: (info) => stages.push(info.stage),
+		});
+
+		watchdog.arm();
+		clock.advance(1000); // warn
+		clock.advance(2000); // abort -> enters "aborting"
+		expect(stages).toEqual(["warn", "abort"]);
+		expect(watchdog.currentState).toBe("aborting");
+
+		// A touch during the settle grace period must NOT cancel the settle timer
+		// or restart the warn->abort cycle.
+		watchdog.touch();
+		expect(watchdog.currentState).toBe("aborting");
+
+		clock.advance(500); // settle grace expires -> abort_unsettled -> idle
+		expect(stages).toEqual(["warn", "abort", "abort_unsettled"]);
+		expect(watchdog.currentState).toBe("idle");
+
+		// No further escalation after giving up.
+		clock.advance(60_000);
+		expect(stages).toEqual(["warn", "abort", "abort_unsettled"]);
+	});
 });
 
 describe("AgentSession stall watchdog (integration)", () => {

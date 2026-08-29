@@ -96,6 +96,10 @@ export class StallWatchdog {
 	/** Record activity: resets the warn deadline and cancels any pending escalation. */
 	touch(): void {
 		if (!this.active || this.state === "idle") return;
+		// While aborting (waiting for settle), touches must not re-arm: doing so
+		// cancels the settle timer and restarts the warn→abort cycle, contradicting
+		// the "no infinite abort loops" guarantee in fireAbortUnsettled.
+		if (this.state === "aborting") return;
 		this.lastActivityAt = this.timers.now();
 		this.state = "armed";
 		this.scheduleWarn();
