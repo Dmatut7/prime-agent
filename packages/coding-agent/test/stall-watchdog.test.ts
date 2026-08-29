@@ -185,6 +185,88 @@ describe("StallWatchdog", () => {
 		clock.advance(1);
 		expect(stages).toEqual(["warn", "abort"]);
 	});
+
+	it("reads warn/abort thresholds live from getter functions", () => {
+		const clock = new FakeClock();
+		const stages: string[] = [];
+		let warnMs = 1000;
+		let abortMs: number | undefined = 3000;
+		const watchdog = new StallWatchdog({
+			enabled: true,
+			warnAfterMs: () => warnMs,
+			abortAfterMs: () => abortMs,
+			abortSettleGraceMs: 500,
+			timers: clock.timersImpl,
+			onStage: (info) => stages.push(info.stage),
+		});
+
+		// Initial thresholds: warn at 1000ms, abort at 3000ms.
+		watchdog.arm();
+		clock.advance(1000);
+		expect(stages).toEqual(["warn"]);
+
+		// Change thresholds and re-arm: the new values must take effect.
+		warnMs = 200;
+		abortMs = 600;
+		watchdog.arm();
+		clock.advance(200);
+		expect(stages).toEqual(["warn", "warn"]);
+		clock.advance(400);
+		expect(stages).toEqual(["warn", "warn", "abort"]);
+		clock.advance(500);
+		expect(stages).toEqual(["warn", "warn", "abort", "abort_unsettled"]);
+	});
+
+	it("respects live enabled flag from a getter function", () => {
+		const clock = new FakeClock();
+		const stages: string[] = [];
+		let enabled = true;
+		const watchdog = new StallWatchdog({
+			enabled: () => enabled,
+			warnAfterMs: 1000,
+			abortAfterMs: 3000,
+			timers: clock.timersImpl,
+			onStage: (info) => stages.push(info.stage),
+		});
+
+		enabled = false;
+		watchdog.arm();
+		clock.advance(60_000);
+		expect(stages).toEqual([]);
+		expect(watchdog.currentState).toBe("idle");
+	});
+
+	it("touch during aborting does not re-arm the escalation cycle", () => {
+		const clock = new FakeClock();
+		const stages: string[] = [];
+		const watchdog = new StallWatchdog({
+			enabled: true,
+			warnAfterMs: 1000,
+			abortAfterMs: 3000,
+			abortSettleGraceMs: 500,
+			timers: clock.timersImpl,
+			onStage: (info) => stages.push(info.stage),
+		});
+
+		watchdog.arm();
+		clock.advance(1000); // warn
+		clock.advance(2000); // abort -> enters "aborting"
+		expect(stages).toEqual(["warn", "abort"]);
+		expect(watchdog.currentState).toBe("aborting");
+
+		// A touch during the settle grace period must NOT cancel the settle timer
+		// or restart the warn->abort cycle.
+		watchdog.touch();
+		expect(watchdog.currentState).toBe("aborting");
+
+		clock.advance(500); // settle grace expires -> abort_unsettled -> idle
+		expect(stages).toEqual(["warn", "abort", "abort_unsettled"]);
+		expect(watchdog.currentState).toBe("idle");
+
+		// No further escalation after giving up.
+		clock.advance(60_000);
+		expect(stages).toEqual(["warn", "abort", "abort_unsettled"]);
+	});
 });
 
 describe("AgentSession stall watchdog (integration)", () => {
@@ -324,6 +406,8 @@ describe("AgentSession stall watchdog (integration)", () => {
 		expect(warning.type).toBe("stall_warning");
 		if (warning.type !== "stall_warning") throw new Error("unreachable");
 		expect(warning.message).toContain("no session activity");
+		// The warning must include actionable guidance, not just a description.
+		expect(warning.message).toContain("interrupt");
 		expect(warning.diagnostics.inFlightToolCalls.some((call) => call.toolName === "hang_forever")).toBe(true);
 
 		const abortEvent = await waitFor(events, (event) => event.type === "stall_abort");

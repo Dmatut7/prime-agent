@@ -3615,11 +3615,13 @@ export class AgentSession {
 	};
 
 	private _createStallWatchdog(): StallWatchdog {
-		const settings = this.settingsManager.getStallWatchdogSettings();
 		const options: StallWatchdogOptions = {
-			enabled: settings.enabled,
-			warnAfterMs: settings.warnAfterSeconds * 1000,
-			abortAfterMs: settings.abortAfterSeconds > 0 ? settings.abortAfterSeconds * 1000 : undefined,
+			enabled: () => this.settingsManager.getStallWatchdogSettings().enabled,
+			warnAfterMs: () => this.settingsManager.getStallWatchdogSettings().warnAfterSeconds * 1000,
+			abortAfterMs: () => {
+				const s = this.settingsManager.getStallWatchdogSettings();
+				return s.abortAfterSeconds > 0 ? s.abortAfterSeconds * 1000 : undefined;
+			},
 			isPaused: () =>
 				this._disposed ||
 				this._disposing ||
@@ -3697,7 +3699,7 @@ export class AgentSession {
 			diagnostics,
 		};
 		if (info.stage === "warn") {
-			const message = `Possible stall: no session activity for ${silentSeconds}s while a turn is running. If nothing recovers, the turn will be aborted automatically after ${settings.abortAfterSeconds}s of silence.`;
+			const message = `Possible stall: no session activity for ${silentSeconds}s while a turn is running. If nothing recovers, the turn will be aborted automatically after ${settings.abortAfterSeconds}s of silence. If a tool appears stuck, interrupt the turn manually to recover faster; check the daemon log for stall diagnostics.`;
 			sessionLog.warn("stall watchdog: no activity while turn running", logFields);
 			this._emit({
 				type: "stall_warning",
