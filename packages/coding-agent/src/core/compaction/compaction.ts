@@ -532,8 +532,36 @@ export function buildSummarizationPrompt(customInstructions?: string, previousSu
 }
 
 /**
+ * Trim summarization input to fit a token budget, keeping the newest messages.
+ * Returns the kept messages and how many older messages were elided. A budget of
+ * 0 (or unknown window) disables trimming. The newest message is always kept so
+ * summarization has something to work with.
+ */
+export function budgetSummarizationInput(
+	messages: AgentMessage[],
+	tokenBudget: number,
+): { messages: AgentMessage[]; elided: number } {
+	if (tokenBudget <= 0) return { messages, elided: 0 };
+	let totalTokens = 0;
+	let start = messages.length;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const tokens = estimateTokens(messages[i]);
+		if (totalTokens + tokens > tokenBudget) break;
+		totalTokens += tokens;
+		start = i;
+	}
+	if (start === messages.length && messages.length > 0) start = messages.length - 1;
+	return { messages: messages.slice(start), elided: start };
+}
+
+/**
  * Generate a summary of the conversation using the LLM.
  * If previousSummary is provided, uses the update prompt to merge.
+ *
+ * The input is trimmed to the model's usable window (mirroring branch
+ * summarization) so a large context cannot overflow the summarization request
+ * itself. Oldest messages are elided first; file-operation tracking is computed
+ * from the full preparation elsewhere and is unaffected.
  */
 export async function generateSummary(
 	currentMessages: AgentMessage[],
@@ -550,9 +578,16 @@ export async function generateSummary(
 
 	const basePrompt = buildSummarizationPrompt(customInstructions, previousSummary);
 	// Serialize before the LLM call so it summarizes rather than continues this conversation.
-	const llmMessages = convertToLlm(currentMessages);
+	const contextWindow = model.contextWindow || 0;
+	const inputBudget = contextWindow > 0 ? contextWindow - reserveTokens : 0;
+	const { messages: budgetedMessages, elided } = budgetSummarizationInput(currentMessages, inputBudget);
+	const llmMessages = convertToLlm(budgetedMessages);
 	const conversationText = serializeConversation(llmMessages);
-	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
+	let promptText = "";
+	if (elided > 0) {
+		promptText += `[Note: ${elided} older message(s) were elided to fit the summarization budget. Reflect any preserved prior summary instead of them.]\n`;
+	}
+	promptText += `<conversation>\n${conversationText}\n</conversation>\n\n`;
 	if (previousSummary) {
 		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
 	}
