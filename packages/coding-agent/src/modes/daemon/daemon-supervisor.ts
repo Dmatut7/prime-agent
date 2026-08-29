@@ -740,11 +740,17 @@ export class DaemonSupervisor {
 					.filter((path): path is string => typeof path === "string")
 					.map((path) => resolve(path)),
 			);
-			const migratedJobs = migrateLegacyCronJobsToSessionArtifacts(getCronJobsPath(agentDir), {
-				isSessionOwned: (job) => ownedSessionFiles.has(resolve(job.sessionFile)),
-			});
-			if (migratedJobs > 0) {
-				this.log(`Migrated ${migratedJobs} scheduled jobs into session artifacts`);
+			try {
+				const migratedJobs = migrateLegacyCronJobsToSessionArtifacts(getCronJobsPath(agentDir), {
+					isSessionOwned: (job) => ownedSessionFiles.has(resolve(job.sessionFile)),
+				});
+				if (migratedJobs > 0) {
+					this.log(`Migrated ${migratedJobs} scheduled jobs into session artifacts`);
+				}
+			} catch (error) {
+				// Cron migration is best-effort: a legacy store (or a pre-hardening
+				// artifact layout) must never keep the supervisor from starting.
+				this.log(`Could not migrate legacy cron jobs: ${error instanceof Error ? error.message : String(error)}`);
 			}
 			await this.catalog.start().catch((error) => this.log(`Could not start daemon catalog: ${String(error)}`));
 			let adoptionFailure: unknown;
