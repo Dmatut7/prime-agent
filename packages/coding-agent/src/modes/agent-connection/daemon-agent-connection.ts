@@ -504,6 +504,10 @@ export class DaemonAgentConnection implements AgentConnection {
 		return this.client.supportsServerCapability("acp_mcp_servers");
 	}
 
+	supportsRlmQuiescenceBarrier(): boolean {
+		return this.client.supportsServerCapability("rlm_quiescence_barrier");
+	}
+
 	async replaceAcpMcpServers(servers: readonly AcpMcpServerConfig[], ownerId: string): Promise<void> {
 		if (!this.supportsAcpMcpServers()) {
 			throw new DaemonCapabilityUnavailableError("replace_acp_mcp_servers", "acp_mcp_servers");

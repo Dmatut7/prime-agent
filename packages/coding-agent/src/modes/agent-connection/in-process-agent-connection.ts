@@ -115,6 +115,10 @@ export class InProcessAgentConnection implements AgentConnection {
 		return true;
 	}
 
+	supportsRlmQuiescenceBarrier(): boolean {
+		return true;
+	}
+
 	async replaceAcpMcpServers(servers: readonly AcpMcpServerConfig[], ownerId: string): Promise<void> {
 		this.runtimeHost.session.replaceAcpMcpServers(servers, ownerId);
 	}

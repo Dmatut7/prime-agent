@@ -693,6 +693,8 @@ export interface AgentConnection {
 	setSessionEntryLabel(entryId: string, label: string | undefined): Promise<void>;
 	respondToExtensionUiRequest(requestId: string, response: AgentConnectionExtensionUiResponse): Promise<void>;
 	supportsAcpMcpServers?(): boolean;
+	/** True when waitForHeadlessCompletion accepts the RLM quiescence barrier. */
+	supportsRlmQuiescenceBarrier?(): boolean;
 	replaceAcpMcpServers?(servers: readonly AcpMcpServerConfig[], ownerId: string): Promise<void>;
 	releaseAcpMcpServers?(ownerId: string, serverNames: readonly string[]): Promise<void>;
 

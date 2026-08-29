@@ -118,7 +118,13 @@ async function runPrintModeWithConnectionInternal(
 			await connection.promptAndWait(message);
 		}
 
-		const autonomousStatus = await connection.waitForHeadlessCompletion();
+		// Do not complete (and dispose/complete_owned_session) until in-flight
+		// RLM subagents have settled; otherwise the worker shutdown cascades into
+		// aborting children whose results the root has not consumed yet. Older
+		// daemon builds without the barrier keep the legacy idle-only behavior.
+		const autonomousStatus = await connection.waitForHeadlessCompletion({
+			waitForRlmQuiescence: connection.supportsRlmQuiescenceBarrier?.() ?? true,
+		});
 		if (mode === "text") {
 			const { primary, compactionOutcomes } = selectHeadlessTerminalResult(await connection.getMessages());
 			if (primary?.role === "assistant") {
