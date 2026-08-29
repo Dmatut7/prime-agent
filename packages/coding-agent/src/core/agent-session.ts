@@ -4600,11 +4600,25 @@ export class AgentSession {
 		customMessage?: AgentSessionMessage,
 	): Promise<boolean> {
 		const agentMessageId = customMessage?.details.id ?? parseAgentSessionMessagePromptId(text);
+		// A pump suspended by requestAbort must be resumed when an agent message is
+		// queued: steer/follow-up actions otherwise only wake on a turn boundary or
+		// external resume, and nothing else resumes the pump after an abort, so the
+		// message would sit unprocessed and the child session would silently stall.
+		// Resume only when actually suspended: an idle session must keep its
+		// queue-and-wait semantics instead of starting a turn immediately. The
+		// idle-and-suspended branch of acceptAgentMessagePrompt goes through _prompt
+		// with resumeIfIdle: false and keeps failing loudly.
+		const resumeSuspendedPump = () => {
+			if (!this._sessionInputPumpSuspended) return;
+			this._resumeSessionInputAdmission();
+			this._scheduleSessionInputPump();
+		};
 		if (streamingBehavior === "steer") {
 			await this._queuePreparedPrompt("steer", text, undefined, {
 				agentMessageId,
 				message: customMessage,
 			});
+			resumeSuspendedPump();
 			if (customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 			return true;
 		}
@@ -4612,6 +4626,7 @@ export class AgentSession {
 			agentMessageId,
 			message: customMessage,
 		});
+		if (queued) resumeSuspendedPump();
 		if (queued && customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 		return queued;
 	}
