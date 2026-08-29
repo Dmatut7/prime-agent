@@ -4612,9 +4612,7 @@ export class AgentSession {
 		// restart manifest instead of starting a new turn during teardown, so the
 		// message stays queued behind the fence (mirrors the triggerTurn guard).
 		const resumeSuspendedPump = () => {
-			if (!this._sessionInputPumpSuspended || this._sessionInputSuspendedForUpdateRestart) return;
-			this._resumeSessionInputAdmission();
-			this._scheduleSessionInputPump();
+			this.wakeSuspendedSessionInput();
 		};
 		if (streamingBehavior === "steer") {
 			await this._queuePreparedPrompt("steer", text, undefined, {
@@ -4777,7 +4775,11 @@ export class AgentSession {
 		message: CustomMessage,
 		options?: InternalPromptOptions & { executionPolicy?: TurnExecutionPolicy },
 	): Promise<void> {
-		if (!this.isStreaming && options?.resumeIfIdle) this._resumeSessionInputAdmission();
+		// Never lift the update-restart fence: injected work (heartbeats) must stay
+		// queued for the restart manifest instead of starting a turn during teardown.
+		if (!this.isStreaming && options?.resumeIfIdle && !this._sessionInputSuspendedForUpdateRestart) {
+			this._resumeSessionInputAdmission();
+		}
 		const admissionEpoch = this._sessionInputPumpEpoch;
 		const admissionFence = await this._acquireDirectTurnAdmissionFence(options?.signal).catch((error: unknown) => {
 			throwIfPromptAdmissionCancelled(options?.signal);
@@ -5627,7 +5629,9 @@ export class AgentSession {
 				action.wake === "immediate")
 		) {
 			if (action.payload.kind === "turn" && action.wake === "immediate") {
-				this._resumeSessionInputAdmission();
+				// The update-restart fence keeps queued work bound for the restart
+				// manifest; admission wake must not start turns during teardown.
+				if (!this._sessionInputSuspendedForUpdateRestart) this._resumeSessionInputAdmission();
 			}
 			this._scheduleSessionInputPump();
 		}
@@ -6840,6 +6844,21 @@ export class AgentSession {
 		this._sessionInputPumpEpoch++;
 		this._notifySessionInputCheckpointChange();
 		this._flushDeferredRlmTerminalNotices();
+	}
+
+	/**
+	 * Wake a pump suspended by an ordinary requestAbort so stranded queued work
+	 * can drain (e.g. a visible heartbeat action left behind by an abort that
+	 * would otherwise defer every later tick forever). Never lifts the
+	 * update-restart fence: that queued work must survive into the restart
+	 * manifest instead of starting a turn during teardown. Returns whether the
+	 * suspension was lifted.
+	 */
+	wakeSuspendedSessionInput(): boolean {
+		if (!this._sessionInputPumpSuspended || this._sessionInputSuspendedForUpdateRestart) return false;
+		this._resumeSessionInputAdmission();
+		this._scheduleSessionInputPump();
+		return true;
 	}
 
 	/** Resume the scheduler after requestAbort/abortForUpdateRestart suspended it; owned pause leases are unaffected. */
