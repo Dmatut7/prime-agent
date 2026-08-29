@@ -4,6 +4,14 @@
 
 import { spawn } from "node:child_process";
 import { waitForChildProcess } from "../utils/child-process.js";
+import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from "../utils/shell.js";
+import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	formatSize,
+	type TruncationResult,
+	truncateTail,
+} from "./tools/truncate.js";
 
 /**
  * Options for executing shell commands.
@@ -30,6 +38,68 @@ export interface ExecResult {
 	stderr: string;
 	code: number;
 	killed: boolean;
+	/** True when stdout or stderr exceeded the retention limit and was truncated */
+	truncated: boolean;
+}
+
+/**
+ * Retained output per stream before oldest chunks are dropped. Kept above the
+ * truncation limit so the final tail truncation always has enough material.
+ */
+const OUTPUT_RETENTION_BYTES = DEFAULT_MAX_BYTES * 2;
+
+/**
+ * Bounded output accumulator (same ring-buffer scheme as bash-executor): raw
+ * bytes stream in, only the most recent OUTPUT_RETENTION_BYTES are kept, and
+ * the final content is tail-truncated and annotated.
+ */
+class BoundedOutputCollector {
+	private chunks: string[] = [];
+	private retainedBytes = 0;
+	private readonly decoder = new TextDecoder();
+	totalBytes = 0;
+	private newlineCount = 0;
+
+	add(data: Buffer): void {
+		this.totalBytes += data.length;
+		const text = this.decoder.decode(data, { stream: true });
+		for (let i = 0; i < text.length; i++) {
+			if (text.charCodeAt(i) === 10) this.newlineCount++;
+		}
+		this.chunks.push(text);
+		this.retainedBytes += Buffer.byteLength(text);
+		while (this.retainedBytes > OUTPUT_RETENTION_BYTES && this.chunks.length > 1) {
+			const removed = this.chunks.shift()!;
+			this.retainedBytes -= Buffer.byteLength(removed);
+		}
+	}
+
+	finish(): { content: string; truncated: boolean } {
+		const tail = this.decoder.decode();
+		if (tail) {
+			for (let i = 0; i < tail.length; i++) {
+				if (tail.charCodeAt(i) === 10) this.newlineCount++;
+			}
+			this.chunks.push(tail);
+		}
+
+		const retained = this.chunks.join("");
+		const result = truncateTail(retained, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
+		if (!result.truncated) {
+			return { content: retained, truncated: false };
+		}
+
+		const totalLines = this.newlineCount + 1;
+		const annotation = formatExecTruncationAnnotation(result, totalLines, this.totalBytes);
+		return { content: result.content + annotation, truncated: true };
+	}
+}
+
+function formatExecTruncationAnnotation(result: TruncationResult, totalLines: number, totalBytes: number): string {
+	if (result.truncatedBy === "lines") {
+		return `\n\n[Output truncated: showing last ${result.outputLines} of ${totalLines} lines.]`;
+	}
+	return `\n\n[Output truncated: showing last ${formatSize(result.outputBytes)} of ${formatSize(totalBytes)}.]`;
 }
 
 function mergeExecEnv(env?: Record<string, string | undefined>): NodeJS.ProcessEnv | undefined {
@@ -49,7 +119,9 @@ function mergeExecEnv(env?: Record<string, string | undefined>): NodeJS.ProcessE
 
 /**
  * Execute a shell command and return stdout/stderr/code.
- * Supports timeout and abort signal.
+ * Supports timeout and abort signal. On abort or timeout the whole process
+ * group is killed (matching the bash tool), and output accumulation is
+ * bounded per stream.
  */
 export async function execCommand(
 	command: string,
@@ -61,28 +133,31 @@ export async function execCommand(
 		const proc = spawn(command, args, {
 			cwd,
 			shell: false,
+			// New process group so abort/timeout can kill the entire tree,
+			// matching createLocalBashOperations.
+			detached: process.platform !== "win32",
 			stdio: ["ignore", "pipe", "pipe"],
 			// Merge per-call env over the parent env so callers can scope vars
 			// (e.g. herdr pane identity) without mutating the shared process.env.
 			env: mergeExecEnv(options?.env),
 		});
+		if (proc.pid) trackDetachedChildPid(proc.pid);
 
-		let stdout = "";
-		let stderr = "";
+		const stdoutCollector = new BoundedOutputCollector();
+		const stderrCollector = new BoundedOutputCollector();
 		let killed = false;
 		let timeoutId: NodeJS.Timeout | undefined;
-		let forceKillTimeoutId: NodeJS.Timeout | undefined;
 
 		const killProcess = () => {
 			if (!killed) {
 				killed = true;
-				proc.kill("SIGTERM");
-				forceKillTimeoutId = setTimeout(() => {
-					forceKillTimeoutId = undefined;
-					if (proc.exitCode === null && proc.signalCode === null) {
-						proc.kill("SIGKILL");
-					}
-				}, 5000);
+				// Kill the full process group (taskkill /T on Windows); a plain
+				// proc.kill leaves grandchildren running.
+				if (proc.pid !== undefined) {
+					killProcessTree(proc.pid);
+				} else {
+					proc.kill("SIGKILL");
+				}
 			}
 		};
 
@@ -101,19 +176,31 @@ export async function execCommand(
 		}
 
 		proc.stdout?.on("data", (data) => {
-			stdout += data.toString();
+			stdoutCollector.add(data);
 		});
 
 		proc.stderr?.on("data", (data) => {
-			stderr += data.toString();
+			stderrCollector.add(data);
 		});
 
 		const cleanup = () => {
 			if (timeoutId) clearTimeout(timeoutId);
-			if (forceKillTimeoutId) clearTimeout(forceKillTimeoutId);
+			if (proc.pid) untrackDetachedChildPid(proc.pid);
 			if (options?.signal) {
 				options.signal.removeEventListener("abort", killProcess);
 			}
+		};
+
+		const finish = (code: number) => {
+			const stdout = stdoutCollector.finish();
+			const stderr = stderrCollector.finish();
+			resolve({
+				stdout: stdout.content,
+				stderr: stderr.content,
+				code,
+				killed,
+				truncated: stdout.truncated || stderr.truncated,
+			});
 		};
 
 		// Wait for process termination without hanging on inherited stdio handles
@@ -121,11 +208,11 @@ export async function execCommand(
 		waitForChildProcess(proc)
 			.then((code) => {
 				cleanup();
-				resolve({ stdout, stderr, code: code ?? 0, killed });
+				finish(code ?? 0);
 			})
 			.catch((_err) => {
 				cleanup();
-				resolve({ stdout, stderr, code: 1, killed });
+				finish(1);
 			});
 	});
 }

@@ -1,7 +1,17 @@
+import { randomBytes } from "node:crypto";
+import { basename, dirname, join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Box, type Component, Container, Spacer, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { constants } from "fs";
-import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
+import {
+	access as fsAccess,
+	chmod as fsChmod,
+	readFile as fsReadFile,
+	rename as fsRename,
+	stat as fsStat,
+	unlink as fsUnlink,
+	writeFile as fsWriteFile,
+} from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
 import {
@@ -75,15 +85,53 @@ export interface EditToolDetails {
 export interface EditOperations {
 	/** Read file contents as a Buffer */
 	readFile: (absolutePath: string) => Promise<Buffer>;
-	/** Write content to a file */
-	writeFile: (absolutePath: string, content: string) => Promise<void>;
+	/** Write content to a file. Implementations should honor an abort signal before committing the write. */
+	writeFile: (absolutePath: string, content: string, options?: { signal?: AbortSignal }) => Promise<void>;
 	/** Check if file is readable and writable (throw if not) */
 	access: (absolutePath: string) => Promise<void>;
 }
 
+/**
+ * Write a file atomically: content goes to a temp file in the target directory
+ * first, then a rename commits it. If the signal aborts before the rename, the
+ * original file is untouched and the temp file is removed.
+ */
+export async function writeFileAtomic(absolutePath: string, content: string, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) {
+		throw new Error("Operation aborted");
+	}
+
+	const tempPath = join(dirname(absolutePath), `.${basename(absolutePath)}.${randomBytes(6).toString("hex")}.tmp`);
+
+	let mode: number | undefined;
+	try {
+		const stats = await fsStat(absolutePath);
+		mode = stats.mode & 0o7777;
+	} catch {
+		// Target does not exist yet; fall back to default permissions.
+	}
+
+	await fsWriteFile(tempPath, content, "utf-8");
+
+	try {
+		if (mode !== undefined) {
+			await fsChmod(tempPath, mode);
+		}
+		// Re-check right before committing: an abort that arrived during the temp
+		// write must not replace the original file.
+		if (signal?.aborted) {
+			throw new Error("Operation aborted");
+		}
+		await fsRename(tempPath, absolutePath);
+	} catch (error) {
+		await fsUnlink(tempPath).catch(() => {});
+		throw error;
+	}
+}
+
 const defaultEditOperations: EditOperations = {
 	readFile: (path) => fsReadFile(path),
-	writeFile: (path, content) => fsWriteFile(path, content, "utf-8"),
+	writeFile: (path, content, options) => writeFileAtomic(path, content, options?.signal),
 	access: (path) => fsAccess(path, constants.R_OK | constants.W_OK),
 };
 
@@ -421,7 +469,7 @@ export function createEditToolDefinition(
 								}
 
 								const finalContent = bom + restoreLineEndings(newContent, originalEnding);
-								await ops.writeFile(absolutePath, finalContent);
+								await ops.writeFile(absolutePath, finalContent, { signal });
 
 								if (aborted) {
 									return;
