@@ -11,6 +11,9 @@ export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
 /** Abort a provider stream after this long without any events (0 = disabled). */
 export const DEFAULT_STREAM_STALL_TIMEOUT_MS = 300_000;
 
+/** Default timeout (seconds) for bash tool calls when the model passes none. */
+export const DEFAULT_BASH_TIMEOUT_SECONDS = 600;
+
 /** Session stall watchdog: warn after this long without any session activity. */
 export const DEFAULT_STALL_WARN_AFTER_SECONDS = 300;
 
@@ -93,6 +96,15 @@ export interface MarkdownSettings {
 
 export interface BundledSkillsSettings {
 	websearch?: boolean; // default: true
+}
+
+export interface ToolsSettings {
+	/**
+	 * Default timeout (seconds) applied to bash tool calls when the model does
+	 * not pass an explicit `timeout`. Default: 600. Set to 0 to make "no timeout"
+	 * the default (not recommended: a hung command can wedge the turn forever).
+	 */
+	bashTimeoutSeconds?: number;
 }
 
 export interface WarningSettings {
@@ -186,6 +198,7 @@ export interface Settings {
 	themes?: string[]; // Array of local theme file paths or directories
 	enableSkillCommands?: boolean; // default: true - register skills as /skill:name commands
 	bundledSkills?: BundledSkillsSettings; // Configure built-in skills shipped with Prime Agent
+	tools?: ToolsSettings;
 	enableBuiltinSkills?: boolean; // default: true - load built-in skills shipped with prime-agent
 	terminal?: TerminalSettings;
 	images?: ImageSettings;
@@ -991,6 +1004,14 @@ export class SettingsManager {
 		this.globalSettings.hideThinkingBlock = hide;
 		this.markModified("hideThinkingBlock");
 		this.save();
+	}
+
+	getBashTimeoutSeconds(): number {
+		const value = this.settings.tools?.bashTimeoutSeconds;
+		if (typeof value === "number" && Number.isFinite(value)) {
+			return Math.max(0, value);
+		}
+		return DEFAULT_BASH_TIMEOUT_SECONDS;
 	}
 
 	getShellPath(): string | undefined {

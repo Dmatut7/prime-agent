@@ -216,6 +216,22 @@ To disable entirely: `{ "stallWatchdog": { "enabled": false } }`.
 | `images.autoResize` | boolean | `true` | Resize images to 2000x2000 max |
 | `images.blockImages` | boolean | `false` | Block all images from being sent to LLM |
 
+### Tools
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `tools.bashTimeoutSeconds` | number | `600` | Default timeout (seconds) for bash tool calls when the model passes no `timeout`. The model can override per call, and `timeout: 0` disables the timeout for that call. Set to `0` to make "no timeout" the default (not recommended: a hung command can wedge the turn until the stall watchdog aborts it) |
+
+When a command hits the timeout, its process group is killed and the model
+receives an error explaining that the command was killed and how to re-run it
+with a larger `timeout` (or `timeout: 0` for no limit).
+
+```json
+{
+  "tools": { "bashTimeoutSeconds": 600 }
+}
+```
+
 ### Shell
 
 | Setting | Type | Default | Description |
