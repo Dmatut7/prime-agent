@@ -1,15 +1,18 @@
 import {
 	chmodSync,
 	closeSync,
+	constants,
 	fsyncSync,
 	mkdirSync,
 	openSync,
+	readdirSync,
 	readFileSync,
 	renameSync,
-	writeFileSync,
+	rmSync,
 	writeSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { repairTruncatedTrailingLine } from "../../utils/file-lines.js";
 
 export interface WorkerRecoveryRecord {
 	version: 1;
@@ -60,7 +63,24 @@ export class WorkerRecoveryJournal {
 
 	constructor(private readonly path: string) {
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+		this.cleanStaleCompactionTemps();
+		// A crash can leave a torn final line; load skips it, so drop it from disk
+		// too — the next append must not glue onto the torn bytes.
+		repairTruncatedTrailingLine(path);
 		this.latest = parseRecords(path);
+	}
+
+	private cleanStaleCompactionTemps(): void {
+		const prefix = `${basename(this.path)}.`;
+		try {
+			for (const name of readdirSync(dirname(this.path))) {
+				if (name.startsWith(prefix) && name.endsWith(".tmp")) {
+					rmSync(join(dirname(this.path), name), { force: true });
+				}
+			}
+		} catch {
+			// Stale temps only waste space; their cleanup must not break startup.
+		}
 	}
 
 	record(input: Omit<WorkerRecoveryRecord, "version" | "recordedAt">): void {
@@ -105,10 +125,24 @@ export class WorkerRecoveryJournal {
 
 	private compact(): void {
 		const tempPath = `${this.path}.${process.pid}.tmp`;
-		writeFileSync(tempPath, `${[...this.latest.values()].map((record) => JSON.stringify(record)).join("\n")}\n`, {
-			mode: 0o600,
-		});
-		chmodSync(tempPath, 0o600);
-		renameSync(tempPath, this.path);
+		const content = `${[...this.latest.values()].map((record) => JSON.stringify(record)).join("\n")}\n`;
+		let descriptor: number | undefined;
+		try {
+			descriptor = openSync(
+				tempPath,
+				constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
+				0o600,
+			);
+			writeSync(descriptor, content);
+			fsyncSync(descriptor);
+			closeSync(descriptor);
+			descriptor = undefined;
+			renameSync(tempPath, this.path);
+		} finally {
+			if (descriptor !== undefined) closeSync(descriptor);
+			// After a successful rename the temp no longer exists; on failure this
+			// removes the partial file instead of leaving it for the next startup.
+			rmSync(tempPath, { force: true });
+		}
 	}
 }

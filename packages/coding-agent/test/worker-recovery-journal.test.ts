@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,6 +6,48 @@ import { WorkerRecoveryJournal } from "../src/modes/daemon/worker-recovery-journ
 
 describe("WorkerRecoveryJournal", () => {
 	const roots: string[] = [];
+
+	it("drops a torn trailing line so the next append does not glue onto it", () => {
+		const path = createPath();
+		const journal = new WorkerRecoveryJournal(path);
+		journal.record({
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			busy: true,
+			operation: "prompt_accepted",
+		});
+		// Simulate a crash mid-append of the next record.
+		appendFileSync(path, '{"version":1,"activeSessionId":"active-2","torn');
+
+		const reopened = new WorkerRecoveryJournal(path);
+		reopened.record({
+			activeSessionId: "active-2",
+			sessionId: "session-2",
+			busy: false,
+			operation: "prompt_complete",
+		});
+
+		const lines = readFileSync(path, "utf8")
+			.split("\n")
+			.filter((line) => line.length > 0);
+		for (const line of lines) {
+			expect(() => JSON.parse(line)).not.toThrow();
+		}
+		expect(lines.some((line) => line.includes("active-2"))).toBe(true);
+		expect(
+			reopened
+				.getLatest()
+				.map((record) => record.activeSessionId)
+				.sort(),
+		).toEqual(["active-1", "active-2"]);
+	});
+
+	it("cleans stale compaction temp files left by a crash", () => {
+		const path = createPath();
+		writeFileSync(`${path}.4242.tmp`, "stale");
+		new WorkerRecoveryJournal(path);
+		expect(existsSync(`${path}.4242.tmp`)).toBe(false);
+	});
 
 	afterEach(() => {
 		for (const root of roots.splice(0)) {

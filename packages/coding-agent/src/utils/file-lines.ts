@@ -1,4 +1,13 @@
-import { closeSync, createReadStream, openSync, readSync } from "node:fs";
+import {
+	closeSync,
+	constants,
+	createReadStream,
+	fstatSync,
+	fsyncSync,
+	ftruncateSync,
+	openSync,
+	readSync,
+} from "node:fs";
 
 export function readFirstLineSync(filePath: string, maxBytes = 64 * 1024): string | undefined {
 	const fd = openSync(filePath, "r");
@@ -93,5 +102,52 @@ export async function* readFileLines(filePath: string, startOffset = 0): AsyncGe
 export async function* readLinesAsBuffers(filePath: string): AsyncGenerator<Buffer> {
 	for await (const entry of readFileLines(filePath)) {
 		yield entry.line;
+	}
+}
+
+/**
+ * Drop a trailing unterminated line (a crash-torn append) from an append-only
+ * line file so the next append does not glue onto the torn bytes. No-op when
+ * the file is missing, empty, or already ends with a newline. Readers already
+ * skip such a tail; this makes the on-disk state agree with them before the
+ * next write.
+ */
+export function repairTruncatedTrailingLine(filePath: string): void {
+	let fd: number;
+	try {
+		fd = openSync(filePath, constants.O_RDWR);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	try {
+		const { size } = fstatSync(fd);
+		if (size === 0) return;
+		const lastByte = Buffer.allocUnsafe(1);
+		readSync(fd, lastByte, 0, 1, size - 1);
+		if (lastByte[0] === 0x0a) return;
+		// Scan backwards for the last newline; a torn tail is one partial line,
+		// so the first 64 KiB chunk almost always answers.
+		const chunkSize = 64 * 1024;
+		let keepBytes = 0;
+		let offset = Math.max(0, size - chunkSize);
+		for (;;) {
+			const length = Math.min(chunkSize, size - offset);
+			const chunk = Buffer.allocUnsafe(length);
+			readSync(fd, chunk, 0, length, offset);
+			const index = chunk.lastIndexOf(0x0a);
+			if (index !== -1) {
+				keepBytes = offset + index + 1;
+				break;
+			}
+			if (offset === 0) break;
+			offset = Math.max(0, offset - chunkSize);
+		}
+		if (keepBytes < size) {
+			ftruncateSync(fd, keepBytes);
+			fsyncSync(fd);
+		}
+	} finally {
+		closeSync(fd);
 	}
 }

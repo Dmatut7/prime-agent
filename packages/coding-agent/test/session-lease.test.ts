@@ -93,6 +93,32 @@ describe("session leases", () => {
 		second?.release();
 	});
 
+	it("lets an interactive launch force leases without a daemon owner id", () => {
+		// Interactive mode enables leases per-acquire (no SESSION_LEASE_OWNER_ID):
+		// a second terminal on the same transcript must collide loudly.
+		const agentDir = createTempDir();
+		const sessionPath = join(agentDir, "interactive.jsonl");
+		const environment: NodeJS.ProcessEnv = { ...process.env, [SESSION_LEASES_ENABLED_ENV]: "1" };
+		// Interactive launches carry no daemon owner identity.
+		delete environment[SESSION_LEASE_OWNER_ID_ENV];
+		const first = acquireSessionLease(sessionPath, agentDir, environment);
+		expect(first).toBeDefined();
+
+		let caught: unknown;
+		try {
+			acquireSessionLease(sessionPath, agentDir, environment);
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(SessionAlreadyActiveError);
+		expect((caught as SessionAlreadyActiveError).activeSessionId).toBeUndefined();
+
+		first?.release();
+		const second = acquireSessionLease(sessionPath, agentDir, environment);
+		expect(second?.sessionPath).toBe(canonicalSessionPath(sessionPath));
+		second?.release();
+	});
+
 	it("reclaims a lease whose owner process is gone", () => {
 		const agentDir = createTempDir();
 		const sessionPath = canonicalSessionPath(resolve(agentDir, "stale.jsonl"));
