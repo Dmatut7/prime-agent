@@ -48,11 +48,14 @@ import {
 	type AgentSessionMessageController,
 	type AgentSessionMessageListResult,
 	type AgentSessionMessageReceipt,
+	assertAgentMessageQueueCapacity,
 	assertAgentSessionNameAvailable,
 	assertDirectAgentMessageTarget,
 	createAgentMessageHostHandlers,
+	DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
 	formatAgentSessionNameUnavailable,
 	isAgentSessionMessage,
+	isAgentSessionMessagePrompt,
 	normalizeAgentSessionMessage,
 	parseAgentSessionMessagePromptId,
 	startsAgentRun,
@@ -404,7 +407,7 @@ export interface AgentSessionConfig {
 	allowedToolNames?: string[];
 	/**
 	 * Whether the built-in long-running goals feature is available: the bundled
-	 * goal skill in the IPython kernel, its goal.* host handlers, and /goal.
+	 * goal skill in the Python kernel, its goal.* host handlers, and /goal.
 	 * Default: true.
 	 */
 	includeGoals?: boolean;
@@ -1095,6 +1098,7 @@ export class AgentSession {
 	private _retryPromise: Promise<void> | undefined = undefined;
 	private _retryResolve: (() => void) | undefined = undefined;
 	private _retryAuthFailureSources: AuthSourceToken[] = [];
+	private _agentMessageClearEpoch = 0;
 	private _agentMessageOutcomes = new Map<string, AgentMessageOutcome>();
 	private _lateIpythonSentAgentMessages = new Map<string, KernelSentAgentMessage[]>();
 	/** Outcome disclosures whose session-file append failed; retained for context rebuilds. */
@@ -2028,7 +2032,7 @@ export class AgentSession {
 	}
 
 	/**
-	 * Goals are pursued through the IPython goal skill, so the only tool the
+	 * Goals are pursued through the kernel goal skill, so the only tool the
 	 * model needs is ipython. Force-activate it (including into a live
 	 * continuation context) so the model can always reach `goal.complete()`.
 	 */
@@ -2923,7 +2927,7 @@ export class AgentSession {
 	}
 
 	/**
-	 * Handle a goal.* request from the IPython kernel host bridge (the bundled
+	 * Handle a goal.* request from the Python kernel host bridge (the bundled
 	 * goal skill). All goal state stays host-side; the kernel only sees the
 	 * serialized snake_case response.
 	 */
@@ -2974,7 +2978,6 @@ export class AgentSession {
 				if (instructions !== undefined && typeof instructions !== "string") {
 					throw new Error("compact.run instructions must be a string when provided");
 				}
-				// "status" is reserved by the host-request reply protocol; don't use it as a key.
 				if (!this.isStreaming) {
 					return {
 						scheduled: false,
@@ -3856,7 +3859,7 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	/**
-	 * Async teardown for graceful quit/switch: await the IPython kernel's dispose
+	 * Async teardown for graceful quit/switch: await the Python kernel's dispose
 	 * (which flushes a final namespace snapshot) before the synchronous dispose, so
 	 * the latest state reaches disk instead of racing process exit.
 	 */
@@ -4559,6 +4562,24 @@ export class AgentSession {
 	async acceptAgentMessagePrompt(text: string, options?: PromptOptions): Promise<void> {
 		const customMessage =
 			options?.customMessage && isAgentSessionMessage(options.customMessage) ? options.customMessage : undefined;
+		const clearEpoch = this._agentMessageClearEpoch;
+		const admissionCommitted = () => {
+			options?.admissionCommitted?.();
+			if (clearEpoch !== this._agentMessageClearEpoch) {
+				throw new Error("Agent message was cleared before admission");
+			}
+		};
+		if (
+			this._sessionInputPumpSuspended &&
+			this._isBusyForSessionInput("preflight") &&
+			options?.queueIfBusy === true &&
+			options.streamingBehavior
+		) {
+			admissionCommitted();
+			const queued = await this.queueAgentMessagePrompt(text, options.streamingBehavior, customMessage);
+			options.preflightResult?.(queued, queued);
+			return;
+		}
 		await this._prompt(text, {
 			...options,
 			resumeIfIdle: false,
@@ -4568,6 +4589,7 @@ export class AgentSession {
 			returnAfterAccepted: true,
 			agentMessageId: options?.agentMessageId ?? customMessage?.details.id ?? parseAgentSessionMessagePromptId(text),
 			customMessage,
+			admissionCommitted,
 		});
 		if (customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 	}
@@ -4840,6 +4862,10 @@ export class AgentSession {
 					expandPromptTemplates,
 				});
 				const normalized = normalizationResult instanceof Promise ? await normalizationResult : normalizationResult;
+				// Async input handlers ran between the admission check above and
+				// admission itself; re-check so content invalidated during that
+				// await (e.g. a cron job cancelled or updated) is not admitted.
+				if (normalizationResult instanceof Promise) options?.admissionCommitted?.();
 				if (normalized.kind === "extensionCommand") {
 					commitFence?.release();
 					reportPreflight(true);
@@ -5538,6 +5564,16 @@ export class AgentSession {
 		}
 		if (this._sessionInputAdmissionPauses.size > 0) {
 			throw new Error("Cannot admit a session action while session input admission is paused.");
+		}
+		if (
+			options.restore !== true &&
+			action.payload.kind === "turn" &&
+			isAgentSessionMessage(primaryDeliveryRecord(action).message)
+		) {
+			assertAgentMessageQueueCapacity(
+				this._actionStore.unfinishedActions().length,
+				DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
+			);
 		}
 		const coalescedOwner = options.restore ? undefined : this._coalescedFollowUpOwner(action);
 		if (coalescedOwner) {
@@ -6296,6 +6332,11 @@ export class AgentSession {
 		for (const action of this._actionStore.clearableActions()) {
 			if (action.payload.kind === "turn") action.payload.prepared = undefined;
 		}
+	}
+
+	clearQueuedAgentMessages(): { steering: string[]; followUp: string[] } {
+		this._agentMessageClearEpoch++;
+		return this.clearQueuedUserMessagesMatching(isAgentSessionMessagePrompt);
 	}
 
 	clearQueuedUserMessagesMatching(predicate: (text: string) => boolean): { steering: string[]; followUp: string[] } {
@@ -7245,7 +7286,7 @@ export class AgentSession {
 				: "";
 		const content = [
 			"<ipython_state>",
-			`Your IPython kernel persisted through compaction; its remaining variables, imports, and helpers are still available.${prunedDetail}${detail}`,
+			`Your Python kernel persisted through compaction; its remaining variables, imports, and helpers are still available.${prunedDetail}${detail}`,
 			"</ipython_state>",
 		].join("\n");
 		const message = {
@@ -7272,11 +7313,11 @@ export class AgentSession {
 		const lines = ["<ipython_state_restored>"];
 		if (result.restored.length > 0) {
 			lines.push(
-				`Your IPython kernel state was revived from your previous session. These names are available again: ${result.restored.join(", ")}.`,
+				`Your Python kernel state was revived from your previous session. These names are available again: ${result.restored.join(", ")}.`,
 			);
 		} else {
 			lines.push(
-				"Your previous IPython kernel state could not be revived; the kernel is starting fresh, so re-create any variables, imports, or loaded data you need.",
+				"Your previous Python kernel state could not be revived; the kernel is starting fresh, so re-create any variables, imports, or loaded data you need.",
 			);
 		}
 		if (result.failed.length > 0) {
@@ -8956,6 +8997,8 @@ export class AgentSession {
 			const notifyRestore = !this._ipythonRuntimeBuilt;
 			this._ipythonKernelProvisioner = new IpythonKernelProvisioner(this._cwd, {
 				env: this._rlmKernelEnv(),
+				commandPrefix: this.settingsManager.getShellCommandPrefix(),
+				shellPath: this.settingsManager.getShellPath(),
 				sessionId: this.sessionId,
 				hostHandlers: this._createKernelHostHandlers(),
 				pythonSkills,

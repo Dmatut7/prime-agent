@@ -259,7 +259,7 @@ describe("daemon protocol helpers", () => {
 		// An old daemon ignores the unknown field and answers with full rows, so
 		// the gate exists to stop a sender from depending on the smaller payload.
 		expect(getDaemonCommandCompatibilities({ ...legacy, omitStreamingMessages: true })).toEqual([
-			{ minProtocol: 7, minSchemaRevision: 23, capability: "list_without_streaming_messages" },
+			{ minProtocol: 7, minSchemaRevision: 24, capability: "list_without_streaming_messages" },
 			DAEMON_COMMAND_COMPATIBILITY.list,
 		]);
 		expect(getDaemonCommandCompatibilities({ ...legacy, omitStreamingMessages: false })).toEqual([
