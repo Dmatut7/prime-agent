@@ -39,6 +39,7 @@ function createFakeThis(overrides: Record<string, unknown> = {}) {
 			return Promise.resolve();
 		}),
 		addMessageToChat: vi.fn(),
+		enforceChatComponentCap: vi.fn().mockResolvedValue(undefined),
 		refreshConnectionContextUsage: vi.fn().mockResolvedValue(undefined),
 		showError: vi.fn(),
 		showWarning: vi.fn(),
