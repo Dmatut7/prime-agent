@@ -366,10 +366,14 @@ describe("daemon protocol helpers", () => {
 		expect(isDaemonCommandEnvelope(createDaemonCommandEnvelope(command, "cmd-1", "client-1", 6))).toBe(false);
 	});
 
-	it("keeps attachment routing out of the durable mutation journal", () => {
+	it("keeps attachment routing and pure waits out of the durable mutation journal", () => {
 		expect(isDaemonMutatingCommand({ type: "attach" })).toBe(false);
 		expect(isDaemonMutatingCommand({ type: "reattach" })).toBe(false);
-		expect(isDaemonMutatingCommand({ type: "wait_for_headless_completion" })).toBe(true);
+		expect(isDaemonMutatingCommand({ type: "wait_for_idle" })).toBe(false);
+		// A pure wait must not hold the drain latch: a long headless-completion
+		// barrier (RLM quiescence) would otherwise block update-restart and
+		// idle eviction until it resolves.
+		expect(isDaemonMutatingCommand({ type: "wait_for_headless_completion" })).toBe(false);
 		expect(isDaemonMutatingCommand({ type: "switch_session" })).toBe(true);
 	});
 

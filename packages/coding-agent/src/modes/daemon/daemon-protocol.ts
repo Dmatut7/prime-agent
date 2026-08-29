@@ -1141,6 +1141,11 @@ const READ_ONLY_DAEMON_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"reattach",
 	"agent_messages_status",
 	"wait_for_idle",
+	// Pure waits: they observe state until it settles and never mutate it.
+	// Counting them as mutations holds the drain latch for the whole wait,
+	// which blocks update-restart preparation and idle eviction sweeps while
+	// a print/json run waits for RLM quiescence.
+	"wait_for_headless_completion",
 	"get_session_header",
 	"get_state",
 	"get_connection_state",
