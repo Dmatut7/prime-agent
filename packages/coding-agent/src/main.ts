@@ -67,7 +67,12 @@ import {
 	MissingSessionCwdError,
 	type SessionCwdIssue,
 } from "./core/session-cwd.js";
-import { canonicalSessionPath, SessionAlreadyActiveError } from "./core/session-lease.js";
+import {
+	acquireSessionLease,
+	canonicalSessionPath,
+	SESSION_LEASES_ENABLED_ENV,
+	SessionAlreadyActiveError,
+} from "./core/session-lease.js";
 import { SessionManager } from "./core/session-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import { isTelemetryEnabled } from "./core/telemetry.js";
@@ -1588,11 +1593,22 @@ export async function main(args: string[], options?: MainOptions) {
 
 	let runtime: AgentSessionRuntime;
 	try {
+		// Interactive (non-daemon-client) sessions take a session lease too: two
+		// terminals resuming the same transcript must collide loudly instead of
+		// interleaving appends. Meta commands (--list-models) skip the lease.
+		const directSessionLease =
+			parsed.listModels === undefined
+				? acquireSessionLease(sessionManager.getSessionFile(), agentDir, {
+						...process.env,
+						[SESSION_LEASES_ENABLED_ENV]: "1",
+					})
+				: undefined;
 		runtime = await createAgentSessionRuntime(createRuntime, {
 			cwd: sessionManager.getCwd(),
 			agentDir,
 			sessionManager,
 			sessionConfig: defaultSessionConfig,
+			...(directSessionLease ? { sessionLease: directSessionLease } : {}),
 		});
 	} catch (error) {
 		if (error instanceof SessionAlreadyActiveError) {
