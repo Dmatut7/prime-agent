@@ -244,6 +244,7 @@ Paths in `~/.prime/agent/settings.json` resolve relative to `~/.prime/agent`. Pa
 |---------|------|---------|-------------|
 | `packages` | array | `[]` | npm/git packages to load resources from |
 | `extensions` | string[] | `[]` | Local extension file paths or directories |
+| `extensionHandlerTimeoutMs` | number | `30000` | Per-handler and factory load timeout in milliseconds. Timed-out event handlers are skipped so the session stays live; timed-out `tool_call` handlers block the tool (fail-safe). `0` disables the wall-clock timeout. |
 | `skills` | string[] | `[]` | Local skill file paths or directories |
 | `prompts` | string[] | `[]` | Local prompt template paths or directories |
 | `themes` | string[] | `[]` | Local theme file paths or directories |

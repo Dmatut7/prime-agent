@@ -800,6 +800,110 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("handler timeout", () => {
+		it("skips a hanging handler, reports the timeout, and runs later handlers", async () => {
+			const marker = path.join(tempDir, "later-handler-ran");
+			const hangCode = `
+				export default function(pi) {
+					pi.on("agent_start", async () => {
+						await new Promise(() => {});
+					});
+				}
+			`;
+			const laterCode = `
+				import * as fs from "node:fs";
+				export default function(pi) {
+					pi.on("agent_start", async () => {
+						fs.writeFileSync(${JSON.stringify(marker)}, "ok");
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "a-hang.ts"), hangCode);
+			fs.writeFileSync(path.join(extensionsDir, "b-later.ts"), laterCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry, {
+				handlerTimeoutMs: 40,
+			});
+
+			const errors: Array<{ event: string; error: string }> = [];
+			runner.onError((err) => {
+				errors.push({ event: err.event, error: err.error });
+			});
+
+			const started = Date.now();
+			await runner.emit({ type: "agent_start" });
+			expect(Date.now() - started).toBeLessThan(1000);
+			expect(errors).toHaveLength(1);
+			expect(errors[0].event).toBe("agent_start");
+			expect(errors[0].error).toContain("timed out");
+			expect(errors[0].error).toContain("session stays live");
+			expect(fs.existsSync(marker)).toBe(true);
+		});
+
+		it("unblocks a hanging handler when the session abort signal fires", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("agent_start", async () => {
+						await new Promise(() => {});
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "hang-abort.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry, {
+				handlerTimeoutMs: 5_000,
+			});
+			const controller = new AbortController();
+			runner.bindCore(extensionActions, {
+				...extensionContextActions,
+				getSignal: () => controller.signal,
+			});
+			const errors: string[] = [];
+			runner.onError((err) => errors.push(err.error));
+
+			const started = Date.now();
+			const emitPromise = runner.emit({ type: "agent_start" });
+			setTimeout(() => controller.abort(), 20);
+			await emitPromise;
+			expect(Date.now() - started).toBeLessThan(1000);
+			expect(errors).toEqual([]);
+		});
+
+		it("fail-safe blocks a hanging tool_call handler", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_call", async () => {
+						await new Promise(() => {});
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "hang-tool.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry, {
+				handlerTimeoutMs: 40,
+			});
+			const errors: string[] = [];
+			runner.onError((err) => errors.push(err.error));
+
+			const started = Date.now();
+			const blocked = await runner.emitToolCall({
+				type: "tool_call",
+				toolName: "custom",
+				toolCallId: "call-hang",
+				input: {},
+			});
+			expect(Date.now() - started).toBeLessThan(1000);
+			expect(blocked).toEqual({
+				block: true,
+				reason: expect.stringContaining("timed out"),
+			});
+			expect(errors.some((error) => error.includes("blocking tool"))).toBe(true);
+		});
+	});
+
 	describe("hasHandlers", () => {
 		it("returns true when handlers exist for event type", async () => {
 			const extCode = `
