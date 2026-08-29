@@ -140,13 +140,13 @@ export class ExtensionSelectorComponent extends Container {
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
-		if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
+		if (kb.matches(keyData, "tui.select.up") || kb.matches(keyData, "tui.select.upSecondary")) {
 			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
 			this.updateList();
-		} else if (kb.matches(keyData, "tui.select.down") || keyData === "j") {
+		} else if (kb.matches(keyData, "tui.select.down") || kb.matches(keyData, "tui.select.downSecondary")) {
 			this.selectedIndex = Math.min(this.options.length - 1, this.selectedIndex + 1);
 			this.updateList();
-		} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
+		} else if (kb.matches(keyData, "tui.select.confirm") || kb.matches(keyData, "tui.input.newLine")) {
 			const selected = this.options[this.selectedIndex];
 			if (selected) this.onSelectCallback(selected);
 		} else if (kb.matches(keyData, "tui.select.cancel")) {

@@ -847,11 +847,11 @@ export class Editor implements Component, Focusable {
 			this.deleteWordForward();
 			return;
 		}
-		if (kb.matches(data, "tui.editor.deleteCharBackward") || matchesKey(data, "shift+backspace")) {
+		if (kb.matches(data, "tui.editor.deleteCharBackward")) {
 			this.handleBackspace();
 			return;
 		}
-		if (kb.matches(data, "tui.editor.deleteCharForward") || matchesKey(data, "shift+delete")) {
+		if (kb.matches(data, "tui.editor.deleteCharForward")) {
 			this.handleForwardDelete();
 			return;
 		}
@@ -964,7 +964,7 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
-		if (matchesKey(data, "shift+space")) {
+		if (kb.matches(data, "tui.editor.insertSpace")) {
 			this.insertCharacter(" ");
 			return;
 		}

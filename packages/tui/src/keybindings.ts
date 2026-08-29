@@ -26,6 +26,7 @@ export interface Keybindings {
 	"tui.editor.yank": true;
 	"tui.editor.yankPop": true;
 	"tui.editor.undo": true;
+	"tui.editor.insertSpace": true;
 	"tui.input.newLine": true;
 	"tui.input.submit": true;
 	"tui.input.tab": true;
@@ -40,6 +41,10 @@ export interface Keybindings {
 	"tui.select.pageDown": true;
 	"tui.select.confirm": true;
 	"tui.select.cancel": true;
+	"tui.select.toggle": true;
+	"tui.select.upSecondary": true;
+	"tui.select.downSecondary": true;
+	"tui.debug.dump": true;
 }
 
 export type Keybinding = keyof Keybindings;
@@ -99,12 +104,12 @@ export const TUI_KEYBINDINGS = {
 	"tui.editor.pageUp": { defaultKeys: "pageUp", description: "Page up", defaultKeyScope: "editor" },
 	"tui.editor.pageDown": { defaultKeys: "pageDown", description: "Page down", defaultKeyScope: "editor" },
 	"tui.editor.deleteCharBackward": {
-		defaultKeys: "backspace",
+		defaultKeys: ["backspace", "shift+backspace"],
 		description: "Delete character backward",
 		defaultKeyScope: "editor",
 	},
 	"tui.editor.deleteCharForward": {
-		defaultKeys: ["delete", "ctrl+d"],
+		defaultKeys: ["delete", "ctrl+d", "shift+delete"],
 		description: "Delete character forward",
 		defaultKeyScope: "editor",
 	},
@@ -131,6 +136,11 @@ export const TUI_KEYBINDINGS = {
 	"tui.editor.yank": { defaultKeys: "ctrl+y", description: "Yank", defaultKeyScope: "editor" },
 	"tui.editor.yankPop": { defaultKeys: "alt+y", description: "Yank pop", defaultKeyScope: "editor" },
 	"tui.editor.undo": { defaultKeys: "ctrl+-", description: "Undo", defaultKeyScope: "editor" },
+	"tui.editor.insertSpace": {
+		defaultKeys: "shift+space",
+		description: "Insert a space (shifted space)",
+		defaultKeyScope: "editor",
+	},
 	"tui.input.newLine": {
 		defaultKeys: "shift+enter",
 		description: "Insert newline",
@@ -167,6 +177,10 @@ export const TUI_KEYBINDINGS = {
 		defaultKeys: ["escape", "ctrl+c"],
 		description: "Cancel selection",
 	},
+	"tui.select.toggle": { defaultKeys: "space", description: "Toggle or activate the selected item" },
+	"tui.select.upSecondary": { defaultKeys: "k", description: "Move selection up (secondary)" },
+	"tui.select.downSecondary": { defaultKeys: "j", description: "Move selection down (secondary)" },
+	"tui.debug.dump": { defaultKeys: "shift+ctrl+d", description: "Dump TUI debug information" },
 } as const satisfies KeybindingDefinitions;
 
 export interface KeybindingConflict {

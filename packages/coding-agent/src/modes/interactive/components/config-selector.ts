@@ -9,7 +9,6 @@ import {
 	type Focusable,
 	getKeybindings,
 	Input,
-	matchesKey,
 	Spacer,
 	truncateToWidth,
 	visibleWidth,
@@ -397,11 +396,11 @@ class ResourceList implements Component, Focusable {
 			this.onCancel?.();
 			return;
 		}
-		if (matchesKey(data, "ctrl+c")) {
+		if (kb.matches(data, "app.configuration.exit")) {
 			this.onExit?.();
 			return;
 		}
-		if (data === " " || kb.matches(data, "tui.select.confirm")) {
+		if (kb.matches(data, "tui.select.toggle") || kb.matches(data, "tui.select.confirm")) {
 			const entry = this.filteredItems[this.selectedIndex];
 			if (entry?.type === "item") {
 				const newEnabled = !entry.item.enabled;
