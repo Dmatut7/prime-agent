@@ -225,6 +225,9 @@ export function estimateTokens(message: AgentMessage): number {
 					if (block.type === "text" && block.text) {
 						chars += block.text.length;
 					}
+					if (block.type === "image") {
+						chars += 4800; // Same image estimate as tool results
+					}
 				}
 			}
 			return Math.ceil(chars / 4);
