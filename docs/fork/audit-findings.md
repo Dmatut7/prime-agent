@@ -274,3 +274,8 @@ exec-memory(A8 恢复) / exec-queue(Q3,Q4,Q5-7) / exec-security(S6-S9) / exec-tu
 3. 子代理 shell 环境污染清单：RLM_*/PRIME_AGENT_INTERNAL_*/FORCE_COLOR
 4. 后台等待必须有看门狗（我自己的纪律 memory）
 5. grok 预判链路法 + 父代理亲验；k3 慢而深做终审
+
+## 三模型背景终审（R2 收尾轮）
+- review-glm（daemon 层）：两大区复核无误（B2/R5-R6/Q1/Q3/S10/S11/cron/#1700/#1864/#1858/#1845/#1847）。候选 2 条：①commit 路径内存 checkpoint 残留=已留档的 k3 第⑥条（独立再发现，维持留档）；②W8 Windows 管道 listen→onListening 的 ACL 窗口（TOCTOU，窄，Node API 限制，补入 W8 未验证备注）。
+
+- review-grok（TUI/内核/MCP 层）：6 候选——4 条立项修复中（C1 T8 双 ESC 误吞 CSI、C2 K1 restoreFailed 闩死→改隔离+恢复写、C3 codex catch 退避不走 cap、C4 setText 清 undo 范围收窄）；2 条留档：E1 超时后 handler 迟到的副作用留在 runtime（JS 无法取消挂起 Promise，需扩展失败态门控，工作量中等）、W3 仅 rlm.run 认 AbortSignal（其余 host 请求靠 5s drain，可接受）。windows rename 覆盖行为列「待 Windows 实机验证」。
