@@ -29,7 +29,13 @@ type CapHarness = {
 	activeBashComponent: undefined;
 	customHeader: undefined;
 	builtInHeader: undefined;
-	connectionState: { isStreaming: boolean; isCompacting: boolean; isBashRunning: boolean; retryAttempt: number };
+	connectionState: {
+		isStreaming: boolean;
+		isCompacting: boolean;
+		isBashRunning: boolean;
+		retryAttempt: number;
+		sessionActions: { active?: { kind: string } };
+	};
 	chatTranscriptTrimmed: boolean;
 	chatCapRebuildFloor: number;
 	chatCapRebuildInFlight: boolean;
@@ -54,6 +60,7 @@ type CapHarness = {
 		requestRender: () => void;
 		requestRenderPreservingViewport: () => void;
 		isFullscreen: () => boolean;
+		isFullscreenReviewing: () => boolean;
 		enterFullscreen: (options: unknown) => void;
 		exitFullscreen: () => void;
 	};
@@ -147,7 +154,13 @@ function createCapHarness(overrides: Partial<CapHarness> = {}): CapHarness {
 		activeBashComponent: undefined,
 		customHeader: undefined,
 		builtInHeader: undefined,
-		connectionState: { isStreaming: false, isCompacting: false, isBashRunning: false, retryAttempt: 0 },
+		connectionState: {
+			isStreaming: false,
+			isCompacting: false,
+			isBashRunning: false,
+			retryAttempt: 0,
+			sessionActions: {},
+		},
 		chatTranscriptTrimmed: false,
 		chatCapRebuildFloor: 0,
 		chatCapRebuildInFlight: false,
@@ -172,6 +185,7 @@ function createCapHarness(overrides: Partial<CapHarness> = {}): CapHarness {
 			requestRender: vi.fn(),
 			requestRenderPreservingViewport: vi.fn(),
 			isFullscreen: () => false,
+			isFullscreenReviewing: () => false,
 			enterFullscreen: vi.fn(),
 			exitFullscreen: vi.fn(),
 		},
@@ -238,23 +252,67 @@ describe("InteractiveMode live chat component cap", () => {
 		expect(harness.chatContainer.children.length).toBe(boundedCount);
 	});
 
-	test("does not trim while streaming, while fullscreen, or under the cap", async () => {
+	test("does not trim while a permission confirmation is active", async () => {
+		const harness = createCapHarness();
+		fillOverCap(harness.chatContainer);
+		harness.connectionState.sessionActions = { active: { kind: "permission" } };
+
+		await proto.enforceChatComponentCap.call(harness);
+
+		expect(harness.chatContainer.children.length).toBe(LIVE_CHAT_COMPONENT_LIMIT + 50);
+		expect(harness.chatTranscriptTrimmed).toBe(false);
+		expect(harness.agentConnection.getSessionContext).not.toHaveBeenCalled();
+	});
+
+	test("does not trim while streaming, while reviewing fullscreen, or under the cap", async () => {
 		const streaming = createCapHarness();
 		fillOverCap(streaming.chatContainer);
 		streaming.connectionState.isStreaming = true;
 		await proto.enforceChatComponentCap.call(streaming);
 		expect(streaming.chatContainer.children.length).toBe(LIVE_CHAT_COMPONENT_LIMIT + 50);
 
-		const fullscreen = createCapHarness();
-		fillOverCap(fullscreen.chatContainer);
-		fullscreen.ui.isFullscreen = () => true;
-		await proto.enforceChatComponentCap.call(fullscreen);
-		expect(fullscreen.chatContainer.children.length).toBe(LIVE_CHAT_COMPONENT_LIMIT + 50);
-		expect(fullscreen.chatTranscriptTrimmed).toBe(false);
+		const reviewing = createCapHarness();
+		fillOverCap(reviewing.chatContainer);
+		reviewing.ui.isFullscreen = () => true;
+		reviewing.ui.isFullscreenReviewing = () => true;
+		await proto.enforceChatComponentCap.call(reviewing);
+		expect(reviewing.chatContainer.children.length).toBe(LIVE_CHAT_COMPONENT_LIMIT + 50);
+		expect(reviewing.chatTranscriptTrimmed).toBe(false);
 
 		const small = createCapHarness();
 		await proto.enforceChatComponentCap.call(small);
 		expect(small.agentConnection.getSessionContext).not.toHaveBeenCalled();
+	});
+
+	test("abandons a cap rebuild if streaming starts while session context is loading", async () => {
+		const harness = createCapHarness();
+		fillOverCap(harness.chatContainer);
+		const originalCount = harness.chatContainer.children.length;
+		let resume!: (context: AgentConnectionSessionContext) => void;
+		const pending = new Promise<AgentConnectionSessionContext>((resolve) => {
+			resume = resolve;
+		});
+		harness.agentConnection.getSessionContext = vi.fn(() => pending);
+
+		const run = proto.enforceChatComponentCap.call(harness);
+		harness.connectionState.isStreaming = true;
+		resume(sessionContext(longTranscript()));
+		await run;
+
+		expect(harness.chatContainer.children.length).toBe(originalCount);
+		expect(harness.chatTranscriptTrimmed).toBe(false);
+	});
+
+	test("trims in default fullscreen rendering when the user is still following", async () => {
+		const harness = createCapHarness();
+		fillOverCap(harness.chatContainer);
+		harness.ui.isFullscreen = () => true;
+		harness.ui.isFullscreenReviewing = () => false;
+
+		await proto.enforceChatComponentCap.call(harness);
+
+		expect(harness.chatTranscriptTrimmed).toBe(true);
+		expect(harness.chatContainer.children.length).toBeLessThanOrEqual(LIVE_CHAT_COMPONENT_LIMIT);
 	});
 
 	test("expansion toggles still reach every rebuilt component after the cap trim", async () => {

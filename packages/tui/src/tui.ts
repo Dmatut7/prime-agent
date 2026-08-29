@@ -784,6 +784,11 @@ export class TUI extends Container {
 		return this.fullscreen !== null;
 	}
 
+	/** True when the user has scrolled the fullscreen transcript away from live follow. */
+	isFullscreenReviewing(): boolean {
+		return this.fullscreen !== null && !this.fullscreen.viewport.isFollowing();
+	}
+
 	/** Scroll the fullscreen transcript window (negative = up). */
 	scrollBy(lines: number): void {
 		if (!this.fullscreen) return;

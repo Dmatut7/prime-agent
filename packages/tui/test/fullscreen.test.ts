@@ -290,6 +290,26 @@ describe("TUI fullscreen mode", () => {
 		tui.stop();
 	});
 
+	it("reports fullscreen reviewing only while unfollowed", async () => {
+		const { terminal, tui, chat, dock } = setup(lines(20));
+		assert.strictEqual(tui.isFullscreenReviewing(), false);
+
+		tui.enterFullscreen({ scroll: [chat], dock });
+		await terminal.waitForRender();
+		assert.strictEqual(tui.isFullscreen(), true);
+		assert.strictEqual(tui.isFullscreenReviewing(), false);
+
+		terminal.sendInput(WHEEL_UP);
+		await terminal.waitForRender();
+		assert.strictEqual(tui.isFullscreenReviewing(), true);
+
+		terminal.sendInput(WHEEL_DOWN);
+		await terminal.waitForRender();
+		assert.strictEqual(tui.isFullscreenReviewing(), false);
+
+		tui.stop();
+	});
+
 	it("page and home/end keys scroll the window while the editor keeps focus", async () => {
 		const { terminal, tui, chat, dock } = setup(lines(30));
 		const editor = new TestComponent();

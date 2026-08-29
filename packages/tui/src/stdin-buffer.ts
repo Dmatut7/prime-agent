@@ -216,8 +216,8 @@ export type StdinBufferOptions = {
 	 */
 	timeout?: number;
 	/**
-	 * Wall-clock time to wait for `201~` after entering paste mode.
-	 * Missing terminator flushes the buffer as ordinary input.
+	 * Idle time without stdin chunks to wait for `201~` after entering paste mode.
+	 * Missing terminator emits the buffer as one atomic paste.
 	 */
 	pasteTimeoutMs?: number;
 	/** Maximum UTF-8 byte length of `pasteBuffer` before aborting paste mode. */
@@ -229,10 +229,6 @@ export type StdinBufferEventMap = {
 	paste: [string];
 };
 
-/**
- * Buffers stdin input and emits complete sequences via the 'data' event.
- * Handles partial escape sequences that arrive across multiple chunks.
- */
 function isImmediatePasteEscapeAbort(data: string): boolean {
 	return data === "\x1b[27u" || (data.startsWith("\x1b[27;") && data.endsWith("u"));
 }
@@ -286,7 +282,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		}
 
 		if (this.pasteMode && isImmediatePasteEscapeAbort(str)) {
-			this.exitPasteAsOrdinaryInput();
+			this.discardPasteMode();
 			return;
 		}
 
@@ -342,9 +338,11 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			return;
 		}
 		if (Buffer.byteLength(this.pasteBuffer, "utf8") > this.pasteMaxBytes) {
-			this.exitPasteAsOrdinaryInput();
+			this.finishPasteWithoutTerminator();
 			return;
 		}
+		// Idle timeout: each chunk proves the paste is still flowing.
+		this.armPasteWatchdog();
 		this.armPasteEscapeTimerIfNeeded();
 	}
 
@@ -354,8 +352,18 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			return false;
 		}
 
-		const pastedContent = this.pasteBuffer.slice(0, endIndex);
-		const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
+		this.emitPasteAndContinue(
+			this.pasteBuffer.slice(0, endIndex),
+			this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length),
+		);
+		return true;
+	}
+
+	private finishPasteWithoutTerminator(): void {
+		this.emitPasteAndContinue(this.pasteBuffer, "");
+	}
+
+	private emitPasteAndContinue(pastedContent: string, remaining: string): void {
 		this.clearPasteTimers();
 		this.pasteMode = false;
 		this.pasteBuffer = "";
@@ -364,18 +372,13 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		if (remaining.length > 0) {
 			this.process(remaining);
 		}
-		return true;
 	}
 
-	private exitPasteAsOrdinaryInput(): void {
+	private discardPasteMode(): void {
 		this.clearPasteTimers();
-		const content = this.pasteBuffer;
 		this.pasteMode = false;
 		this.pasteBuffer = "";
 		this.pendingKittyPrintableCodepoint = undefined;
-		if (content.length > 0) {
-			this.process(content);
-		}
 	}
 
 	private armPasteWatchdog(): void {
@@ -383,7 +386,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.pasteWatchdog = setTimeout(() => {
 			this.pasteWatchdog = null;
 			if (this.pasteMode) {
-				this.exitPasteAsOrdinaryInput();
+				this.finishPasteWithoutTerminator();
 			}
 		}, this.pasteTimeoutMs);
 	}
@@ -398,7 +401,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.pasteEscapeTimer = setTimeout(() => {
 			this.pasteEscapeTimer = null;
 			if (this.pasteMode) {
-				this.exitPasteAsOrdinaryInput();
+				this.discardPasteMode();
 			}
 		}, this.timeoutMs);
 	}
