@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -29,13 +29,14 @@ afterEach(() => {
 });
 
 describe("orphan process journal", () => {
-	it("repairs a torn trailing line before appending", () => {
+	it("repairs a torn trailing line before appending and repairs legacy journal modes", () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-orphan-journal-torn-"));
 		tempDirs.push(directory);
 		const path = join(directory, "orphans.jsonl");
 		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = path;
 
 		recordOrphanProcessState(process.pid, true);
+		chmodSync(path, 0o644); // legacy mode must be repaired on the next append
 		appendFileSync(path, '{"version":1,"pid":999999,"ownerPid":'); // crash mid-append
 
 		recordOrphanProcessState(process.pid, false);
@@ -48,6 +49,9 @@ describe("orphan process journal", () => {
 		}
 		expect(lines.some((line) => line.includes("999999"))).toBe(false);
 		expect(lines.length).toBeGreaterThanOrEqual(2);
+		if (process.platform !== "win32") {
+			expect(statSync(path).mode & 0o777).toBe(0o600);
+		}
 	});
 
 	it("retains only detached processes still active for the crashed owner", () => {

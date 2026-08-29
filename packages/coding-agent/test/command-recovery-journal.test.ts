@@ -1,6 +1,6 @@
-import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CommandRecoveryJournal } from "../src/modes/daemon/command-recovery-journal.js";
 
@@ -25,7 +25,30 @@ describe("CommandRecoveryJournal", () => {
 			expect(() => JSON.parse(line)).not.toThrow();
 		}
 		expect(lines.some((line) => line.includes("command-b"))).toBe(true);
-		expect(lines.some((line) => line.includes("torn-key"))).toBe(false);
+		expect(lines.some((line) => line.includes("torn"))).toBe(false);
+	});
+
+	it("cleans stale compaction temp files left by a crash", () => {
+		const path = createPath();
+		writeFileSync(`${path}.4242.tmp`, "stale");
+		new CommandRecoveryJournal(path);
+		expect(existsSync(`${path}.4242.tmp`)).toBe(false);
+	});
+
+	it("compacts atomically without leaving a temp file behind", () => {
+		const path = createPath();
+		const journal = new CommandRecoveryJournal(path);
+		journal.begin("client-a", "command-a", "prompt");
+		journal.recordResult("client-a", "command-a", {
+			id: "command-a",
+			type: "response",
+			command: "prompt",
+			success: true,
+		});
+		journal.acknowledge("client-a", "command-a");
+		expect(readdirSync(dirname(path)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+		const reopened = new CommandRecoveryJournal(path);
+		expect(reopened.lookup("client-a", "command-a")).toBeUndefined();
 	});
 
 	afterEach(() => {

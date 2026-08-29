@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -40,6 +40,13 @@ describe("WorkerRecoveryJournal", () => {
 				.map((record) => record.activeSessionId)
 				.sort(),
 		).toEqual(["active-1", "active-2"]);
+	});
+
+	it("cleans stale compaction temp files left by a crash", () => {
+		const path = createPath();
+		writeFileSync(`${path}.4242.tmp`, "stale");
+		new WorkerRecoveryJournal(path);
+		expect(existsSync(`${path}.4242.tmp`)).toBe(false);
 	});
 
 	afterEach(() => {

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { closeSync, fsyncSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
+import { closeSync, fchmodSync, fsyncSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { win32 } from "node:path";
 import { repairTruncatedTrailingLine } from "../utils/file-lines.js";
 import { getProcessStartId } from "./session-lease.js";
@@ -44,6 +44,8 @@ export function recordOrphanProcessState(pid: number, active: boolean): void {
 		repairTruncatedTrailingLine(path);
 		const descriptor = openSync(path, "a", 0o600);
 		try {
+			// Repair legacy 0644 journals: the create mode only applies to new files.
+			if (process.platform !== "win32") fchmodSync(descriptor, 0o600);
 			writeSync(descriptor, `${JSON.stringify(record)}\n`);
 			fsyncSync(descriptor);
 		} finally {
