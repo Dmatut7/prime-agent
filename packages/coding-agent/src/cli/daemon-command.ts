@@ -1472,6 +1472,9 @@ class DaemonAttachTerminal {
 			case "refine_failed":
 				this.writeLine(chalk.red(`Refinement failed: ${event.error}`));
 				return;
+			case "session_persist_failed":
+				this.writeLine(chalk.red(`Session persistence failed: ${event.error}`));
+				return;
 			case "refine_complete":
 				return;
 			case "turn_start":

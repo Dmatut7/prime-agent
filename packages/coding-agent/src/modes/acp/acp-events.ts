@@ -295,6 +295,14 @@ export function acpUpdatesForSessionEvent(
 				},
 			];
 
+		case "session_persist_failed":
+			return [
+				{
+					sessionUpdate: "session_info_update",
+					_meta: primeAgentMeta({ sessionPersistence: { status: "failed", error: event.error } }),
+				},
+			];
+
 		case "ipython_sent_agent_message":
 			return [
 				{

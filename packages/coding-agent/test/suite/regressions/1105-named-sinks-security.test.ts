@@ -1,5 +1,4 @@
 import {
-	existsSync,
 	lstatSync,
 	mkdirSync,
 	mkdtempSync,
@@ -86,20 +85,22 @@ describePosix("issue #1105 named sink security", () => {
 		expect(readFileSync(target, "utf8")).toBe("sentinel");
 	});
 
-	it("refuses private paths below a symlinked ancestor", () => {
+	it("resolves private paths below a symlinked ancestor and keeps them private", () => {
+		// Intermediate symlinks are legitimate layouts (e.g. a relocated ~/.prime);
+		// they are resolved before enforcement. Only a symlinked final target is
+		// refused (covered by the symlink-target tests above).
 		const outside = join(tempRoot, "outside");
 		const linkedRoot = join(tempRoot, "linked-root");
 		mkdirSync(outside);
 		symlinkSync(outside, linkedRoot);
-		expect(() => ensurePrivateFile(join(linkedRoot, "nested", "secret.json"))).toThrow("non-directory private path");
-		expect(() => appendPrivateFile(join(linkedRoot, "nested", "secret.json"), "secret")).toThrow(
-			"non-directory private path",
-		);
-		expect(() =>
-			writePrivateFileAtomic(join(linkedRoot, "export", "secret.json"), "secret", { privateParent: false }),
-		).toThrow("non-directory private path");
-		expect(existsSync(join(outside, "nested", "secret.json"))).toBe(false);
-		expect(existsSync(join(outside, "export", "secret.json"))).toBe(false);
+		ensurePrivateFile(join(linkedRoot, "nested", "secret.json"));
+		appendPrivateFile(join(linkedRoot, "nested", "secret.json"), "secret");
+		writePrivateFileAtomic(join(linkedRoot, "export", "secret.json"), "secret", { privateParent: false });
+		expect(readFileSync(join(outside, "nested", "secret.json"), "utf8")).toContain("secret");
+		expect(statSync(join(outside, "nested", "secret.json")).mode & 0o777).toBe(0o600);
+		expect(statSync(join(outside, "nested")).mode & 0o777).toBe(0o700);
+		expect(readFileSync(join(outside, "export", "secret.json"), "utf8")).toBe("secret");
+		expect(statSync(join(outside, "export", "secret.json")).mode & 0o777).toBe(0o600);
 	});
 
 	it("repairs harness modes and refuses state/history symlinks", () => {

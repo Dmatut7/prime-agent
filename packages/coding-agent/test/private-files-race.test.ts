@@ -114,7 +114,7 @@ describe("ensurePrivateFile exclusive-create races", () => {
 		expect(readFileSync(target, "utf8")).toBe("sentinel");
 	});
 
-	it("rejects an existing directory beneath a symlinked ancestor", () => {
+	it("resolves an intermediate symlinked ancestor but still rejects a symlinked final component", () => {
 		directory = mkdtempSync(join(tmpdir(), "pi-private-file-race-"));
 		const outside = join(directory, "outside");
 		const existing = join(outside, "existing");
@@ -122,7 +122,15 @@ describe("ensurePrivateFile exclusive-create races", () => {
 		mkdirSync(existing, { recursive: true });
 		symlinkSync(outside, link, "dir");
 
-		expect(() => ensurePrivateDirectory(join(link, "existing"))).toThrow("non-directory private path");
-		expect(statSync(existing).mode & 0o777).not.toBe(0o700);
+		// A symlinked ancestor (e.g. a relocated ~/.prime) must not break private
+		// storage: resolve it, then enforce the mode on the resolved directory.
+		expect(ensurePrivateDirectory(join(link, "existing"))).toBeUndefined();
+		expect(statSync(existing).mode & 0o777).toBe(0o700);
+
+		// The final component keeps O_NOFOLLOW semantics: a symlinked target itself
+		// is never followed or repaired.
+		const linkedFinal = join(directory, "linked-final");
+		symlinkSync(outside, linkedFinal, "dir");
+		expect(() => ensurePrivateDirectory(linkedFinal)).toThrow("non-directory private path");
 	});
 });

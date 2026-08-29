@@ -379,7 +379,8 @@ export type AgentSessionEvent =
 			runId?: string;
 	  }
 	| { type: "refine_complete"; result: RefinementResult }
-	| { type: "refine_failed"; error: string };
+	| { type: "refine_failed"; error: string }
+	| { type: "session_persist_failed"; error: string };
 
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
@@ -1500,6 +1501,25 @@ export class AgentSession {
 		}
 	}
 
+	private _lastSessionPersistFailureAt = 0;
+	private _lastSessionPersistFailureMessage: string | undefined;
+
+	/**
+	 * Surface a failed transcript write. A broken disk fails every event, so the
+	 * report is throttled per distinct error; recovery is implicit — the next
+	 * successful persist backfills via a full rewrite.
+	 */
+	private _reportSessionPersistFailure(error: unknown): void {
+		const message = error instanceof Error ? error.message : String(error);
+		const now = Date.now();
+		if (message === this._lastSessionPersistFailureMessage && now - this._lastSessionPersistFailureAt < 30_000) {
+			return;
+		}
+		this._lastSessionPersistFailureAt = now;
+		this._lastSessionPersistFailureMessage = message;
+		this._emit({ type: "session_persist_failed", error: message });
+	}
+
 	private _emitQueueUpdate(): void {
 		const actions = this.getSessionActionSnapshot();
 		if (JSON.stringify(actions) === JSON.stringify(this._lastSessionActionSnapshot)) return;
@@ -1549,7 +1569,11 @@ export class AgentSession {
 			if (this._disposed || !this._rememberLateIpythonSentAgentMessage(toolCallId, message)) {
 				return;
 			}
-			this.sessionManager.appendCustomEntry(IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY, { toolCallId, message });
+			try {
+				this.sessionManager.appendCustomEntry(IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY, { toolCallId, message });
+			} catch (error) {
+				this._reportSessionPersistFailure(error);
+			}
 			this._emit({ type: "ipython_sent_agent_message", toolCallId, message });
 		};
 		this._agentEventQueue = this._agentEventQueue.then(record, record);
@@ -3598,19 +3622,26 @@ export class AgentSession {
 		this._emit(event);
 
 		if (event.type === "message_end") {
-			if (event.message.role === "custom") {
-				this.sessionManager.appendCustomMessageEntry(
-					event.message.customType,
-					event.message.content,
-					event.message.display,
-					event.message.details,
-				);
-			} else if (
-				event.message.role === "user" ||
-				event.message.role === "assistant" ||
-				event.message.role === "toolResult"
-			) {
-				this.sessionManager.appendMessage(event.message);
+			try {
+				if (event.message.role === "custom") {
+					this.sessionManager.appendCustomMessageEntry(
+						event.message.customType,
+						event.message.content,
+						event.message.display,
+						event.message.details,
+					);
+				} else if (
+					event.message.role === "user" ||
+					event.message.role === "assistant" ||
+					event.message.role === "toolResult"
+				) {
+					this.sessionManager.appendMessage(event.message);
+				}
+			} catch (error) {
+				// A failed transcript write must surface and must not stall the event
+				// queue: the entry stays in memory and the next successful persist
+				// rewrites the full transcript (SessionManager drops its flushed mark).
+				this._reportSessionPersistFailure(error);
 			}
 
 			if (event.message.role === "assistant") {
