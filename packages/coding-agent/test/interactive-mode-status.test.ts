@@ -4485,6 +4485,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 				requestRender: vi.fn(),
 				requestRenderPreservingViewport: vi.fn(),
 				isFullscreen: vi.fn().mockReturnValue(false),
+				isFullscreenReviewing: vi.fn().mockReturnValue(false),
 			},
 		};
 		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);

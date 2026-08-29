@@ -6676,8 +6676,9 @@ export class InteractiveMode {
 		}
 		if (this.isAgentStreaming() || this.isAgentCompacting() || this.isBashRunning()) return;
 		if (this.streamingComponent || this.activeBashComponent) return;
-		// Fullscreen review scrolls the whole tree and must not lose segments.
-		if (this.ui.isFullscreen()) return;
+		// Scrolling the fullscreen transcript away from follow is review: do not
+		// drop segments under the user. Default fullscreen rendering still trims.
+		if (this.ui.isFullscreenReviewing()) return;
 		this.chatCapRebuildInFlight = true;
 		try {
 			const context = await this.agentConnection.getSessionContext();
