@@ -233,6 +233,8 @@ export class DaemonAgentConnection implements AgentConnection {
 	 * from message_start events and from snapshots that carry a streamingMessage.
 	 */
 	private readonly streamReconstructor = new CompactAssistantStreamReconstructor();
+	/** In-flight self-recovery after a delta arrived without a seed. */
+	private streamResyncInFlight: Promise<void> | undefined;
 	private attachedSessionId: string | undefined;
 	private attachedSessionFile: string | undefined;
 	private daemonLogPath: string | undefined;
@@ -1643,13 +1645,14 @@ export class DaemonAgentConnection implements AgentConnection {
 		if (message.type === "assistant_stream_delta") {
 			const reconstructed = this.streamReconstructor.reconstruct(message);
 			// An unreconstructable delta means the seed was missed (attach raced
-			// the stream); the event-sequence machinery and the next snapshot
-			// resync recover full state, so drop rather than emit partial data.
+			// the stream). Drop the delta but actively re-fetch state; without a
+			// resync the live stream would stay frozen until message_end.
 			if (
 				!reconstructed ||
 				reconstructed.type !== "session_event" ||
 				reconstructed.event.type !== "message_update"
 			) {
+				this.requestStreamResync();
 				return;
 			}
 			// The reconstructor mutates one partial message in place; hand every
@@ -2155,6 +2158,35 @@ export class DaemonAgentConnection implements AgentConnection {
 			return;
 		}
 		this.streamReconstructor.clear(this.activeSessionId);
+	}
+
+	/**
+	 * Self-requested catch-up for a delta that arrived without a seed. Refetches
+	 * state and re-emits a resync (same recovery used for failed snapshot
+	 * transfers), then reseeds the reconstructor from the refreshed snapshot. A
+	 * stale carried-over streaming message is dropped unless the session is
+	 * still streaming: while streaming it is the closest available seed (each
+	 * block end replaces the full content anyway), otherwise it predates the
+	 * desync and would corrupt later deltas.
+	 */
+	private requestStreamResync(): void {
+		if (this.disposed || this.streamResyncInFlight) return;
+		this.streamResyncInFlight = (async () => {
+			try {
+				await this.recoverFailedSnapshot("resync", new Error("Assistant stream delta arrived without a seed"));
+				if (this.disposed) return;
+				const snapshot = this.latestSnapshot;
+				if (snapshot && !snapshot.state.isStreaming && snapshot.streamingMessage) {
+					const { streamingMessage: _staleSeed, ...rest } = snapshot;
+					this.latestSnapshot = rest;
+				}
+				this.reseedStreamReconstructor();
+			} catch {
+				// recoverFailedSnapshot emits the terminal close on failure.
+			} finally {
+				this.streamResyncInFlight = undefined;
+			}
+		})();
 	}
 
 	private isMessageForActiveSession(message: DaemonOutbound): boolean {

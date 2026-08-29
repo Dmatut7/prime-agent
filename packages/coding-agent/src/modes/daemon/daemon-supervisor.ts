@@ -3378,7 +3378,12 @@ export class DaemonSupervisor {
 		for (const summary of summaries) {
 			const activeSessionId = summary.activeSessionId ?? summary.id;
 			if (summary.streamingMessage?.role === "assistant") {
-				this.streamReconstructor.seed(activeSessionId, summary.streamingMessage);
+				// A refreshed summary lags the deltas already applied to a tracked
+				// partial; reseeding would rewind the reconstruction. Seed only
+				// untracked streams.
+				if (!this.streamReconstructor.hasPartial(activeSessionId)) {
+					this.streamReconstructor.seed(activeSessionId, summary.streamingMessage);
+				}
 			} else if (!summary.isStreaming) {
 				this.streamReconstructor.clear(activeSessionId);
 			}
@@ -3907,15 +3912,16 @@ export class DaemonSupervisor {
 		try {
 			const publicSummary = this.publicSummary(match.worker, result.snapshot.summary);
 			if (publicSummary.streamingMessage?.role === "assistant") {
-				this.streamReconstructor.seed(activeSessionId, publicSummary.streamingMessage);
-			} else {
-				for (let index = result.snapshot.messages.length - 1; index >= 0; index--) {
-					const latestMessage = result.snapshot.messages[index];
-					if (latestMessage?.role === "assistant") {
-						this.streamReconstructor.seed(activeSessionId, latestMessage);
-						break;
-					}
+				// Seed only when a stream is actually in progress and the shared
+				// reconstructor is not already tracking a live partial: a mid-stream
+				// attach must not rewind the reconstruction other clients rely on.
+				if (!this.streamReconstructor.hasPartial(activeSessionId)) {
+					this.streamReconstructor.seed(activeSessionId, publicSummary.streamingMessage);
 				}
+			} else if (!publicSummary.isStreaming) {
+				// Idle: there is no stream to reconstruct. Drop any stale partial so a
+				// later delta cannot be applied onto a historical message.
+				this.streamReconstructor.clear(activeSessionId);
 			}
 			const publicResult: DaemonAttachResult = {
 				...result,
@@ -4781,6 +4787,11 @@ export class DaemonSupervisor {
 		for (let index = 0; index < pending.length; index++) {
 			const { activeSessionId, purpose } = pending[index]!;
 			let releaseTranscript: (() => void) | undefined;
+			// Reserve before loading the snapshot: any live frame forwarded while
+			// the replacement snapshot loads would be newer than the snapshot seed,
+			// then dropped by the client's clear-and-reseed, tearing the rebuilt
+			// stream until text_end. Queue those frames for catch-up instead.
+			const releaseSnapshotReservation = this.reserveSnapshotStream(client, activeSessionId);
 			try {
 				const attached = await this.attachClient(client, {
 					type: "attach",
@@ -4809,6 +4820,9 @@ export class DaemonSupervisor {
 							),
 						});
 					}
+					// streamSnapshot releases the reservation in its own finally; the
+					// release below is an idempotent safety net for callers that stub
+					// or replace streamSnapshot.
 					await this.streamSnapshot(
 						client,
 						attached.worker,
@@ -4816,6 +4830,7 @@ export class DaemonSupervisor {
 						transcript,
 						purpose,
 						releaseTranscript,
+						releaseSnapshotReservation,
 					);
 					releaseTranscript = undefined;
 					continue;
@@ -4850,6 +4865,8 @@ export class DaemonSupervisor {
 			} catch (error) {
 				releaseTranscript?.();
 				this.log(`Failed to catch up client ${client.id} for ${activeSessionId}: ${String(error)}`);
+			} finally {
+				releaseSnapshotReservation();
 			}
 		}
 	}

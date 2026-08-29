@@ -1808,6 +1808,14 @@ export class AgentDaemon {
 		}
 		const session = state.runtime.session;
 		if (shouldDeferHeartbeatCronJob(runnableJob, session)) {
+			// Deferring against queued work that sits behind an ordinary abort
+			// suspension would skip forever: the pump never drains on its own and
+			// every later tick defers against the same stranded queue. A heartbeat
+			// tick is a legitimate external wake; resume the pump so the queued
+			// work drains (the update-restart fence is never lifted).
+			if (session.hasPendingSessionWork) {
+				session.wakeSuspendedSessionInput();
+			}
 			return "skipped";
 		}
 		const shouldQueueCronPrompt =

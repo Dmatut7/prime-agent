@@ -964,6 +964,8 @@ const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
 const SESSION_PERSIST_FAILURE_REPORT_BASE_MS = 30_000;
 const SESSION_PERSIST_FAILURE_REPORT_MAX_MS = 300_000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
+/** How long a deferred RLM terminal notice may wait for delivery before it is abandoned. */
+const RLM_TERMINAL_NOTICE_ABANDON_AFTER_MS = 5 * 60_000;
 
 function noopRlmChildAbort(): void {}
 function noopRlmChildEventUnsubscribe(): void {}
@@ -1107,6 +1109,8 @@ export class AgentSession {
 	private readonly _queuedWorkPauses = new Set<symbol>();
 	private readonly _sessionInputAdmissionPauses = new Set<symbol>();
 	private readonly _durableRlmTerminalNoticeActionIds = new Set<string>();
+	private _rlmTerminalNoticeDeferredSince: number | undefined;
+	private _rlmTerminalNoticeAbandonment: { abandonedAt: number; count: number } | undefined;
 	private _sessionActionCommitTail: Promise<void> = Promise.resolve();
 	private _sessionActionCommitOwner: symbol | undefined;
 	private _pendingSessionActionFenceWaiters = 0;
@@ -4851,9 +4855,7 @@ export class AgentSession {
 		// restart manifest instead of starting a new turn during teardown, so the
 		// message stays queued behind the fence (mirrors the triggerTurn guard).
 		const resumeSuspendedPump = () => {
-			if (!this._sessionInputPumpSuspended || this._sessionInputSuspendedForUpdateRestart) return;
-			this._resumeSessionInputAdmission();
-			this._scheduleSessionInputPump();
+			this.wakeSuspendedSessionInput();
 		};
 		if (streamingBehavior === "steer") {
 			await this._queuePreparedPrompt("steer", text, undefined, {
@@ -4905,6 +4907,55 @@ export class AgentSession {
 		return this._pendingNextTurnMessages.some((message) => this._isRlmTerminalNotice(message));
 	}
 
+	/** When the currently deferred terminal notices first became stuck, if any. */
+	get deferredRlmTerminalNoticeSince(): number | undefined {
+		return this._rlmTerminalNoticeDeferredSince;
+	}
+
+	/** Record of the last abandonment of undeliverable deferred terminal notices. */
+	get rlmTerminalNoticeAbandonment(): { abandonedAt: number; count: number } | undefined {
+		return this._rlmTerminalNoticeAbandonment;
+	}
+
+	/**
+	 * Deferred terminal notices are undelivered work, but they must not pin a
+	 * session forever: when the pump stays suspended after an abort nothing
+	 * flushes them, and the session would never passivate or evict. Once a
+	 * notice has waited past the threshold, attempt delivery through the normal
+	 * flush (which succeeds if the pump became runnable again) and otherwise
+	 * abandon it so the session becomes evictable. Forcing a turn while the pump
+	 * is intentionally suspended would break the suspension contract, so
+	 * abandonment is the stable fallback.
+	 */
+	maybeAbandonStaleDeferredRlmTerminalNotices(now = Date.now()): void {
+		if (!this._hasDeferredRlmTerminalNotices()) {
+			this._rlmTerminalNoticeDeferredSince = undefined;
+			return;
+		}
+		const deferredSince = this._rlmTerminalNoticeDeferredSince;
+		if (deferredSince === undefined || now - deferredSince < RLM_TERMINAL_NOTICE_ABANDON_AFTER_MS) return;
+		this._flushDeferredRlmTerminalNotices();
+		if (!this._hasDeferredRlmTerminalNotices()) {
+			this._rlmTerminalNoticeDeferredSince = undefined;
+			return;
+		}
+		let count = 0;
+		this._pendingNextTurnMessages = this._pendingNextTurnMessages.filter((message) => {
+			if (!this._isRlmTerminalNotice(message)) return true;
+			count++;
+			return false;
+		});
+		this._rlmTerminalNoticeDeferredSince = undefined;
+		this._rlmTerminalNoticeAbandonment = { abandonedAt: now, count };
+	}
+
+	/** Deferred terminal notices still inside their delivery window. */
+	private _hasActionableDeferredRlmTerminalNotices(): boolean {
+		if (!this._hasDeferredRlmTerminalNotices()) return false;
+		this.maybeAbandonStaleDeferredRlmTerminalNotices();
+		return this._hasDeferredRlmTerminalNotices();
+	}
+
 	private _enqueueRlmTerminalNoticeAction(message: CustomMessage): void {
 		this._assertRlmTerminalNotice(message);
 		const action = this._createPreparedTurnAction("followUp", message.content as string, undefined, {
@@ -4946,6 +4997,9 @@ export class AgentSession {
 			}
 			this._pendingNextTurnMessages.splice(index, 1);
 		}
+		if (!this._hasDeferredRlmTerminalNotices()) {
+			this._rlmTerminalNoticeDeferredSince = undefined;
+		}
 		this._scheduleSessionInputPump();
 	}
 
@@ -4986,6 +5040,7 @@ export class AgentSession {
 		try {
 			if (this._disposed || this._disposing) return;
 			this._pendingNextTurnMessages.push(cloneCustomMessage(message));
+			this._rlmTerminalNoticeDeferredSince ??= Date.now();
 			this._flushDeferredRlmTerminalNotices();
 		} finally {
 			fence.release();
@@ -5002,6 +5057,7 @@ export class AgentSession {
 			const message = primaryDeliveryRecord(action).message;
 			if (message.role === "custom") this._pendingNextTurnMessages.push(cloneCustomMessage(message));
 		}
+		if (this._hasDeferredRlmTerminalNotices()) this._rlmTerminalNoticeDeferredSince ??= Date.now();
 		const ids = new Set(actions.map((action) => action.id));
 		this._cancelSessionActions(
 			(action) => ids.has(action.id),
@@ -5016,7 +5072,11 @@ export class AgentSession {
 		message: CustomMessage,
 		options?: InternalPromptOptions & { executionPolicy?: TurnExecutionPolicy },
 	): Promise<void> {
-		if (!this.isStreaming && options?.resumeIfIdle) this._resumeSessionInputAdmission();
+		// Never lift the update-restart fence: injected work (heartbeats) must stay
+		// queued for the restart manifest instead of starting a turn during teardown.
+		if (!this.isStreaming && options?.resumeIfIdle && !this._sessionInputSuspendedForUpdateRestart) {
+			this._resumeSessionInputAdmission();
+		}
 		const admissionEpoch = this._sessionInputPumpEpoch;
 		const admissionFence = await this._acquireDirectTurnAdmissionFence(options?.signal).catch((error: unknown) => {
 			throwIfPromptAdmissionCancelled(options?.signal);
@@ -5866,7 +5926,9 @@ export class AgentSession {
 				action.wake === "immediate")
 		) {
 			if (action.payload.kind === "turn" && action.wake === "immediate") {
-				this._resumeSessionInputAdmission();
+				// The update-restart fence keeps queued work bound for the restart
+				// manifest; admission wake must not start turns during teardown.
+				if (!this._sessionInputSuspendedForUpdateRestart) this._resumeSessionInputAdmission();
 			}
 			this._scheduleSessionInputPump();
 		}
@@ -6753,8 +6815,10 @@ export class AgentSession {
 			// admitted notices back to next-turn deferral, and a session holding only
 			// those would otherwise look idle and be passivated/evicted, dropping the
 			// child's terminal report before the parent ever receives it. Counting them
-			// as activity keeps the session resident until a resume flushes them.
-			this._hasDeferredRlmTerminalNotices()
+			// as activity keeps the session resident until a resume flushes them; once a
+			// notice is stale past the abandonment threshold it stops pinning the
+			// session so an aborted session can still be evicted.
+			this._hasActionableDeferredRlmTerminalNotices()
 		);
 	}
 
@@ -7081,6 +7145,21 @@ export class AgentSession {
 		this._flushDeferredRlmTerminalNotices();
 	}
 
+	/**
+	 * Wake a pump suspended by an ordinary requestAbort so stranded queued work
+	 * can drain (e.g. a visible heartbeat action left behind by an abort that
+	 * would otherwise defer every later tick forever). Never lifts the
+	 * update-restart fence: that queued work must survive into the restart
+	 * manifest instead of starting a turn during teardown. Returns whether the
+	 * suspension was lifted.
+	 */
+	wakeSuspendedSessionInput(): boolean {
+		if (!this._sessionInputPumpSuspended || this._sessionInputSuspendedForUpdateRestart) return false;
+		this._resumeSessionInputAdmission();
+		this._scheduleSessionInputPump();
+		return true;
+	}
+
 	/** Resume the scheduler after requestAbort/abortForUpdateRestart suspended it; owned pause leases are unaffected. */
 	resumeQueuedWork(): boolean {
 		this._resumeSessionInputAdmission();
@@ -7172,6 +7251,9 @@ export class AgentSession {
 
 	restorePendingNextTurnMessages(messages: readonly CustomMessage[]): void {
 		this._pendingNextTurnMessages.push(...messages.map((message) => cloneCustomMessage(message)));
+		if (messages.some((message) => this._isRlmTerminalNotice(message))) {
+			this._rlmTerminalNoticeDeferredSince ??= Date.now();
+		}
 		this._flushDeferredRlmTerminalNotices();
 	}
 
@@ -10435,7 +10517,7 @@ export class AgentSession {
 	}
 
 	private _hasUnsettledRlmQuiescenceWork(): boolean {
-		if (this._hasDeferredRlmTerminalNotices()) return true;
+		if (this._hasActionableDeferredRlmTerminalNotices()) return true;
 		if ([...this._unsettledRlmChildRuns].some((run) => !run.settled)) return true;
 		return this._rlmChildSessionSnapshot().some(
 			(child) => child.isSessionActive || child._hasUnsettledRlmQuiescenceWork(),
@@ -10468,7 +10550,7 @@ export class AgentSession {
 				// branch mutation, and manual compaction) that interactive waitForIdle
 				// intentionally ignores. Yield a macrotask while such work is active so
 				// recursive parent/child barriers cannot form a microtask busy-loop.
-				if (this.isSessionActive || this._hasDeferredRlmTerminalNotices()) {
+				if (this.isSessionActive || this._hasActionableDeferredRlmTerminalNotices()) {
 					await wait(new Promise<void>((resolve) => setTimeout(resolve, 0)));
 					continue;
 				}

@@ -1479,7 +1479,7 @@ describe("daemon worker supervisor monitoring", () => {
 			workerStopCounts: new Map(),
 			clients: new Set(),
 			shuttingDown: false,
-			streamReconstructor: { observe: vi.fn() },
+			streamReconstructor: { observe: vi.fn(), hasPartial: vi.fn(() => false) },
 			invalidateWorkerSnapshot: vi.fn(),
 			refreshWorkerSummaries: vi.fn(async () => undefined),
 			persistWorkerStopTombstone: vi.fn(),
@@ -3181,7 +3181,7 @@ describe("daemon worker supervisor monitoring", () => {
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			workers: new Map([[worker.descriptor.workerId, worker]]),
 			clients: new Set([client]),
-			streamReconstructor: { seed },
+			streamReconstructor: { seed, hasPartial: vi.fn(() => false) },
 			syncWorkerExtensionUi: vi.fn(async () => {}),
 		}) as {
 			attachClient(
@@ -3374,7 +3374,7 @@ describe("daemon worker supervisor monitoring", () => {
 		const catchUpClient = vi.fn(async () => undefined);
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			clients: new Set([client]),
-			streamReconstructor: { observe: vi.fn() },
+			streamReconstructor: { observe: vi.fn(), hasPartial: vi.fn(() => false) },
 			catchUpClient,
 			invalidateWorkerSnapshot: vi.fn(),
 		}) as {

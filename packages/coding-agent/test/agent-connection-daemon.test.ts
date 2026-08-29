@@ -3269,3 +3269,36 @@ describe("DaemonAgentConnection streaming deltas (B2)", () => {
 		).toBe("legacy full update");
 	});
 });
+
+describe("FIX-Q6 connection self-requests catch-up for unseeded deltas", () => {
+	it("drops the delta but re-fetches state instead of freezing the stream", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+		const events: AgentConnectionEvent[] = [];
+		connection.subscribe((event) => {
+			events.push(event);
+		});
+		await connection.attach();
+
+		const orphanDelta: DaemonOutbound = {
+			type: "assistant_stream_delta",
+			activeSessionId: "active-1",
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "orphan" },
+		};
+		fakeClient.emitMessage(orphanDelta);
+		// A second orphan while the resync is in flight must not stack resyncs.
+		fakeClient.emitMessage(orphanDelta);
+
+		await vi.waitFor(() =>
+			expect(fakeClient.requests.some((request) => request.type === "get_connection_state")).toBe(true),
+		);
+		await vi.waitFor(() => expect(events.some((event) => event.type === "session_resynced")).toBe(true));
+
+		// No partial update was emitted for the unseeded deltas.
+		expect(events.filter((event) => event.type === "session_event" && event.event.type === "message_update")).toEqual(
+			[],
+		);
+		// Exactly one self-requested resync despite two orphan deltas.
+		expect(fakeClient.requests.filter((request) => request.type === "get_connection_state")).toHaveLength(1);
+	});
+});
