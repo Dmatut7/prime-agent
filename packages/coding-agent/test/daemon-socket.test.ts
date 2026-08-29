@@ -12,6 +12,7 @@ import {
 	normalizeSocketPath,
 	prepareDaemonSocketPath,
 } from "../src/modes/daemon/daemon-socket.js";
+import { isWindowsNamedPipePath } from "../src/modes/daemon/windows-named-pipe.js";
 
 describe("normalizeSocketPath", () => {
 	it("normalizes equivalent Unix spellings", () => {
@@ -21,12 +22,14 @@ describe("normalizeSocketPath", () => {
 });
 
 describe("defaultDaemonSocketPath", () => {
-	it("uses a fixed Windows named pipe path", () => {
+	it("uses a per-user Windows named pipe path", () => {
 		if (process.platform !== "win32") {
 			return;
 		}
 
-		expect(defaultDaemonSocketPath()).toBe("\\\\.\\pipe\\prime-agent-daemon");
+		const socketPath = defaultDaemonSocketPath();
+		expect(isWindowsNamedPipePath(socketPath)).toBe(true);
+		expect(socketPath).toContain("prime-agent-S-");
 	});
 
 	it("uses a per-user Unix socket directory", () => {

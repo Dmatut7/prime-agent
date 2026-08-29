@@ -173,6 +173,7 @@ import { DaemonSessionSummarizer } from "./daemon-session-summarizer.js";
 import {
 	cleanupDaemonSocketPath,
 	type DaemonSocketIdentity,
+	daemonIpcListenOptions,
 	defaultDaemonSocketPath,
 	getDaemonSocketIdentity,
 	normalizeSocketPath,
@@ -623,9 +624,7 @@ export class AgentDaemon {
 					try {
 						this.socketIdentity = getDaemonSocketIdentity(this.socketPath);
 						this.ownsSocketPath = true;
-						if (process.platform !== "win32") {
-							restrictDaemonSocketPath(this.socketPath);
-						}
+						restrictDaemonSocketPath(this.socketPath);
 					} catch (error) {
 						this.server?.close();
 						rejectListen(error);
@@ -635,7 +634,7 @@ export class AgentDaemon {
 				};
 				this.server?.once("error", onError);
 				this.server?.once("listening", onListening);
-				this.server?.listen(this.socketPath);
+				this.server?.listen(daemonIpcListenOptions(this.socketPath));
 			});
 		} catch (error) {
 			this.cleanupSocketPath();

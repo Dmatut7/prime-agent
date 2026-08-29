@@ -1,0 +1,1 @@
+- Restricted the Windows daemon named pipe to the current user SID via a per-user pipe name and owner DACL. Windows hardware ACL application is not verified in CI.

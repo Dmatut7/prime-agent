@@ -3,8 +3,10 @@ import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
+import { queryWindowsUserSid, restrictWindowsNamedPipeAccess, windowsDaemonPipePath } from "./windows-named-pipe.js";
 
 export { normalizeSocketPath } from "../../utils/daemon-socket-path.js";
+export { daemonIpcListenOptions } from "./windows-named-pipe.js";
 
 const DAEMON_SOCKET_MODE = 0o600;
 const DAEMON_SOCKET_DIR_MODE = 0o700;
@@ -37,7 +39,7 @@ export interface DaemonSocketIdentity {
 
 export function defaultDaemonSocketPath(): string {
 	if (process.platform === "win32") {
-		return "\\\\.\\pipe\\prime-agent-daemon";
+		return windowsDaemonPipePath(queryWindowsUserSid());
 	}
 	return join(defaultDaemonSocketDir(), "daemon.sock");
 }
@@ -136,6 +138,7 @@ async function prepareUnixDaemonSocketPath(socketPath: string): Promise<void> {
 
 export function restrictDaemonSocketPath(socketPath: string): void {
 	if (process.platform === "win32") {
+		restrictWindowsNamedPipeAccess(socketPath);
 		return;
 	}
 	chmodSync(socketPath, DAEMON_SOCKET_MODE);
