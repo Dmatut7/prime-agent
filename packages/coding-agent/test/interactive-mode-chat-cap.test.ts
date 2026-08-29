@@ -260,6 +260,25 @@ describe("InteractiveMode live chat component cap", () => {
 		expect(small.agentConnection.getSessionContext).not.toHaveBeenCalled();
 	});
 
+	test("abandons a cap rebuild if streaming starts while session context is loading", async () => {
+		const harness = createCapHarness();
+		fillOverCap(harness.chatContainer);
+		const originalCount = harness.chatContainer.children.length;
+		let resume!: (context: AgentConnectionSessionContext) => void;
+		const pending = new Promise<AgentConnectionSessionContext>((resolve) => {
+			resume = resolve;
+		});
+		harness.agentConnection.getSessionContext = vi.fn(() => pending);
+
+		const run = proto.enforceChatComponentCap.call(harness);
+		harness.connectionState.isStreaming = true;
+		resume(sessionContext(longTranscript()));
+		await run;
+
+		expect(harness.chatContainer.children.length).toBe(originalCount);
+		expect(harness.chatTranscriptTrimmed).toBe(false);
+	});
+
 	test("trims in default fullscreen rendering when the user is still following", async () => {
 		const harness = createCapHarness();
 		fillOverCap(harness.chatContainer);

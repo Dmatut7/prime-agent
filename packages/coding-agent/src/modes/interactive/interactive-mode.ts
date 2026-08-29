@@ -6668,20 +6668,28 @@ export class InteractiveMode {
 	 * (and their result data) can be collected. Only runs at settle points;
 	 * streaming, compacting, or running bash own components a rebuild would detach.
 	 */
+	private liveChatCapBlocked(): boolean {
+		return (
+			this.isAgentStreaming() ||
+			this.isAgentCompacting() ||
+			this.isBashRunning() ||
+			this.streamingComponent !== undefined ||
+			this.activeBashComponent !== undefined ||
+			this.ui.isFullscreenReviewing()
+		);
+	}
+
 	private async enforceChatComponentCap(): Promise<void> {
 		if (this.chatCapRebuildInFlight) return;
 		const rebuildFloor = this.chatCapRebuildFloor ?? 0;
 		if (this.chatContainer.children.length <= Math.max(LIVE_CHAT_COMPONENT_LIMIT, rebuildFloor)) {
 			return;
 		}
-		if (this.isAgentStreaming() || this.isAgentCompacting() || this.isBashRunning()) return;
-		if (this.streamingComponent || this.activeBashComponent) return;
-		// Scrolling the fullscreen transcript away from follow is review: do not
-		// drop segments under the user. Default fullscreen rendering still trims.
-		if (this.ui.isFullscreenReviewing()) return;
+		if (this.liveChatCapBlocked()) return;
 		this.chatCapRebuildInFlight = true;
 		try {
 			const context = await this.agentConnection.getSessionContext();
+			if (this.liveChatCapBlocked()) return;
 			await this.renderSessionContext(context, { clearChat: true, limitTranscript: true });
 			this.chatCapRebuildFloor = this.chatContainer.children.length;
 			this.ui.requestRender();
