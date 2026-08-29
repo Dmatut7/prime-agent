@@ -29,9 +29,40 @@
 - 终检：全量套件 4580 绿；失败仅剩网络依赖（telemetry/git-update/version-check）与重负载偶发，均有分类结论
 - 修复全部带回归测试（先红后绿验证）
 
+## R2 迭代（2026-08-29 晚追加）
+
+在 R1 基线上追加了第二轮工作。
+
+### upstream 二次合并（15 提交）
+
+upstream/main 新增 15 个 squash commit，已并入（`71eeb5629`）。含 #1756（worker 恢复后再复用）、#1842（队列状态单一来源）、#1845（RLM 子快照单一投影）、#1859（quiescence 事件唤醒替代轮询）、#1882（官方版 bash 并发 abort）、#1864（in-flight open 所有权）等。冲突逐 hunk 解，并入后跑常驻回归套件。
+
+### W0-W9 工单结果
+
+- **W0**（upstream 二次合并）：完成。15 提交并入，冲突 5 个文件逐 hunk 解。
+- **W1**（F70 子代理错误通知父代理）：完成。耗尽/永久错误 → agent_message 通知父代理（`f98d84ada`）；不做从零退避。
+- **W2**（F10 edit 原子写 + F11 exec 进程组/输出截断）：完成（`577f1032b` + `8dde3fdfa`）。
+- **W3**（#1253 移植：宿主拆除取消在途 kernel host 请求）：完成（`4afca168e`）。
+- **W4**（F42 分支切点对齐工具对）：完成（`43798f22d`）。
+- **W5**（B8 键绑定迁移）：完成（`142022669`，12 处迁入配置表）。
+- **W6**（k3 低危十条）：完成。5 修 5 留档（`204fe7811`）。
+- **W7**（F5/F6 安全收口：supervisor capability 校验 + shutdown 鉴权）：**在跑**。
+- **W8**（F4 Windows 管道 ACL）：完成（`2637973c1`），标注「Windows 未实机验证」。
+- **W9**（F15/F17 窄时序窗）：留档未开工（k3 实证可达性极低）。
+
+### 文档搬迁
+
+fork 工作文档统一搬入 `docs/fork/`：审计总账 `audit-findings.md`、R1 任务书 `fix-plan-r1.md`（原 `FIX_PLAN_20260829.md`）、R2 任务书 `fix-plan-r2.md`。`FORK_NOTES.md` 保持为简洁入口（`acd9b3ed1`）。
+
 ## 还没做（下轮）
 
-Windows 管道 ACL（需 Windows 机器）、键绑定迁移 13 处、子代理回合级错误自动重试、几个窄时序窗。详见 docs/fork/audit-findings.md「未做」节。
+- F5/F6 安全收口（W7，在跑）
+- F15/F17 窄时序窗（W9，留档）
+- F27e 次要内存项（subagentSnapshots/sideQuestionTurns 未加帽）
+- Windows 管道 ACL 实机验证
+- k3 终审 7 条低危
+
+详见 `docs/fork/audit-findings.md` 未勾条目与 `docs/fork/fix-plan-r2.md` 状态列。
 
 ---
 
