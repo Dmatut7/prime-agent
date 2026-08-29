@@ -691,6 +691,22 @@ export class DaemonAgentConnection implements AgentConnection {
 			throw error;
 		}
 	}
+	async resumeQueuedWork(): Promise<boolean> {
+		try {
+			await this.requestData({
+				type: "resume_queue",
+				activeSessionId: this.activeSessionId,
+			});
+			return true;
+		} catch (error) {
+			// The daemon reports an empty/unsuspended queue as a command failure;
+			// that is a normal no-op here, while real errors keep propagating.
+			if (error instanceof Error && error.message === "No queued work to resume") {
+				return false;
+			}
+			throw error;
+		}
+	}
 
 	async listCronJobs(options: { includeInactive?: boolean } = {}): Promise<AgentCronJob[]> {
 		const data = await this.requestData<{ jobs: AgentCronJob[] }>({
