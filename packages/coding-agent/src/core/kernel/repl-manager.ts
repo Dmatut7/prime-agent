@@ -159,6 +159,8 @@ export class ReplKernelManager {
 	private pendingBackgroundOutput = "";
 	private pendingBackgroundOutputTruncated = false;
 	private readonly inFlightHostRequests = new Set<Promise<void>>();
+	/** Aborts every in-flight host request (e.g. admitted rlm.run children) on teardown. */
+	private hostRequestController = new AbortController();
 	private state: "idle" | "starting" | "running" | "shutdown" = "idle";
 	/** Bumped by every teardown so a stale in-flight doStart can never touch a newer kernel. */
 	private startGeneration = 0;
@@ -226,6 +228,11 @@ export class ReplKernelManager {
 
 	private async doStart(startOptions: KernelStartOptions): Promise<void> {
 		if (this.state !== "idle") return;
+		// A restarted kernel serves new host requests; the previous teardown's
+		// abort must not poison them.
+		if (this.hostRequestController.signal.aborted) {
+			this.hostRequestController = new AbortController();
+		}
 		const generation = ++this.startGeneration;
 		this.state = "starting";
 		installSignalHandlersOnce();
@@ -1091,9 +1098,10 @@ export class ReplKernelManager {
 			this.handledHostRequestIds.delete(oldest);
 		}
 
+		const signal = this.hostRequestController.signal;
 		const task = (async () => {
 			try {
-				const result = await this.handleHostRequest(data);
+				const result = await this.handleHostRequest(data, signal);
 				try {
 					await this.writeLine({ type: "host_reply", id: requestId, data: { status: "ok", result } });
 				} catch (replyError) {
@@ -1122,7 +1130,7 @@ export class ReplKernelManager {
 		});
 	}
 
-	private async handleHostRequest(data: unknown): Promise<Record<string, unknown>> {
+	private async handleHostRequest(data: unknown, signal: AbortSignal): Promise<Record<string, unknown>> {
 		if (!isRecord(data)) {
 			throw new Error("host request payload must be an object");
 		}
@@ -1138,7 +1146,14 @@ export class ReplKernelManager {
 		// the in-flight execution; detached spawns (asyncio.create_task) fire after
 		// the scheduling cell goes idle, so fall back to that last cell's source.
 		const cellSourceCode = this.activeExecution?.code ?? this.lastCellCode;
-		return handler({ ...data, cellSourceCode });
+		return handler({ ...data, cellSourceCode }, signal);
+	}
+
+	/** Abort every in-flight host request; idempotent per teardown generation. */
+	private abortHostRequests(message: string): void {
+		if (!this.hostRequestController.signal.aborted) {
+			this.hostRequestController.abort(new Error(message));
+		}
 	}
 
 	private async interrupt(): Promise<void> {
@@ -1149,6 +1164,7 @@ export class ReplKernelManager {
 
 	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): void {
 		this.startGeneration++; // any teardown invalidates in-flight starts
+		this.abortHostRequests("IPython kernel stopped");
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
 		this.pendingDoneWaiters.clear();
@@ -1239,6 +1255,9 @@ export class ReplKernelManager {
 			await this.flushSnapshotForDispose();
 			if (this.startStale(generation)) return false;
 		}
+		// Cancel admitted host work (e.g. rlm.run children) before the drain so
+		// signal-aware handlers settle promptly instead of riding out the deadline.
+		this.abortHostRequests("IPython kernel shut down");
 		// Free the runtime's FIFO before asking it to shut down: the queued shutdown
 		// request only runs once the active request finishes, so a busy cell would
 		// otherwise stall the graceful path all the way to the kill deadline.
@@ -1375,6 +1394,7 @@ export class ReplKernelManager {
 
 	async kill(): Promise<void> {
 		this.supersedeProtocolRepair();
+		this.abortHostRequests("IPython kernel killed");
 		this.state = "shutdown";
 		liveKernels.delete(this);
 		this.cleanupResources("SIGKILL");
@@ -1566,6 +1586,7 @@ export class ReplKernelManager {
 	/** Synchronous best-effort cleanup. Safe to call from `process.on('exit')`. */
 	disposeSync(): void {
 		this.supersedeProtocolRepair();
+		this.abortHostRequests("IPython kernel disposed");
 		this.state = "shutdown";
 		liveKernels.delete(this);
 		this.cleanupResources();

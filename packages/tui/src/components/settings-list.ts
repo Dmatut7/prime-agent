@@ -170,7 +170,7 @@ export class SettingsList implements Component {
 		} else if (kb.matches(data, "tui.select.down")) {
 			if (displayItems.length === 0) return;
 			this.selectedIndex = this.selectedIndex === displayItems.length - 1 ? 0 : this.selectedIndex + 1;
-		} else if (kb.matches(data, "tui.select.confirm") || data === " ") {
+		} else if (kb.matches(data, "tui.select.confirm") || kb.matches(data, "tui.select.toggle")) {
 			this.activateItem();
 		} else if (kb.matches(data, "tui.select.cancel")) {
 			this.onCancel();

@@ -44,6 +44,7 @@ import {
 	AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL,
 	AGENT_MESSAGE_SKILL_NAME,
 	type AgentFamilyCatalogEntry,
+	type AgentFamilyRosterEntry,
 	type AgentFamilyRosterResult,
 	type AgentSessionMessage,
 	type AgentSessionMessageAgentSummary,
@@ -56,6 +57,7 @@ import {
 	createAgentMessageHostHandlers,
 	DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
 	formatAgentSessionNameUnavailable,
+	formatSubagentTerminalErrorNotice,
 	isAgentSessionMessage,
 	isAgentSessionMessagePrompt,
 	normalizeAgentSessionMessage,
@@ -264,6 +266,7 @@ import {
 	SessionManager,
 } from "./session-manager.js";
 import type { SessionStats } from "./session-stats.js";
+import { resolveCompleteToolPairLeaf } from "./session-tool-pair.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
 import {
@@ -1224,6 +1227,13 @@ export class AgentSession {
 	private _rlmParentAgent?: string;
 	private _repliedToParentSinceTask: boolean | undefined;
 	private _parentReplyCount = 0;
+	/**
+	 * Retry attempts consumed by the failure sequence that reached the last
+	 * terminal-error junction. Lets the parent-facing terminal notice say whether
+	 * retries were exhausted or never attempted, even though `_retryAttempt` is
+	 * already reset by the time the notice is composed.
+	 */
+	private _terminalFailureAttemptCount = 0;
 	private _subagentRuntimeHost?: SubagentRuntimeHost;
 	private _activeRlmChildRuns = new Map<string, RlmChildRun>();
 	private _unsettledRlmChildRuns = new Set<RlmChildRun>();
@@ -3615,11 +3625,13 @@ export class AgentSession {
 	};
 
 	private _createStallWatchdog(): StallWatchdog {
-		const settings = this.settingsManager.getStallWatchdogSettings();
 		const options: StallWatchdogOptions = {
-			enabled: settings.enabled,
-			warnAfterMs: settings.warnAfterSeconds * 1000,
-			abortAfterMs: settings.abortAfterSeconds > 0 ? settings.abortAfterSeconds * 1000 : undefined,
+			enabled: () => this.settingsManager.getStallWatchdogSettings().enabled,
+			warnAfterMs: () => this.settingsManager.getStallWatchdogSettings().warnAfterSeconds * 1000,
+			abortAfterMs: () => {
+				const s = this.settingsManager.getStallWatchdogSettings();
+				return s.abortAfterSeconds > 0 ? s.abortAfterSeconds * 1000 : undefined;
+			},
 			isPaused: () =>
 				this._disposed ||
 				this._disposing ||
@@ -3697,7 +3709,7 @@ export class AgentSession {
 			diagnostics,
 		};
 		if (info.stage === "warn") {
-			const message = `Possible stall: no session activity for ${silentSeconds}s while a turn is running. If nothing recovers, the turn will be aborted automatically after ${settings.abortAfterSeconds}s of silence.`;
+			const message = `Possible stall: no session activity for ${silentSeconds}s while a turn is running. If nothing recovers, the turn will be aborted automatically after ${settings.abortAfterSeconds}s of silence. If a tool appears stuck, interrupt the turn manually to recover faster; check the daemon log for stall diagnostics.`;
 			sessionLog.warn("stall watchdog: no activity while turn running", logFields);
 			this._emit({
 				type: "stall_warning",
@@ -3894,6 +3906,7 @@ export class AgentSession {
 						attempt: this._retryAttempt,
 					});
 					this._retryAttempt = 0;
+					this._terminalFailureAttemptCount = 0;
 					this._retryAuthFailureSources = [];
 				}
 				if (this._accountGoalUsageForAssistantMessage(assistantMsg)) {
@@ -3940,6 +3953,13 @@ export class AgentSession {
 				return;
 			}
 			this._finishActiveRetryWithFailure(msg);
+			if (!compactionWillRetry && msg.stopReason === "error") {
+				// Terminal failure: retries are exhausted, disabled, or the error was
+				// never retryable. A subagent must tell its parent instead of parking
+				// silently in needs_input (the synthesized completed_without_reply
+				// notice carries no error context and reads like a normal completion).
+				await this._notifyParentOfTerminalError(msg);
+			}
 			this._resolveRetry();
 			if (!compactionWillRetry) {
 				this._finishGoalForTerminalAssistantMessage(msg);
@@ -9680,8 +9700,8 @@ export class AgentSession {
 
 	private _createKernelHostHandlers(): HostRequestHandlers {
 		const handlers: HostRequestHandlers = {
-			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }) => ({
-				...(await this.runRlmChild(prompt, kwargs, cellSourceCode)),
+			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }, signal) => ({
+				...(await this.runRlmChild(prompt, kwargs, cellSourceCode, signal)),
 			})),
 			"rlm.find_models": createRlmFindModelsHostHandler((query, limit) => this.findRlmModels(query, limit)),
 			"rlm.list_subagents": createRlmListSubagentsHostHandler(() => this.listRlmSubagents()),
@@ -10050,6 +10070,12 @@ export class AgentSession {
 	}
 
 	private _cancelRlmChildRun(run: RlmChildRun, reason: string): boolean {
+		// Cancellation is an idempotent terminal transition while the detached
+		// run remains tracked. Concurrent callers must not mistake a previously
+		// accepted cancellation for a completed child and start conflicting cleanup.
+		if (run.status === "cancelled") {
+			return true;
+		}
 		if (run.status !== "running" && run.status !== "queued") {
 			return false;
 		}
@@ -10876,7 +10902,9 @@ export class AgentSession {
 		prompt: string,
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
+		signal?: AbortSignal,
 	): Promise<RlmSpawnHandle> {
+		signal?.throwIfAborted();
 		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
@@ -10904,6 +10932,7 @@ export class AgentSession {
 		} finally {
 			if (requestedSessionName) this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
 		}
+		signal?.throwIfAborted();
 		if (requestedThinkingLevel !== undefined) {
 			const supported = getSupportedThinkingLevels(modelSelection.model) as ThinkingLevel[];
 			if (!supported.includes(requestedThinkingLevel)) {
@@ -10918,6 +10947,7 @@ export class AgentSession {
 		const childNodeId = basename(childSessionDir);
 		const sessionName = requestedSessionName ?? createDefaultRlmSubagentSessionName(prompt, childNodeId);
 		if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
+		signal?.throwIfAborted();
 		const startedAt = Date.now();
 		const parentAssistantForUsage = this._findLastAssistantMessage();
 		let runningToolCount = 0;
@@ -10941,6 +10971,17 @@ export class AgentSession {
 		};
 		this._activeRlmChildRuns.set(run.id, run);
 		this._unsettledRlmChildRuns.add(run);
+		// The kernel host aborts its in-flight requests on teardown; cancel the
+		// admitted run with it so a disposed host never leaves a live child behind.
+		const abortFromHost = () => {
+			const reason = signal?.reason;
+			this._cancelRlmChildRun(run, reason instanceof Error ? reason.message : "IPython kernel host request aborted");
+		};
+		if (signal?.aborted) {
+			abortFromHost();
+		} else {
+			signal?.addEventListener("abort", abortFromHost, { once: true });
+		}
 		const emitChildUpdate = () => {
 			this._emit({ type: "rlm_child_update", child: this._rlmChildSnapshotForRun(run) });
 		};
@@ -11198,6 +11239,7 @@ export class AgentSession {
 					}
 				}
 			} finally {
+				signal?.removeEventListener("abort", abortFromHost);
 				if (run.detachedDeletion) {
 					run.deletionRunFinished = true;
 					if (!run.settled) {
@@ -11250,8 +11292,9 @@ export class AgentSession {
 		prompt: string,
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
+		signal?: AbortSignal,
 	): Promise<RlmSpawnHandle> {
-		return this._startRlmChildRun(prompt, kwargs, spawnCode);
+		return this._startRlmChildRun(prompt, kwargs, spawnCode, signal);
 	}
 
 	private _isRetryableError(message: AssistantMessage): boolean {
@@ -11417,8 +11460,65 @@ export class AgentSession {
 			attempt: this._retryAttempt,
 			finalError: message.errorMessage,
 		});
+		this._terminalFailureAttemptCount = this._retryAttempt;
 		this._retryAttempt = 0;
 		this._retryAuthFailureSources = [];
+	}
+
+	/**
+	 * Tell the parent agent when a turn ends in a terminal model/provider failure.
+	 * Without this, a subagent session parks silently in needs_input and the parent
+	 * only sees the synthesized completed_without_reply notice, which carries no
+	 * error context and reads like a normal completion. A successful delivery counts
+	 * as a parent reply, which suppresses that misleading notice; when delivery
+	 * fails here, the synthesized notice remains as the fallback.
+	 */
+	private async _notifyParentOfTerminalError(message: AssistantMessage): Promise<void> {
+		if (this._rlmDepth <= 0 || this._disposed || this._disposing) return;
+		const controller = this._agentMessageController;
+		if (!controller?.roster || !controller.sendAgentMessage) return;
+		let parent: AgentFamilyRosterEntry | undefined;
+		try {
+			const roster = await controller.roster();
+			parent = roster.entries.find((entry) => entry.relationship === "parent");
+		} catch {
+			return;
+		}
+		if (!parent) return;
+		const retrySettings = this.settingsManager.getRetrySettings();
+		const attempts = this._terminalFailureAttemptCount;
+		const retrySummary =
+			attempts > 0
+				? retrySettings.enabled && attempts >= retrySettings.maxRetries
+					? `auto-retry exhausted after ${attempts} attempt(s)`
+					: `auto-retry stopped after ${attempts} attempt(s)`
+				: retrySettings.enabled
+					? "error classified as non-retryable; no retries attempted"
+					: "auto-retry disabled; no retries attempted";
+		const notice = formatSubagentTerminalErrorNotice({
+			errorMessage: message.errorMessage,
+			provider: message.provider,
+			model: message.model,
+			retrySummary,
+		});
+		const target = parent.name.trim() || parent.id;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			// A hung send on a broken transport must not freeze the event queue of a
+			// session whose turn already failed.
+			await Promise.race([
+				controller.sendAgentMessage({ target, message: notice, receiverRole: "parent" }),
+				new Promise<never>((_, reject) => {
+					timer = setTimeout(() => reject(new Error("Subagent terminal-error notice timed out")), 10_000);
+				}),
+			]);
+		} catch {
+			return;
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
+		}
+		this._repliedToParentSinceTask = true;
+		this._parentReplyCount += 1;
 	}
 
 	private async _handleRetryableError(
@@ -11432,6 +11532,7 @@ export class AgentSession {
 		if (!settings.enabled) {
 			this._markProviderAuthStaleForRetryFailure(message, options);
 			this._retryAuthFailureSources = [];
+			this._terminalFailureAttemptCount = 0;
 			this._resolveRetry();
 			return false;
 		}
@@ -11452,6 +11553,7 @@ export class AgentSession {
 				attempt: this._retryAttempt - 1,
 				finalError: message.errorMessage,
 			});
+			this._terminalFailureAttemptCount = this._retryAttempt - 1;
 			this._retryAttempt = 0;
 			this._retryAuthFailureSources = [];
 			this._resolveRetry(); // Resolve so waitForRetry() completes
@@ -11480,6 +11582,7 @@ export class AgentSession {
 			const attempt = this._retryAttempt;
 			this._markProviderAuthStaleForRetryFailure(message, options);
 			this._retryAttempt = 0;
+			this._terminalFailureAttemptCount = attempt;
 			this._retryAbortController = undefined;
 			this._emit({
 				type: "auto_retry_end",
@@ -11516,6 +11619,7 @@ export class AgentSession {
 			});
 			this._retryAttempt = 0;
 		}
+		this._terminalFailureAttemptCount = 0;
 		this._retryAuthFailureSources = [];
 		this._resolveRetry();
 	}
@@ -12054,6 +12158,10 @@ export class AgentSession {
 								.join("");
 			} else {
 				newLeafId = targetId;
+			}
+
+			if (newLeafId) {
+				newLeafId = resolveCompleteToolPairLeaf(this.sessionManager.getBranch(newLeafId))?.id ?? null;
 			}
 
 			let summaryEntry: BranchSummaryEntry | undefined;

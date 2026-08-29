@@ -72,7 +72,7 @@ export class ExtensionInputComponent extends Container implements Focusable {
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
-		if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
+		if (kb.matches(keyData, "tui.select.confirm") || kb.matches(keyData, "tui.input.newLine")) {
 			this.onSubmitCallback(this.input.getValue());
 		} else if (kb.matches(keyData, "tui.select.cancel")) {
 			this.onCancelCallback();

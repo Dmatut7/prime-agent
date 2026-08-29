@@ -15,6 +15,10 @@ export const DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION = 20;
 export const DEFAULT_AGENT_MESSAGE_RATE_LIMIT_CAPACITY = 3;
 export const DEFAULT_AGENT_MESSAGE_RATE_LIMIT_REFILL_MS = 1000;
 
+/** Machine-detectable marker prefixed to subagent terminal-error notices sent to the parent. */
+export const SUBAGENT_TERMINAL_ERROR_NOTICE_PREFIX = "[subagent-terminal-error]";
+export const SUBAGENT_TERMINAL_ERROR_SUMMARY_MAX_CHARS = 500;
+
 /** Legacy daemon wire input accepted and ignored for compatibility. */
 export type AgentSessionMessageDeliveryMode = "auto" | "steer" | "follow_up";
 export type AgentSessionMessageDeliveryStatus = "delivered" | "queued";
@@ -330,6 +334,35 @@ export function assertAgentFamilyReach(
 
 export function createAgentSessionMessageId(): string {
 	return `agentmsg_${randomUUID()}`;
+}
+
+export interface SubagentTerminalErrorNoticeInput {
+	errorMessage?: string;
+	provider?: string;
+	model?: string;
+	retrySummary: string;
+}
+
+/**
+ * Text for the agent_message a subagent session sends to its parent when a turn
+ * ends in a terminal model/provider failure (retries exhausted or the error was
+ * never retryable). The parent must be able to distinguish this from a normal
+ * reply, so the content carries an explicit terminal-state marker.
+ */
+export function formatSubagentTerminalErrorNotice(input: SubagentTerminalErrorNoticeInput): string {
+	const trimmed = (input.errorMessage ?? "").trim() || "Unknown error";
+	const errorSummary =
+		trimmed.length > SUBAGENT_TERMINAL_ERROR_SUMMARY_MAX_CHARS
+			? `${trimmed.slice(0, SUBAGENT_TERMINAL_ERROR_SUMMARY_MAX_CHARS)}…`
+			: trimmed;
+	const modelRef = [input.provider, input.model].filter(Boolean).join("/") || "unknown model";
+	return [
+		`${SUBAGENT_TERMINAL_ERROR_NOTICE_PREFIX} Terminal state: this subagent turn ended with a permanent model/provider failure; no model output was produced.`,
+		`Error summary: ${errorSummary}`,
+		`Model: ${modelRef}`,
+		`Retry status: ${input.retrySummary}`,
+		`The session is idle in needs_input. Sending another message retries the turn, but the same error will recur until the underlying cause (credentials/config/provider) is fixed.`,
+	].join("\n");
 }
 
 export function normalizeAgentSessionMessage(message: string, maxChars = DEFAULT_AGENT_MESSAGE_MAX_CHARS): string {

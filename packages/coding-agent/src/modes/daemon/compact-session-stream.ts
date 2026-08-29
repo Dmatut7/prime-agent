@@ -91,7 +91,12 @@ export class CompactAssistantStreamReconstructor {
 			return;
 		}
 		if (message.event.type === "message_start" && message.event.message.role === "assistant") {
-			this.partialMessages.set(message.activeSessionId, message.event.message);
+			// Own the partial: reconstruct() mutates content blocks in place, and
+			// the incoming message_start event may be referenced elsewhere.
+			this.partialMessages.set(message.activeSessionId, {
+				...message.event.message,
+				content: message.event.message.content.map((block) => ({ ...block })),
+			});
 			return;
 		}
 		if (message.event.type === "message_end") {

@@ -28,8 +28,13 @@ export class KernelBusyAfterInterruptError extends Error {
 /**
  * Handles one typed request from Python code running in the kernel.
  * The returned record is delivered verbatim to the Python caller.
+ * The signal aborts when the kernel host tears down, so long-running
+ * handlers (e.g. admitted rlm.run children) can cancel promptly.
  */
-export type HostRequestHandler = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
+export type HostRequestHandler = (
+	payload: Record<string, unknown>,
+	signal?: AbortSignal,
+) => Promise<Record<string, unknown>>;
 
 /** Host request handlers keyed by request type (e.g. "rlm.run", "goal.complete"). */
 export type HostRequestHandlers = Record<string, HostRequestHandler>;

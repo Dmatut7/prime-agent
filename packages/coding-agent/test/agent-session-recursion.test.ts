@@ -3076,6 +3076,9 @@ describe("AgentSession rlm recursion", () => {
 		expect(root.cancelRlmChildRun(childId)).toBe(true);
 		expect(run?.status).toBe("cancelled");
 		expect(run?.error).toBe("Cancelled by user");
+		// A second caller racing detached teardown observes the already-accepted
+		// cancellation rather than treating the child as complete.
+		expect(root.cancelRlmChildRun(childId)).toBe(true);
 		// The cancelled update is pushed at cancel time, before the (possibly
 		// stuck) child unwinds; viewers must not keep showing a running child.
 		expect(childStatuses[childStatuses.length - 1]).toBe("cancelled");
@@ -3086,6 +3089,68 @@ describe("AgentSession rlm recursion", () => {
 
 		// The run has finished; a second cancel finds nothing to stop.
 		expect(root.cancelRlmChildRun(childId)).toBe(false);
+	});
+
+	it("cancels an admitted rlm.run child when its kernel host shuts down", async () => {
+		let releaseChild: () => void = () => {};
+		const release = new Promise<void>((resolve) => {
+			releaseChild = resolve;
+		});
+		let childStarted = false;
+		const root = createSession({
+			streamFn: (_model, context) => {
+				const text = userText(context);
+				const stream = createAssistantMessageEventStream();
+				if (text === "kernel-owned shard") {
+					childStarted = true;
+					void release.then(() => {
+						stream.push({ type: "done", reason: "stop", message: assistantMessage(`child answer: ${text}`) });
+					});
+				}
+				return stream;
+			},
+		});
+		const manager = new ReplKernelManager({
+			cwd: tempDir,
+			hostHandlers: (root as unknown as InspectableRlmSession)._createKernelHostHandlers(),
+		});
+		const internals = manager as unknown as { handleEvent: (event: Record<string, unknown>) => void };
+
+		try {
+			internals.handleEvent({
+				event: "host_request",
+				id: "hr-admitted",
+				data: { type: "rlm.run", prompt: "kernel-owned shard" },
+			});
+			await waitFor(() => childStarted);
+			const runs = (root as unknown as InspectableRlmSession)._activeRlmChildRuns;
+			const run = [...runs.values()][0];
+			if (!run?.session) throw new Error("Missing admitted child session");
+			const childAbort = vi.spyOn(run.session, "abort");
+
+			await manager.shutdown({ drainHostRequests: true });
+
+			expect(run.status).toBe("cancelled");
+			expect(run.error).toBe("IPython kernel shut down");
+			expect(childAbort).toHaveBeenCalledTimes(1);
+
+			releaseChild();
+			await waitFor(() => !runs.has(run.id));
+		} finally {
+			releaseChild();
+			await manager.shutdown().catch(() => undefined);
+		}
+	});
+
+	it("refuses to admit an rlm.run child once the kernel host signal aborted", async () => {
+		const root = createSession();
+		const controller = new AbortController();
+		controller.abort(new Error("IPython kernel shut down"));
+
+		await expect(root.runRlmChild("late shard", {}, undefined, controller.signal)).rejects.toThrow(
+			"IPython kernel shut down",
+		);
+		expect((root as unknown as InspectableRlmSession)._activeRlmChildRuns.size).toBe(0);
 	});
 
 	it("reports a shared running outcome to concurrent inactive-delete callers", async () => {
