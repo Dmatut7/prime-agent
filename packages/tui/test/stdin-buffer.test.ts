@@ -525,6 +525,25 @@ describe("StdinBuffer", () => {
 			assert.ok(emittedSequences.includes("x"));
 		});
 
+		it("forwards keys after a Kitty Esc in the same paste chunk", () => {
+			processInput("\x1b[200~hello");
+			processInput("\x1b[27ux");
+
+			assert.deepStrictEqual(emittedPaste, []);
+			assert.strictEqual(buffer.isPasteMode(), false);
+			assert.deepStrictEqual(emittedSequences, ["x"]);
+		});
+
+		it("forwards leftover keys in the chunk that completes a split Kitty Esc", () => {
+			processInput("\x1b[200~hello");
+			processInput("\x1b[27");
+			processInput("uy");
+
+			assert.deepStrictEqual(emittedPaste, []);
+			assert.strictEqual(buffer.isPasteMode(), false);
+			assert.deepStrictEqual(emittedSequences, ["y"]);
+		});
+
 		it("recognizes a Kitty Esc sequence split across chunks", () => {
 			processInput("\x1b[200~hello");
 			processInput("\x1b[27");

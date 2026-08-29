@@ -6660,9 +6660,22 @@ export class InteractiveMode {
 		});
 	}
 
+	private reattachLiveChatComponents(): void {
+		if (this.activeBashComponent && !this.chatContainer.children.includes(this.activeBashComponent)) {
+			this.chatContainer.addChild(this.activeBashComponent);
+		}
+		if (this.streamingComponent && this.streamingMessage) {
+			if (!this.chatContainer.children.includes(this.streamingComponent)) {
+				this.chatContainer.addChild(this.streamingComponent);
+			}
+			this.streamingComponent.updateContent(this.streamingMessage);
+		}
+	}
+
 	private async rebuildChatFromMessages(): Promise<void> {
 		const context = await this.agentConnection.getSessionContext();
 		await this.renderSessionContext(context, { clearChat: true });
+		this.reattachLiveChatComponents();
 	}
 
 	/**
@@ -7402,11 +7415,9 @@ export class InteractiveMode {
 			// Rebuild chat from session messages
 			await this.rebuildChatFromMessages();
 
-			// If streaming, re-add the streaming component with updated visibility and re-render
 			if (this.streamingComponent && this.streamingMessage) {
 				this.streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
 				this.streamingComponent.updateContent(this.streamingMessage);
-				this.chatContainer.addChild(this.streamingComponent);
 			}
 
 			this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);
