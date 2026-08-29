@@ -6966,14 +6966,20 @@ export class AgentSession {
 	}
 
 	/**
-	 * Settle turn actions that were already dispatched into the agent run when
-	 * the abort arrived. The pump's deferred-error path only rolls back
-	 * undelivered work, so a delivered action stuck in `committing`/`running`
-	 * would never reach a terminal state: `unfinishedActionCount` stays nonzero
-	 * forever, which keeps `isSessionActive` true and makes `wait_for_idle` and
-	 * RLM quiescence hang. The delivered messages stay in the transcript; only
-	 * the action lifecycle ends. Undelivered dispatched work is left to the
-	 * pump's rollback so it can re-queue.
+	 * Settle queue-dispatched turn actions that were already delivered into the
+	 * agent run when the abort arrived. The pump's deferred-error path only
+	 * rolls back undelivered work, so a delivered action stuck in
+	 * `committing`/`running` would never reach a terminal state:
+	 * `unfinishedActionCount` stays nonzero forever, which keeps `isSessionActive`
+	 * true and makes `wait_for_idle` and RLM quiescence hang. The delivered
+	 * messages stay in the transcript; only the action lifecycle ends.
+	 * Undelivered dispatched work is left to the pump's rollback so it can
+	 * re-queue.
+	 *
+	 * Only queue-visible turns are settled here: a direct (non-queued) prompt is
+	 * awaited by its caller and driven through the ordinary abort flow, and
+	 * settling it with an error would reject a `prompt()` that previously
+	 * resolved normally on abort.
 	 */
 	private _settleAbortedDispatchedTurnActions(): void {
 		const transcript = this.agent.state.messages;
@@ -6983,6 +6989,7 @@ export class AgentSession {
 			.filter(
 				(action): action is SessionAction<PreparedTurnPayload> =>
 					action.payload.kind === "turn" &&
+					action.payload.queueVisible === true &&
 					(action.lifecycle.state === "committing" || action.lifecycle.state === "running") &&
 					(primaryDeliveryRecord(action).durable || transcript.includes(primaryDeliveryRecord(action).message)),
 			);
