@@ -1235,23 +1235,28 @@ stale post-hook extension instructions`,
 		const rejected = expect(accepted).rejects.toThrow("cleared before delivery");
 		await Promise.all([eventQueueReached.promise, dispatchGate.reached]);
 
+		const store = (harness.session as unknown as { _actionStore: { ownedActions(): readonly unknown[] } })
+			._actionStore;
+
 		harness.session.clearQueuedUserMessagesMatching((text) => text === prompt);
-		let idle = false;
-		const waiting = harness.session.waitForIdle().then(() => {
-			idle = true;
-		});
 		dispatchGate.release();
 		await rejected;
 		await harness.session.agent.waitForIdle();
-		await new Promise<void>((resolve) => setImmediate(resolve));
+		await harness.session.waitForIdle();
 
-		const store = (harness.session as unknown as { _actionStore: { ownedActions(): readonly unknown[] } })
-			._actionStore;
-		expect(idle).toBe(false);
-		expect(store.ownedActions()).toHaveLength(1);
-		eventQueueGate.resolve();
-		await waiting;
+		// The cancelled dispatch's cleanup rides the session event queue, and
+		// waitForIdle must never settle before it lands (a leftover owned action
+		// keeps the session "active" and hangs headless waits and RLM quiescence).
+		// The abort skips the still-pending extension handler (extension liveness
+		// timeout), so the queue drains and the cleanup completes as part of the
+		// same settlement instead of staying gated behind the handler.
 		expect(store.ownedActions()).toHaveLength(0);
+
+		// Releasing the skipped handler's gate afterwards must be a no-op.
+		eventQueueGate.resolve();
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(store.ownedActions()).toHaveLength(0);
+		expect(harness.session.unfinishedActionCount).toBe(0);
 		expect(harness.session.agent.state.errorMessage).toBeUndefined();
 	});
 
