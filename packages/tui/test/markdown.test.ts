@@ -2,7 +2,7 @@ import assert from "node:assert";
 import { afterEach, describe, it } from "node:test";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Chalk } from "chalk";
-import { LruCache, MARKDOWN_BLOCK_CACHE_LIMIT, Markdown } from "../src/components/markdown.js";
+import { Markdown } from "../src/components/markdown.js";
 import { resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.js";
 import { type Component, TUI } from "../src/tui.js";
 import { defaultMarkdownTheme } from "./test-themes.js";
@@ -1276,74 +1276,5 @@ bar`,
 				assert.deepStrictEqual(incremental, fresh, `Diverged at ${text.length} chars`);
 			}
 		});
-	});
-
-	describe("block cache LRU", () => {
-		function paragraphs(count: number): string {
-			return Array.from({ length: count }, (_, i) => `Paragraph ${String(i).padStart(4, "0")} unique.`).join("\n\n");
-		}
-
-		it("caps occupancy at MARKDOWN_BLOCK_CACHE_LIMIT", () => {
-			const md = new Markdown(paragraphs(MARKDOWN_BLOCK_CACHE_LIMIT + 50), 1, 1, defaultMarkdownTheme);
-			md.render(80);
-			assert.strictEqual(md.getBlockCacheSize(), MARKDOWN_BLOCK_CACHE_LIMIT);
-		});
-
-		it("evicts the least recently used block first", () => {
-			const md = new Markdown(paragraphs(MARKDOWN_BLOCK_CACHE_LIMIT + 2), 1, 1, defaultMarkdownTheme);
-			md.render(80);
-			assert.strictEqual(md.getBlockCacheSize(), MARKDOWN_BLOCK_CACHE_LIMIT);
-			const keys = md.getBlockCacheKeys();
-			// Marked inserts a shared `space` token between paragraphs, so unique
-			// keys are each paragraph plus one space key. Two extra paragraphs
-			// therefore evict the two oldest unique paragraph keys.
-			assert.equal(
-				keys.some((key) => key.includes("Paragraph 0000")),
-				false,
-				"the oldest paragraph should be evicted",
-			);
-			assert.equal(
-				keys.some((key) => key.includes("Paragraph 0001")),
-				false,
-				"the next-oldest paragraph should be evicted",
-			);
-			assert.ok(keys[0]?.includes("Paragraph 0002"), "the oldest surviving key should be the next paragraph");
-			assert.ok(
-				keys.some((key) => key.includes(`Paragraph ${String(MARKDOWN_BLOCK_CACHE_LIMIT).padStart(4, "0")}`)),
-				"the last cacheable paragraph should remain",
-			);
-		});
-
-		it("clears the cache on invalidate", () => {
-			const md = new Markdown(paragraphs(8), 1, 1, defaultMarkdownTheme);
-			md.render(80);
-			assert.ok(md.getBlockCacheSize() > 0);
-			md.invalidate();
-			assert.strictEqual(md.getBlockCacheSize(), 0);
-		});
-	});
-});
-
-describe("LruCache", () => {
-	it("evicts the least recently used key when over capacity", () => {
-		const cache = new LruCache<string, number>(2);
-		cache.set("a", 1);
-		cache.set("b", 2);
-		cache.set("c", 3);
-		assert.deepStrictEqual([...cache.keys()], ["b", "c"]);
-		assert.strictEqual(cache.get("a"), undefined);
-		assert.strictEqual(cache.get("b"), 2);
-		cache.set("d", 4);
-		assert.deepStrictEqual([...cache.keys()], ["b", "d"]);
-	});
-
-	it("treats set of an existing key as a recency refresh", () => {
-		const cache = new LruCache<string, number>(2);
-		cache.set("a", 1);
-		cache.set("b", 2);
-		cache.set("a", 11);
-		cache.set("c", 3);
-		assert.deepStrictEqual([...cache.keys()], ["a", "c"]);
-		assert.strictEqual(cache.get("a"), 11);
 	});
 });

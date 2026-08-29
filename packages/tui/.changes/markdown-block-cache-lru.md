@@ -1,1 +1,0 @@
-- Capped the markdown block render cache at 256 entries with LRU eviction so long documents cannot grow it without bound.
