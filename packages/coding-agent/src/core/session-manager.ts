@@ -6,7 +6,7 @@ import { lstat, readdir, readFile, stat } from "fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "path";
 import { v7 as uuidv7 } from "uuid";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
-import { readFileLines, readFirstLineSync, readLinesAsBuffers } from "../utils/file-lines.js";
+import { readFileLines, readFirstLineSync, repairTruncatedTrailingLine } from "../utils/file-lines.js";
 import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
 import {
 	appendPrivateFile,
@@ -585,8 +585,10 @@ function parseEntriesFromBuffer(buffer: Buffer): FileEntry[] {
 	const entries: FileEntry[] = [];
 	let start = 0;
 	while (start < buffer.length) {
-		let end = buffer.indexOf(0x0a, start);
-		if (end === -1) end = buffer.length;
+		const end = buffer.indexOf(0x0a, start);
+		// A trailing unterminated line is a torn append: every reader skips it,
+		// and repairTruncatedTrailingLine removes it before the next write.
+		if (end === -1) break;
 		appendEntryFromBuffer(entries, buffer, start, end);
 		start = end + 1;
 	}
@@ -598,8 +600,9 @@ async function parseEntriesFromBufferAsync(buffer: Buffer): Promise<FileEntry[]>
 	let start = 0;
 	let bytesSinceYield = 0;
 	while (start < buffer.length) {
-		let end = buffer.indexOf(0x0a, start);
-		if (end === -1) end = buffer.length;
+		const end = buffer.indexOf(0x0a, start);
+		// A trailing unterminated line is a torn append; see parseEntriesFromBuffer.
+		if (end === -1) break;
 		appendEntryFromBuffer(entries, buffer, start, end);
 		bytesSinceYield += end - start + 1;
 		start = end + 1;
@@ -648,9 +651,11 @@ export async function loadEntriesFromFileAsync(
 
 	const entries: FileEntry[] = [];
 	let bytesSinceYield = 0;
-	for await (const line of readLinesAsBuffers(filePath)) {
-		appendEntryFromBuffer(entries, line);
-		bytesSinceYield += line.length + 1;
+	for await (const fileLine of readFileLines(filePath)) {
+		// A trailing unterminated line is a torn append; see parseEntriesFromBuffer.
+		if (!fileLine.terminated) break;
+		appendEntryFromBuffer(entries, fileLine.line);
+		bytesSinceYield += fileLine.line.length + 1;
 		if (bytesSinceYield >= SESSION_ASYNC_PARSE_YIELD_BYTES) {
 			bytesSinceYield = 0;
 			await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1045,9 +1050,11 @@ async function scanSessionInfo(
 		let offset = resume?.offset ?? 0;
 
 		for await (const fileLine of readFileLines(filePath, offset)) {
-			if (fileLine.terminated) {
-				offset = fileLine.endOffset;
-			}
+			// A trailing unterminated line is a torn append still in flight (or a
+			// crash remnant): never count it, and never advance the resume offset
+			// past it, so a completed rewrite of the same bytes is seen exactly once.
+			if (!fileLine.terminated) break;
+			offset = fileLine.endOffset;
 			const line = fileLine.line.toString("utf8");
 			if (!line.trim()) continue;
 
@@ -1258,6 +1265,9 @@ export class SessionManager {
 	setSessionFile(sessionFile: string, preloadedEntries?: FileEntry[]): void {
 		this.sessionFile = resolve(sessionFile);
 		if (existsSync(this.sessionFile)) {
+			// A crash can leave a torn final line; every reader skips it, so drop it
+			// before loading — the next append must not glue onto the torn bytes.
+			repairTruncatedTrailingLine(this.sessionFile);
 			try {
 				const firstHeader = readSessionHeader(this.sessionFile);
 				if (firstHeader?.type === "session" && typeof firstHeader.id === "string") {
@@ -2116,6 +2126,8 @@ export class SessionManager {
 		if (!existsSync(path)) {
 			return SessionManager.open(path, sessionDir, cwdOverride);
 		}
+		// Repair before the preload so the entries match the post-repair bytes.
+		repairTruncatedTrailingLine(path);
 		const entries = await loadEntriesFromFileAsync(path);
 		if (entries.length === 0) {
 			return SessionManager.open(path, sessionDir, cwdOverride);

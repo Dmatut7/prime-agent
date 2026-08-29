@@ -84,7 +84,7 @@ describe("loadEntriesFromFile", () => {
 					timestamp: "2025-01-01T00:00:01Z",
 					message: { role: "user", content: "x".repeat(5 * 1024 * 1024), timestamp: 1 },
 				}),
-			].join("\n"),
+			].join("\n") + "\n",
 		);
 		const setImmediateSpy = vi.spyOn(globalThis, "setImmediate");
 		try {
@@ -124,7 +124,7 @@ describe("loadEntriesFromFile", () => {
 					timestamp: "2025-01-01T00:00:01Z",
 					message: { role: "user", content, timestamp: 1 },
 				}),
-			].join("\n"),
+			].join("\n") + "\n",
 		);
 
 		const streamed = await loadEntriesFromFileAsync(file, { streamThresholdBytes: 0 });
@@ -148,7 +148,7 @@ describe("loadEntriesFromFile", () => {
 					message: { role: "user", content: largeContent, timestamp: 1 },
 				}),
 				'{"type":"message","id":"2","parentId":"1","timestamp":"2025-01-01T00:00:02Z","message":{"role":"user","content":"after","timestamp":2}}',
-			].join("\n"),
+			].join("\n") + "\n",
 		);
 
 		const entries = await loadEntriesFromFileAsync(file, { streamThresholdBytes: 0 });

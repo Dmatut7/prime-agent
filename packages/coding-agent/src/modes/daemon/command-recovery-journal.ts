@@ -1,5 +1,6 @@
 import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
+import { repairTruncatedTrailingLine } from "../../utils/file-lines.js";
 import type { DaemonClientId, DaemonCommandId, DaemonResponse } from "./daemon-protocol.js";
 
 interface ReceivedRecord {
@@ -56,6 +57,9 @@ export class CommandRecoveryJournal {
 
 	constructor(private readonly path: string) {
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+		// A crash can leave a torn final line; load skips it, so drop it from disk
+		// too — the next append must not glue onto the torn bytes.
+		repairTruncatedTrailingLine(path);
 		this.load();
 	}
 

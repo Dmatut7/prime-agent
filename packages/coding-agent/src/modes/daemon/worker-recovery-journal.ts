@@ -10,6 +10,7 @@ import {
 	writeSync,
 } from "node:fs";
 import { dirname } from "node:path";
+import { repairTruncatedTrailingLine } from "../../utils/file-lines.js";
 
 export interface WorkerRecoveryRecord {
 	version: 1;
@@ -60,6 +61,9 @@ export class WorkerRecoveryJournal {
 
 	constructor(private readonly path: string) {
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+		// A crash can leave a torn final line; load skips it, so drop it from disk
+		// too — the next append must not glue onto the torn bytes.
+		repairTruncatedTrailingLine(path);
 		this.latest = parseRecords(path);
 	}
 

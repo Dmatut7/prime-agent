@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -29,6 +29,27 @@ afterEach(() => {
 });
 
 describe("orphan process journal", () => {
+	it("repairs a torn trailing line before appending", () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-orphan-journal-torn-"));
+		tempDirs.push(directory);
+		const path = join(directory, "orphans.jsonl");
+		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = path;
+
+		recordOrphanProcessState(process.pid, true);
+		appendFileSync(path, '{"version":1,"pid":999999,"ownerPid":'); // crash mid-append
+
+		recordOrphanProcessState(process.pid, false);
+
+		const lines = readFileSync(path, "utf8")
+			.split("\n")
+			.filter((line) => line.length > 0);
+		for (const line of lines) {
+			expect(() => JSON.parse(line)).not.toThrow();
+		}
+		expect(lines.some((line) => line.includes("999999"))).toBe(false);
+		expect(lines.length).toBeGreaterThanOrEqual(2);
+	});
+
 	it("retains only detached processes still active for the crashed owner", () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-orphan-journal-test-"));
 		tempDirs.push(directory);
