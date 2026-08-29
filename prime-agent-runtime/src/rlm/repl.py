@@ -19,6 +19,7 @@ import linecache
 import os
 import platform
 import signal
+import stat
 import sys
 import tempfile
 import threading
@@ -616,6 +617,8 @@ def _snapshot_state(
 ) -> dict[str, Any]:
     import datetime
 
+    if not hasattr(os, "O_NOFOLLOW"):
+        return {"error": "O_NOFOLLOW unavailable"}
     try:
         import dill
     except Exception as err:  # noqa: BLE001 - dill is provisioned by the host, not a hard dep
@@ -657,7 +660,13 @@ def _snapshot_state(
         payload[name] = blob
         total += len(blob)
 
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    out_dir = os.path.dirname(path) or "."
+    if os.path.lexists(out_dir):
+        out_dir_info = os.lstat(out_dir)
+        if stat.S_ISLNK(out_dir_info.st_mode) or not stat.S_ISDIR(out_dir_info.st_mode):
+            return {"error": "unsafe snapshot directory"}
+    else:
+        os.makedirs(out_dir, mode=0o700, exist_ok=False)
     temps: list[str] = []
 
     def stage_temp(target: str, mode: str):
@@ -720,6 +729,10 @@ def _snapshot_state(
             fh, tmp = stage_temp(path, "wb")
             with fh:
                 fh.write(serialized_payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+                if hasattr(os, "fchmod"):
+                    os.fchmod(fh.fileno(), 0o600)
             bytes_written = len(serialized_payload)
             saved = sorted(payload.keys())
             pruned = sorted(name for name in oversized if name in ns) if prune_oversized else []
@@ -736,6 +749,10 @@ def _snapshot_state(
             fh, manifest_tmp = stage_temp(manifest_path, "w")
             with fh:
                 json.dump(manifest, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
+                if hasattr(os, "fchmod"):
+                    os.fchmod(fh.fileno(), 0o600)
         except BaseException as err:  # noqa: BLE001 - Exception -> error dict, rest propagates
             if not isinstance(err, Exception):
                 raise  # e.g. KeyboardInterrupt: clean up (outer finally), then propagate
@@ -747,10 +764,18 @@ def _snapshot_state(
         previous = signal.signal(signal.SIGINT, lambda signum, frame: parked.append(signum))
         handler_installed = True
         try:
+            if os.path.lexists(path):
+                out_info = os.lstat(path)
+                if stat.S_ISLNK(out_info.st_mode) or not stat.S_ISREG(out_info.st_mode):
+                    raise OSError("unsafe snapshot destination")
             os.replace(tmp, path)
         except OSError as err:
             return {"error": f"write failed: {err}"}
         try:
+            if os.path.lexists(manifest_path):
+                manifest_info = os.lstat(manifest_path)
+                if stat.S_ISLNK(manifest_info.st_mode) or not stat.S_ISREG(manifest_info.st_mode):
+                    raise OSError("unsafe snapshot manifest")
             os.replace(manifest_tmp, manifest_path)
         except OSError as err:
             # Fail before the prune deletions so a bad manifest path never destroys state.
@@ -781,14 +806,24 @@ def _snapshot_state(
 def _restore_state(
     ns: dict[str, Any], path: str, committed: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:
-    if not os.path.exists(path):
+    if not hasattr(os, "O_NOFOLLOW"):
+        return {"restored": [], "failed": [], "error": "O_NOFOLLOW unavailable"}
+    if not os.path.lexists(path):
         return {"restored": [], "failed": [], "reason": "snapshot not found"}
     try:
         import dill
     except Exception as err:  # noqa: BLE001
         return {"error": f"dill unavailable: {err}"}
     try:
-        with open(path, "rb") as fh:
+        snapshot_stat = os.lstat(path)
+        if not stat.S_ISREG(snapshot_stat.st_mode):
+            return {
+                "restored": [],
+                "failed": [],
+                "error": "load failed: snapshot is not a regular file",
+            }
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as fh:
             payload = dill.load(fh)
     except Exception as err:  # noqa: BLE001 - a corrupt snapshot yields an empty restore
         return {"error": f"load failed: {_safe_str(err)}"}

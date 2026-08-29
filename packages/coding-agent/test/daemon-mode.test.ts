@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -976,6 +976,12 @@ describe("daemon mode helpers", () => {
 			expect(parentState.runtime.session.sessionFile).toBeUndefined();
 			expect(child.session.sessionManager.getHeader()).toMatchObject({ rlmDepth: 1 });
 			expect(child.session.sessionManager.getHeader()?.parentSession).toBeUndefined();
+			const host = (
+				internals as typeof internals & {
+					createSubagentRuntimeHost(parentState: ActiveSessionState): SubagentRuntimeHost;
+				}
+			).createSubagentRuntimeHost(parentState);
+			expect(host.completeRlmSubagentRuntime?.("child-1", child.session)).toBe(true);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -8845,6 +8851,9 @@ function makePersistedRlmDaemonFixture(
 	}
 	const grandchildId = "grandchild-1";
 	mkdirSync(childArtifactDir, { recursive: true });
+	// Post-hardening contract: artifact storage is owner-private.
+	chmodSync(dirname(childArtifactDir), 0o700);
+	chmodSync(childArtifactDir, 0o700);
 	const grandchildSessionDir = join(childSessionDir, "sub-deadbeef");
 	const grandchildManager = SessionManager.create(tempDir, grandchildSessionDir);
 	grandchildManager.newSession({ parentSession: childSessionFile });

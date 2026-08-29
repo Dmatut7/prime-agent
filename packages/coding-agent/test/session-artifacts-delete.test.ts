@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { deleteSessionArtifacts, deleteSessionFile } from "../src/core/session-file-actions.js";
 
@@ -25,6 +25,9 @@ describe("deleteSessionFile removes the session artifact directory", () => {
 
 		const artifactDir = join(root, "session-artifacts", sessionId);
 		mkdirSync(artifactDir, { recursive: true });
+		// Post-hardening contract: artifact storage is owner-private.
+		chmodSync(dirname(artifactDir), 0o700);
+		chmodSync(artifactDir, 0o700);
 		writeFileSync(join(artifactDir, "kernel-state.dill"), "payload");
 		writeFileSync(join(artifactDir, "kernel-state.json"), "{}");
 		writeFileSync(join(artifactDir, "scheduled-jobs.json"), '{"jobs":[],"dispatches":[]}\n');
@@ -45,6 +48,9 @@ describe("deleteSessionFile removes the session artifact directory", () => {
 
 		const artifactDir = join(root, "session-artifacts", sessionId);
 		mkdirSync(artifactDir, { recursive: true });
+		// Post-hardening contract: artifact storage is owner-private.
+		chmodSync(dirname(artifactDir), 0o700);
+		chmodSync(artifactDir, 0o700);
 		writeFileSync(join(artifactDir, "kernel-state.dill"), "payload");
 		let wasSessionRemovedBeforeCallback = false;
 		let wereArtifactsPresentDuringCallback = false;
