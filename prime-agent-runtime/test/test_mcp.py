@@ -712,6 +712,41 @@ class McpRegistryTest(unittest.TestCase):
         run(scenario())
 
 
+    def test_removed_server_generation_is_closed_on_next_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "stdio_server.py"
+            pid_file = Path(tmp) / "stdio.pid"
+            fixture.write_text(_STDIO_FIXTURE)
+            config = {
+                "type": "stdio",
+                "command": sys.executable,
+                "args": [str(fixture)],
+                "cwd": str(fixture.parent),
+                "env": {"FIXTURE_PID_FILE": str(pid_file)},
+                "credentialSource": "acp",
+            }
+
+            async def scenario():
+                with mock.patch.object(mcp, "_config", new=mock.AsyncMock(return_value=config)):
+                    await mcp._registry.tools("svc")
+                pid = int(pid_file.read_text())
+                os.kill(pid, 0)
+
+                async def removed_config(_server):
+                    raise KeyError("MCP server 'svc' is not declared in user settings")
+
+                with mock.patch.object(mcp, "_config", new=removed_config):
+                    with self.assertRaises(KeyError):
+                        await mcp._registry.get("svc")
+                return pid
+
+            pid = run(scenario())
+        # The retired generation is dropped and its stdio child reaped, not
+        # leaked until kernel shutdown.
+        self.assertNotIn("svc", mcp._registry._generations)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
     def test_call_timeout_retires_generation(self):
         class Slow(FakeSession):
             async def call_tool(self, name, arguments):

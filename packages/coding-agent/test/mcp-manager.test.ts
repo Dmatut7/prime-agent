@@ -189,6 +189,24 @@ describe("McpManager", () => {
 		expect(getOAuthProvider("mcp:acme")).toBeDefined();
 	});
 
+	it("reports user servers removed or force-disabled since the previous refresh", () => {
+		let servers: Record<string, McpServerConfig> = {
+			acme: { type: "stdio", command: "acme-mcp" },
+			bolt: { type: "http", url: "https://mcp.bolt.test/mcp" },
+		};
+		const manager = new McpManager({ authStorage, getUserServers: () => servers });
+		expect(manager.refresh()).toEqual([]);
+
+		servers = { bolt: { type: "http", url: "https://mcp.bolt.test/mcp" } };
+		expect(manager.refresh()).toEqual(["acme"]);
+
+		servers = { bolt: { type: "http", url: "https://mcp.bolt.test/mcp", enabled: false } };
+		expect(manager.refresh()).toEqual(["bolt"]);
+
+		// Already-retired servers are not reported again.
+		expect(manager.refresh()).toEqual([]);
+	});
+
 	it("keeps the built-in provider when a user server uses a reserved catalog name", () => {
 		new McpManager({
 			authStorage,

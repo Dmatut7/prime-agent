@@ -381,7 +381,18 @@ class _Registry:
     async def _get_locked(self, server: str) -> _Generation:
         self._accepting_work()
         current = self._generations.get(server)
-        config = await _config(server)
+        try:
+            config = await _config(server)
+        except KeyError:
+            # The server is no longer declared in user settings: retire any live
+            # generation (a stdio child would otherwise leak until kernel exit).
+            # Transient config-read failures (RuntimeError) keep the cached
+            # generation alive on purpose.
+            if current:
+                await current.close()
+                if self._generations.get(server) is current:
+                    self._generations.pop(server, None)
+            raise
         self._accepting_work()
         if current and current.config == config and not current.closed:
             return current
