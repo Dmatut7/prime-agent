@@ -745,6 +745,13 @@ function visibleSessionActionProjection(actions: readonly QueuedSessionAction[])
 
 const IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY = "ipython_sent_agent_message";
 
+/**
+ * How many new branch entries must accumulate before a skipped or failed
+ * threshold compaction retries. Prevents re-firing every turn when the context
+ * cannot actually shrink (e.g. a single tool result larger than the usable window).
+ */
+const THRESHOLD_COMPACTION_RETRY_MIN_NEW_ENTRIES = 5;
+
 interface PersistedIpythonSentAgentMessage {
 	toolCallId: string;
 	message: KernelSentAgentMessage;
@@ -1092,6 +1099,13 @@ export class AgentSession {
 	/** One recovery attempt per overflow; "reported" dedups the failure notice. */
 	private _overflowRecovery: "idle" | "attempted" | "reported" = "idle";
 	private _continueAfterThresholdCompaction = false;
+	/**
+	 * Cooldown after a threshold compaction that skipped or failed, so an
+	 * unshrinkable context (e.g. one tool result larger than the usable window)
+	 * does not re-fire a wasted summarization attempt on every single turn.
+	 * Retry once the branch grows by a few entries or the model changes.
+	 */
+	private _thresholdCompactionCooldown: { branchEntryCount: number; modelKey: string } | undefined;
 	private _pendingRequestedCompaction: { customInstructions?: string } | undefined;
 	private _pendingRequestedRefine: { instructions?: string; global?: boolean } | undefined;
 
@@ -3015,6 +3029,7 @@ export class AgentSession {
 				const preparation = prepareCompaction(
 					this.sessionManager.getBranch(),
 					this.settingsManager.getCompactionSettings(),
+					this.model?.contextWindow,
 				);
 				if (!preparation) {
 					const lastEntry = this.sessionManager.getBranch().at(-1);
@@ -7488,6 +7503,8 @@ export class AgentSession {
 				customInstructions,
 			});
 			didCompact = true;
+			// Manual compaction restructures the context; drop any stale threshold cooldown.
+			this._thresholdCompactionCooldown = undefined;
 			// A manual compaction satisfies any pending model request; on failure the
 			// request stays scheduled for the next turn boundary.
 			this._pendingRequestedCompaction = undefined;
@@ -7544,8 +7561,12 @@ export class AgentSession {
 		const { model, apiKey, headers, customInstructions, signal } = options;
 		const pathEntries = this.sessionManager.getBranch();
 		const settings = this.settingsManager.getCompactionSettings();
+		// Pin the branch position for the duration of the summarization call. If
+		// the user navigates the tree while the summary is being generated, the
+		// resulting entry still attaches to the branch it summarized.
+		const compactionLeafId = this.sessionManager.getLeafId();
 
-		const preparation = prepareCompaction(pathEntries, settings);
+		const preparation = prepareCompaction(pathEntries, settings, model.contextWindow);
 		if (!preparation) {
 			const lastEntry = pathEntries[pathEntries.length - 1];
 			if (lastEntry?.type === "compaction") {
@@ -7591,6 +7612,7 @@ export class AgentSession {
 			details,
 			fromExtension,
 			customInstructions,
+			compactionLeafId ?? undefined,
 		);
 		const newEntries = this.sessionManager.getEntries();
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
@@ -8543,6 +8565,7 @@ export class AgentSession {
 		const contextTokens = this._getThresholdContextTokens(assistantMessage, compactionTimestamp);
 		if (contextTokens === undefined) return false;
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
+			if (this._isThresholdCompactionCoolingDown(contextWindow)) return false;
 			if (queueAutonomousContinuation && this._queueGoalContinuationForThresholdCompaction(assistantMessage)) {
 				this._continueAfterThresholdCompaction = true;
 			} else if (
@@ -8554,6 +8577,38 @@ export class AgentSession {
 			return await this._runAutoCompaction("threshold", false);
 		}
 		return false;
+	}
+
+	private _currentModelKey(): string {
+		return this.model ? `${this.model.provider}/${this.model.id}` : "";
+	}
+
+	/**
+	 * True while a skipped/failed threshold compaction is still cooling down.
+	 * The cooldown lifts once the branch grows by a few entries (new material to
+	 * summarize) or the model changes (different window, so the attempt that
+	 * failed may now succeed).
+	 */
+	private _isThresholdCompactionCoolingDown(contextWindow: number): boolean {
+		const cooldown = this._thresholdCompactionCooldown;
+		if (!cooldown) return false;
+		if (cooldown.modelKey !== this._currentModelKey() || contextWindow <= 0) {
+			this._thresholdCompactionCooldown = undefined;
+			return false;
+		}
+		const branch = this.sessionManager.getBranch();
+		if (branch.length >= cooldown.branchEntryCount + THRESHOLD_COMPACTION_RETRY_MIN_NEW_ENTRIES) {
+			this._thresholdCompactionCooldown = undefined;
+			return false;
+		}
+		return true;
+	}
+
+	private _armThresholdCompactionCooldown(): void {
+		this._thresholdCompactionCooldown = {
+			branchEntryCount: this.sessionManager.getBranch().length,
+			modelKey: this._currentModelKey(),
+		};
 	}
 
 	/**
@@ -8661,6 +8716,7 @@ export class AgentSession {
 					reason === "threshold" && shouldContinueAfterCompaction,
 					queuedAutonomousContinuationsForThisCompaction,
 				);
+				if (reason === "threshold") this._armThresholdCompactionCooldown();
 				resumeAfterFailure();
 				return false;
 			}
@@ -8672,6 +8728,9 @@ export class AgentSession {
 				customInstructions,
 				signal: this._autoCompactionAbortController.signal,
 			});
+			// A successful compaction restructures the context; any earlier
+			// skip/failure cooldown no longer reflects reality.
+			this._thresholdCompactionCooldown = undefined;
 
 			this._emit({
 				type: "compaction_end",
@@ -8731,6 +8790,7 @@ export class AgentSession {
 						: `Auto-compaction skipped: ${errorMessage}`,
 					{ errorSeverity: "warning", customInstructions },
 				);
+				if (reason === "threshold") this._armThresholdCompactionCooldown();
 				resumeAfterFailure();
 				return false;
 			}
@@ -8744,6 +8804,7 @@ export class AgentSession {
 						: `Auto-compaction failed: ${errorMessage}`,
 				{ customInstructions },
 			);
+			if (reason === "threshold") this._armThresholdCompactionCooldown();
 			resumeAfterFailure();
 			return false;
 		} finally {
