@@ -500,6 +500,18 @@ describe("StdinBuffer", () => {
 			assert.deepStrictEqual(emittedSequences, []);
 		});
 
+		it("discards paste and forwards Ctrl+C as interrupt", () => {
+			processInput("\x1b[200~hello");
+			processInput("\x03");
+
+			assert.deepStrictEqual(emittedPaste, []);
+			assert.deepStrictEqual(emittedSequences, ["\x03"]);
+			assert.strictEqual(buffer.isPasteMode(), false);
+
+			processInput("x");
+			assert.deepStrictEqual(emittedSequences, ["\x03", "x"]);
+		});
+
 		it("aborts in-flight paste so a later 201~ does not emit into the new session", () => {
 			processInput("\x1b[200~hello");
 			assert.strictEqual(buffer.isPasteMode(), true);

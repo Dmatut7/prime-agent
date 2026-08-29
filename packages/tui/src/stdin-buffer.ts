@@ -288,9 +288,21 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			return;
 		}
 
-		if (this.pasteMode && isImmediatePasteEscapeAbort(str)) {
-			this.discardPasteMode();
-			return;
+		if (this.pasteMode) {
+			const interruptAt = str.indexOf("\x03");
+			if (interruptAt !== -1) {
+				this.discardPasteMode();
+				this.emitDataSequence("\x03");
+				const remaining = str.slice(interruptAt + 1);
+				if (remaining.length > 0) {
+					this.process(remaining);
+				}
+				return;
+			}
+			if (isImmediatePasteEscapeAbort(str)) {
+				this.discardPasteMode();
+				return;
+			}
 		}
 
 		this.buffer += str;
