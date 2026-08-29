@@ -4,6 +4,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import { DEFAULT_EXTENSION_HANDLER_TIMEOUT_MS } from "./extensions/timeout.js";
 
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
@@ -153,6 +154,8 @@ export interface Settings {
 	mcpServers?: Record<string, McpServerConfig>; // User-declared MCP servers (name → config); built-ins are in the ai/mcp catalog
 	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
 	extensions?: string[]; // Array of local extension file paths or directories
+	/** Per-handler / factory timeout in ms. Default 30000; 0 disables the wall-clock timeout. */
+	extensionHandlerTimeoutMs?: number;
 	skills?: string[]; // Array of local skill file paths or directories
 	prompts?: string[]; // Array of local prompt template paths or directories
 	themes?: string[]; // Array of local theme file paths or directories
@@ -1006,6 +1009,15 @@ export class SettingsManager {
 
 	getExtensionPaths(): string[] {
 		return [...(this.settings.extensions ?? [])];
+	}
+
+	getExtensionHandlerTimeoutMs(): number {
+		const value = this.settings.extensionHandlerTimeoutMs;
+		if (value === 0) return 0;
+		if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+			return Math.floor(value);
+		}
+		return DEFAULT_EXTENSION_HANDLER_TIMEOUT_MS;
 	}
 
 	setExtensionPaths(paths: string[]): void {

@@ -11,6 +11,12 @@ import type { KeybindingsConfig } from "../keybindings.js";
 import type { ModelRegistry } from "../model-registry.js";
 import type { SessionManager } from "../session-manager.js";
 import type { BuildSystemPromptOptions } from "../system-prompt.js";
+import {
+	awaitWithTimeout,
+	DEFAULT_EXTENSION_HANDLER_TIMEOUT_MS,
+	ExtensionAbortedError,
+	ExtensionTimeoutError,
+} from "./timeout.js";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -258,6 +264,7 @@ export class ExtensionRunner {
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
+	private readonly handlerTimeoutMs: number;
 
 	constructor(
 		extensions: Extension[],
@@ -265,6 +272,7 @@ export class ExtensionRunner {
 		cwd: string,
 		sessionManager: SessionManager,
 		modelRegistry: ModelRegistry,
+		options?: { handlerTimeoutMs?: number },
 	) {
 		this.extensions = extensions;
 		this.runtime = runtime;
@@ -272,6 +280,7 @@ export class ExtensionRunner {
 		this.cwd = cwd;
 		this.sessionManager = sessionManager;
 		this.modelRegistry = modelRegistry;
+		this.handlerTimeoutMs = options?.handlerTimeoutMs ?? DEFAULT_EXTENSION_HANDLER_TIMEOUT_MS;
 	}
 
 	bindCore(
@@ -494,6 +503,65 @@ export class ExtensionRunner {
 		}
 	}
 
+	/**
+	 * Await one handler with a liveness timeout. Errors are isolated unless
+	 * `isolateErrors` is false (`tool_call` keeps fail-safe throw semantics).
+	 * Timeout skips the handler (or fail-safe-blocks for tool_call). Abort
+	 * unblocks without a user-visible error so interrupt stays quiet.
+	 */
+	private async invokeHandler(
+		ext: Extension,
+		eventType: string,
+		handler: (event: unknown, ctx: ExtensionContext) => unknown,
+		event: unknown,
+		ctx: ExtensionContext,
+		isolateErrors: boolean,
+	): Promise<{ ok: true; value: unknown } | { ok: false; timedOut: boolean; aborted: boolean }> {
+		try {
+			const value = await awaitWithTimeout(Promise.resolve(handler(event, ctx)), {
+				timeoutMs: this.handlerTimeoutMs,
+				signal: ctx.signal,
+				label: eventType,
+			});
+			return { ok: true, value };
+		} catch (err) {
+			if (err instanceof ExtensionAbortedError) {
+				return { ok: false, timedOut: false, aborted: true };
+			}
+			const timedOut = err instanceof ExtensionTimeoutError;
+			const message = err instanceof Error ? err.message : String(err);
+			const stack = err instanceof Error ? err.stack : undefined;
+			let error = message;
+			if (timedOut) {
+				error =
+					eventType === "tool_call"
+						? `${message}; blocking tool (fail-safe)`
+						: `${message}; skipped so the session stays live`;
+			}
+			this.emitError({
+				extensionPath: ext.path,
+				event: eventType,
+				error,
+				stack: timedOut ? undefined : stack,
+			});
+			if (!isolateErrors && !timedOut) {
+				throw err;
+			}
+			return { ok: false, timedOut, aborted: false };
+		}
+	}
+
+	private async callHandler(
+		ext: Extension,
+		eventType: string,
+		handler: (event: unknown, ctx: ExtensionContext) => unknown,
+		event: unknown,
+		ctx: ExtensionContext,
+	): Promise<unknown> {
+		const invoked = await this.invokeHandler(ext, eventType, handler, event, ctx, true);
+		return invoked.ok ? invoked.value : undefined;
+	}
+
 	hasHandlers(eventType: string): boolean {
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(eventType);
@@ -692,24 +760,13 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				try {
-					const handlerResult = await handler(event, ctx);
+				const handlerResult = await this.callHandler(ext, event.type, handler, event, ctx);
 
-					if (this.isSessionBeforeEvent(event) && handlerResult) {
-						result = handlerResult as SessionBeforeEventResult;
-						if (("cancel" in result && result.cancel) || ("skip" in result && result.skip)) {
-							return result as RunnerEmitResult<TEvent>;
-						}
+				if (this.isSessionBeforeEvent(event) && handlerResult) {
+					result = handlerResult as SessionBeforeEventResult;
+					if (("cancel" in result && result.cancel) || ("skip" in result && result.skip)) {
+						return result as RunnerEmitResult<TEvent>;
 					}
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: event.type,
-						error: message,
-						stack,
-					});
 				}
 			}
 		}
@@ -727,32 +784,23 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				try {
-					const currentEvent: MessageEndEvent = { ...event, message: currentMessage };
-					const handlerResult = (await handler(currentEvent, ctx)) as MessageEndEventResult | undefined;
-					if (!handlerResult?.message) continue;
+				const currentEvent: MessageEndEvent = { ...event, message: currentMessage };
+				const handlerResult = (await this.callHandler(ext, "message_end", handler, currentEvent, ctx)) as
+					| MessageEndEventResult
+					| undefined;
+				if (!handlerResult?.message) continue;
 
-					if (handlerResult.message.role !== currentMessage.role) {
-						this.emitError({
-							extensionPath: ext.path,
-							event: "message_end",
-							error: "message_end handlers must return a message with the same role",
-						});
-						continue;
-					}
-
-					currentMessage = handlerResult.message;
-					modified = true;
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
+				if (handlerResult.message.role !== currentMessage.role) {
 					this.emitError({
 						extensionPath: ext.path,
 						event: "message_end",
-						error: message,
-						stack,
+						error: "message_end handlers must return a message with the same role",
 					});
+					continue;
 				}
+
+				currentMessage = handlerResult.message;
+				modified = true;
 			}
 		}
 
@@ -769,31 +817,22 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				try {
-					const handlerResult = (await handler(currentEvent, ctx)) as ToolResultEventResult | undefined;
-					if (!handlerResult) continue;
+				const handlerResult = (await this.callHandler(ext, "tool_result", handler, currentEvent, ctx)) as
+					| ToolResultEventResult
+					| undefined;
+				if (!handlerResult) continue;
 
-					if (handlerResult.content !== undefined) {
-						currentEvent.content = handlerResult.content;
-						modified = true;
-					}
-					if (handlerResult.details !== undefined) {
-						currentEvent.details = handlerResult.details;
-						modified = true;
-					}
-					if (handlerResult.isError !== undefined) {
-						currentEvent.isError = handlerResult.isError;
-						modified = true;
-					}
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "tool_result",
-						error: message,
-						stack,
-					});
+				if (handlerResult.content !== undefined) {
+					currentEvent.content = handlerResult.content;
+					modified = true;
+				}
+				if (handlerResult.details !== undefined) {
+					currentEvent.details = handlerResult.details;
+					modified = true;
+				}
+				if (handlerResult.isError !== undefined) {
+					currentEvent.isError = handlerResult.isError;
+					modified = true;
 				}
 			}
 		}
@@ -818,10 +857,21 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				const handlerResult = await handler(event, ctx);
+				const invoked = await this.invokeHandler(ext, "tool_call", handler, event, ctx, false);
+				if (!invoked.ok) {
+					if (invoked.timedOut || invoked.aborted) {
+						return {
+							block: true,
+							reason: invoked.timedOut
+								? `tool_call handler timed out after ${this.handlerTimeoutMs}ms`
+								: "tool_call handler aborted",
+						};
+					}
+					continue;
+				}
 
-				if (handlerResult) {
-					result = handlerResult as ToolCallEventResult;
+				if (invoked.value) {
+					result = invoked.value as ToolCallEventResult;
 					if (result.block) {
 						return result;
 					}
@@ -840,20 +890,9 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				try {
-					const handlerResult = await handler(event, ctx);
-					if (handlerResult) {
-						return handlerResult as UserBashEventResult;
-					}
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "user_bash",
-						error: message,
-						stack,
-					});
+				const handlerResult = await this.callHandler(ext, "user_bash", handler, event, ctx);
+				if (handlerResult) {
+					return handlerResult as UserBashEventResult;
 				}
 			}
 		}
@@ -870,22 +909,11 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				try {
-					const event: ContextEvent = { type: "context", messages: currentMessages };
-					const handlerResult = await handler(event, ctx);
+				const event: ContextEvent = { type: "context", messages: currentMessages };
+				const handlerResult = await this.callHandler(ext, "context", handler, event, ctx);
 
-					if (handlerResult && (handlerResult as ContextEventResult).messages) {
-						currentMessages = (handlerResult as ContextEventResult).messages!;
-					}
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "context",
-						error: message,
-						stack,
-					});
+				if (handlerResult && (handlerResult as ContextEventResult).messages) {
+					currentMessages = (handlerResult as ContextEventResult).messages!;
 				}
 			}
 		}
@@ -902,24 +930,13 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				try {
-					const event: BeforeProviderRequestEvent = {
-						type: "before_provider_request",
-						payload: currentPayload,
-					};
-					const handlerResult = await handler(event, ctx);
-					if (handlerResult !== undefined) {
-						currentPayload = handlerResult;
-					}
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "before_provider_request",
-						error: message,
-						stack,
-					});
+				const event: BeforeProviderRequestEvent = {
+					type: "before_provider_request",
+					payload: currentPayload,
+				};
+				const handlerResult = await this.callHandler(ext, "before_provider_request", handler, event, ctx);
+				if (handlerResult !== undefined) {
+					currentPayload = handlerResult;
 				}
 			}
 		}
@@ -950,35 +967,24 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				try {
-					const event: BeforeAgentStartEvent = {
-						type: "before_agent_start",
-						prompt,
-						images,
-						systemPrompt: currentSystemPrompt,
-						systemPromptOptions,
-					};
-					const handlerResult = await handler(event, ctx);
+				const event: BeforeAgentStartEvent = {
+					type: "before_agent_start",
+					prompt,
+					images,
+					systemPrompt: currentSystemPrompt,
+					systemPromptOptions,
+				};
+				const handlerResult = await this.callHandler(ext, "before_agent_start", handler, event, ctx);
 
-					if (handlerResult) {
-						const result = handlerResult as BeforeAgentStartEventResult;
-						if (result.message) {
-							messages.push(result.message);
-						}
-						if (result.systemPrompt !== undefined) {
-							currentSystemPrompt = result.systemPrompt;
-							systemPromptModified = true;
-						}
+				if (handlerResult) {
+					const result = handlerResult as BeforeAgentStartEventResult;
+					if (result.message) {
+						messages.push(result.message);
 					}
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "before_agent_start",
-						error: message,
-						stack,
-					});
+					if (result.systemPrompt !== undefined) {
+						currentSystemPrompt = result.systemPrompt;
+						systemPromptModified = true;
+					}
 				}
 			}
 		}
@@ -1011,29 +1017,18 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				try {
-					const event: ResourcesDiscoverEvent = { type: "resources_discover", cwd, reason };
-					const handlerResult = await handler(event, ctx);
-					const result = handlerResult as ResourcesDiscoverResult | undefined;
+				const event: ResourcesDiscoverEvent = { type: "resources_discover", cwd, reason };
+				const handlerResult = await this.callHandler(ext, "resources_discover", handler, event, ctx);
+				const result = handlerResult as ResourcesDiscoverResult | undefined;
 
-					if (result?.skillPaths?.length) {
-						skillPaths.push(...result.skillPaths.map((path) => ({ path, extensionPath: ext.path })));
-					}
-					if (result?.promptPaths?.length) {
-						promptPaths.push(...result.promptPaths.map((path) => ({ path, extensionPath: ext.path })));
-					}
-					if (result?.themePaths?.length) {
-						themePaths.push(...result.themePaths.map((path) => ({ path, extensionPath: ext.path })));
-					}
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "resources_discover",
-						error: message,
-						stack,
-					});
+				if (result?.skillPaths?.length) {
+					skillPaths.push(...result.skillPaths.map((path) => ({ path, extensionPath: ext.path })));
+				}
+				if (result?.promptPaths?.length) {
+					promptPaths.push(...result.promptPaths.map((path) => ({ path, extensionPath: ext.path })));
+				}
+				if (result?.themePaths?.length) {
+					themePaths.push(...result.themePaths.map((path) => ({ path, extensionPath: ext.path })));
 				}
 			}
 		}
@@ -1049,21 +1044,12 @@ export class ExtensionRunner {
 
 		for (const ext of this.extensions) {
 			for (const handler of ext.handlers.get("input") ?? []) {
-				try {
-					const event: InputEvent = { type: "input", text: currentText, images: currentImages, source };
-					const result = (await handler(event, ctx)) as InputEventResult | undefined;
-					if (result?.action === "handled") return result;
-					if (result?.action === "transform") {
-						currentText = result.text;
-						currentImages = result.images ?? currentImages;
-					}
-				} catch (err) {
-					this.emitError({
-						extensionPath: ext.path,
-						event: "input",
-						error: err instanceof Error ? err.message : String(err),
-						stack: err instanceof Error ? err.stack : undefined,
-					});
+				const event: InputEvent = { type: "input", text: currentText, images: currentImages, source };
+				const result = (await this.callHandler(ext, "input", handler, event, ctx)) as InputEventResult | undefined;
+				if (result?.action === "handled") return result;
+				if (result?.action === "transform") {
+					currentText = result.text;
+					currentImages = result.images ?? currentImages;
 				}
 			}
 		}

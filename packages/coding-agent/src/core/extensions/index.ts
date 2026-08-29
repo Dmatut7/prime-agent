@@ -24,6 +24,12 @@ export type {
 	SwitchSessionHandler,
 } from "./runner.js";
 export { ExtensionRunner } from "./runner.js";
+export {
+	awaitWithTimeout,
+	DEFAULT_EXTENSION_HANDLER_TIMEOUT_MS,
+	ExtensionAbortedError,
+	ExtensionTimeoutError,
+} from "./timeout.js";
 export type {
 	AfterProviderResponseEvent,
 	AgentEndEvent,

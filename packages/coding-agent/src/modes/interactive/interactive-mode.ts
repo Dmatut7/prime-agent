@@ -119,6 +119,7 @@ import { parseCommandArgs } from "../../core/prompt-templates.js";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.js";
 import { SessionImportFileNotFoundError } from "../../core/session-import-errors.js";
 import { resolveSessionPath, SessionSelectorError, SessionSelectorNotFoundError } from "../../core/session-resolver.js";
+import { confirmShareIfSecrets, createShareTempHtmlFile } from "../../core/share-session.js";
 import { parseSkillBlock } from "../../core/skill-blocks.js";
 import {
 	BUILTIN_SLASH_COMMANDS,
@@ -9105,11 +9106,24 @@ export class InteractiveMode {
 			return;
 		}
 
-		// Export to a temp file
-		const tmpFile = path.join(os.tmpdir(), "session.html");
+		const [messages, systemPrompt] = await Promise.all([
+			this.agentConnection.getMessages(),
+			this.agentConnection.getSystemPrompt(),
+		]);
+		const confirmed = await confirmShareIfSecrets(JSON.stringify({ messages, systemPrompt }), (title, message) =>
+			this.showExtensionConfirm(title, message),
+		);
+		if (!confirmed) {
+			this.showStatus("Share cancelled");
+			return;
+		}
+
+		const temp = createShareTempHtmlFile();
+		const tmpFile = temp.path;
 		try {
 			await this.agentConnection.exportToHtml(tmpFile);
 		} catch (error: unknown) {
+			fs.rmSync(temp.directory, { recursive: true, force: true });
 			this.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
 			return;
 		}
@@ -9127,7 +9141,7 @@ export class InteractiveMode {
 			this.editorContainer.addChild(this.editor);
 			this.ui.setFocus(this.editor);
 			try {
-				fs.unlinkSync(tmpFile);
+				fs.rmSync(temp.directory, { recursive: true, force: true });
 			} catch {
 				// Ignore cleanup errors
 			}

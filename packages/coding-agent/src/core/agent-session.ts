@@ -9211,6 +9211,7 @@ export class AgentSession {
 			this._cwd,
 			this.sessionManager,
 			this._modelRegistry,
+			{ handlerTimeoutMs: this.settingsManager.getExtensionHandlerTimeoutMs() },
 		);
 		if (this._extensionRunnerRef) {
 			this._extensionRunnerRef.current = this._extensionRunner;
