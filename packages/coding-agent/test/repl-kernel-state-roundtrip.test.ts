@@ -1,9 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ReplKernelManager } from "../src/core/kernel/index.js";
+import type { RestoreResult } from "../src/core/kernel/state-snapshot.js";
+import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 
 function resolveReplPython(): string | null {
 	const candidates = [
@@ -43,6 +45,12 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 			cwd: dir,
 			snapshot: { path: snapshotPath, manifestPath },
 		});
+	}
+
+	/** Build a snapshot artifact by running a dill script in the kernel python. */
+	function writeDillPayload(script: string): void {
+		const build = spawnSync(python as string, ["-c", script], { encoding: "utf8" });
+		expect(build.status).toBe(0);
 	}
 
 	it("saves picklable names, reports unpicklable ones, then revives them in a fresh runtime", async () => {
@@ -190,5 +198,157 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 			rmSync(autoDir, { recursive: true, force: true });
 		}
+	}, 60_000);
+
+	it("keeps a corrupted snapshot on disk when the whole restore fails", async () => {
+		const corruptDir = mkdtempSync(join(tmpdir(), "prime-agent-repl-restore-corrupt-"));
+		const snapPath = join(corruptDir, "corrupt.dill");
+		const manifestPath = join(corruptDir, "corrupt.json");
+		writeDillPayload(
+			[
+				"import dill",
+				"payload = {'x': dill.dumps(1)}",
+				`with open(${JSON.stringify(snapPath)}, 'wb') as fh:`,
+				"    dill.dump(payload, fh)",
+			].join("\n"),
+		);
+		// Simulate a torn write: truncate the payload in place.
+		const goodBytes = readFileSync(snapPath);
+		writeFileSync(snapPath, goodBytes.subarray(0, Math.floor(goodBytes.length / 2)));
+		const corrupted = readFileSync(snapPath);
+
+		const manager = new ReplKernelManager({
+			python: python as string,
+			cwd: corruptDir,
+			snapshot: { path: snapPath, manifestPath, debounceMs: 50 },
+		});
+		try {
+			// Failure is visible: the restore resolves null instead of silently continuing.
+			await expect(manager.restoreState()).resolves.toBeNull();
+
+			const cell = await manager.execute("y = 2");
+			expect(cell.status).toBe("ok");
+			// The debounced auto-snapshot must not replace the corrupted-but-partial file.
+			await new Promise((resolve) => globalThis.setTimeout(resolve, 500));
+			expect(readFileSync(snapPath).equals(corrupted)).toBe(true);
+			expect(existsSync(manifestPath)).toBe(false);
+
+			// Explicit snapshots also refuse while the failure stands.
+			await expect(manager.snapshotState()).resolves.toBeNull();
+			expect(readFileSync(snapPath).equals(corrupted)).toBe(true);
+		} finally {
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+		}
+		// The dispose flush must not have overwritten it either.
+		expect(readFileSync(snapPath).equals(corrupted)).toBe(true);
+		expect(existsSync(manifestPath)).toBe(false);
+		rmSync(corruptDir, { recursive: true, force: true });
+	}, 60_000);
+
+	it("keeps the on-disk snapshot when individual names fail to restore", async () => {
+		const partialDir = mkdtempSync(join(tmpdir(), "prime-agent-repl-restore-partial-"));
+		const snapPath = join(partialDir, "partial.dill");
+		const manifestPath = join(partialDir, "partial.json");
+		writeDillPayload(
+			[
+				"import dill",
+				"good = dill.dumps(1)",
+				"payload = {'good': good, 'bad': good[: max(1, len(good) // 2)]}",
+				`with open(${JSON.stringify(snapPath)}, 'wb') as fh:`,
+				"    dill.dump(payload, fh)",
+			].join("\n"),
+		);
+		const before = readFileSync(snapPath);
+
+		const manager = new ReplKernelManager({
+			python: python as string,
+			cwd: partialDir,
+			snapshot: { path: snapPath, manifestPath, debounceMs: 50 },
+		});
+		try {
+			const restore = await manager.restoreState();
+			expect(restore?.restored).toEqual(["good"]);
+			expect(restore?.failed.map((f) => f.name)).toEqual(["bad"]);
+
+			const cell = await manager.execute("z = 3");
+			expect(cell.status).toBe("ok");
+			await new Promise((resolve) => globalThis.setTimeout(resolve, 500));
+			expect(readFileSync(snapPath).equals(before)).toBe(true);
+
+			await expect(manager.snapshotState()).resolves.toBeNull();
+			expect(readFileSync(snapPath).equals(before)).toBe(true);
+		} finally {
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+		}
+		expect(readFileSync(snapPath).equals(before)).toBe(true);
+		rmSync(partialDir, { recursive: true, force: true });
+	}, 60_000);
+
+	it("auto-snapshots again after a fully successful restore", async () => {
+		const okDir = mkdtempSync(join(tmpdir(), "prime-agent-repl-restore-ok-"));
+		const snapPath = join(okDir, "ok.dill");
+		writeDillPayload(
+			[
+				"import dill",
+				"payload = {'x': dill.dumps(1)}",
+				`with open(${JSON.stringify(snapPath)}, 'wb') as fh:`,
+				"    dill.dump(payload, fh)",
+			].join("\n"),
+		);
+		const before = readFileSync(snapPath);
+
+		const manager = new ReplKernelManager({
+			python: python as string,
+			cwd: okDir,
+			snapshot: { path: snapPath, manifestPath: join(okDir, "ok.json"), debounceMs: 50 },
+		});
+		try {
+			const restore = await manager.restoreState();
+			expect(restore?.restored).toEqual(["x"]);
+			expect(restore?.failed).toEqual([]);
+
+			await manager.execute("y = 2");
+			await expect.poll(() => readFileSync(snapPath).equals(before), { timeout: 10_000 }).toBe(false);
+		} finally {
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+			rmSync(okDir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
+	it("surfaces a failed whole restore as a visible error via the provisioner", async () => {
+		const visDir = mkdtempSync(join(tmpdir(), "prime-agent-repl-restore-visible-"));
+		const snapPath = join(visDir, "kernel-state.dill");
+		writeDillPayload(
+			[
+				"import dill",
+				"payload = {'x': dill.dumps(1)}",
+				`with open(${JSON.stringify(snapPath)}, 'wb') as fh:`,
+				"    dill.dump(payload, fh)",
+			].join("\n"),
+		);
+		const goodBytes = readFileSync(snapPath);
+		writeFileSync(snapPath, goodBytes.subarray(0, Math.floor(goodBytes.length / 2)));
+		const corrupted = readFileSync(snapPath);
+
+		const restores: RestoreResult[] = [];
+		const provisioner = new IpythonKernelProvisioner(visDir, {
+			python: python as string,
+			snapshotDir: visDir,
+			onRestore: (result) => restores.push(result),
+		});
+		try {
+			await provisioner.ensure();
+			expect(restores).toHaveLength(1);
+			expect(restores[0]?.restored).toEqual([]);
+			expect(restores[0]?.failed).toEqual([]);
+			expect(restores[0]?.error).toContain("could not be restored");
+			expect(provisioner.lastRestore?.error).toContain("could not be restored");
+		} finally {
+			await provisioner.dispose();
+		}
+		// Bootstrap and the dispose flush ran on top of the failed restore: the file survives.
+		expect(readFileSync(snapPath).equals(corrupted)).toBe(true);
+		expect(existsSync(join(visDir, "kernel-state.json"))).toBe(false);
+		rmSync(visDir, { recursive: true, force: true });
 	}, 60_000);
 });

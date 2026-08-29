@@ -5,6 +5,10 @@ import type { RestoreResult, SnapshotResult } from "./state-snapshot.js";
 export const DEFAULT_MAX_OUTPUT_CHARS = 65536;
 export const HOST_REQUEST_SHUTDOWN_TIMEOUT_MS = 5000;
 export const KERNEL_SHUTDOWN_TIMEOUT_MS = 5000;
+/** How long a SIGTERM'd kernel gets to exit before escalating to SIGKILL. */
+export const KERNEL_TERM_GRACE_MS = 2000;
+/** How long to wait for a SIGKILL'd kernel's confirmed exit. */
+export const KERNEL_KILL_GRACE_MS = 2000;
 export const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
 export const SNAPSHOT_EXECUTION_TIMEOUT_MS = 5000;
 export const KERNEL_ABORT_GRACE_MS = 1000;

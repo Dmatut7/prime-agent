@@ -30,7 +30,13 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .bash import _kill_live_handles
+from .bash import (
+    _forget_cell,
+    _kill_cell_handles,
+    _kill_live_handles,
+    _reset_current_cell,
+    _set_current_cell,
+)
 
 PROTOCOL_VERSION = 3
 
@@ -347,6 +353,7 @@ def _request_interrupt(target: str | None) -> None:
     Interrupts for finished or unknown requests are dropped.
     """
     global _sigint_target
+    victim: str | None = None
     with _interrupt_lock:
         task = _active["task"]
         rid = _active["rid"]
@@ -355,8 +362,10 @@ def _request_interrupt(target: str | None) -> None:
             # either way the rid still owns the interrupt (parking here would
             # leak it onto the next request); the handler decides delivery.
             _sigint_target = rid
+            victim = rid
         elif _finishing_rid is not None and (target is None or target == _finishing_rid):
             _sigint_target = _finishing_rid
+            victim = _finishing_rid
         elif target is not None:
             if target in _inflight:
                 _pending_interrupts["ids"].add(target)
@@ -366,6 +375,11 @@ def _request_interrupt(target: str | None) -> None:
             return
         else:
             return
+    # One-shot parity: an interrupted cell must not leave its commands running,
+    # so TERM/KILL every bash handle it spawned (background handles included).
+    # Outside _interrupt_lock: kill() takes bash's own locks.
+    if victim is not None:
+        _kill_cell_handles(victim)
     # SIGINT must land on the main thread, where cells execute. Windows has no
     # signal.pthread_kill: fall back to cancelling the active task on the loop
     # (sync-blocked cells and the finishing repr/drain cannot be broken there;
@@ -420,6 +434,9 @@ def _finish_locked(rid: str) -> None:
     _pending_interrupts["ids"].discard(rid)
     if not _inflight:
         _pending_interrupts["any"] = False
+    # Interrupts can no longer target this request, so its bash handles stop
+    # being interrupt-killable (they keep running as background handles).
+    _forget_cell(rid)
 
 
 def _finish_request(rid: str) -> None:
@@ -539,8 +556,10 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     _cell_counter += 1
     filename = f"<cell-{_cell_counter}>"
     # The cell task (created below) copies this context, so writes made from
-    # the cell and from asyncio tasks it spawns carry this cell's id.
+    # the cell and from asyncio tasks it spawns carry this cell's id. bash()
+    # reads its own copy to attribute spawned handles for interrupt kills.
     token = _current_cell.set(cell_id)
+    bash_token = _set_current_cell(cell_id)
     try:
         codes, has_trailing = _compile_cell(req["code"], filename)
         assert _loop is not None
@@ -570,6 +589,7 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
         _send({"event": "done", "id": cell_id, "status": status})
     finally:
         _current_cell.reset(token)
+        _reset_current_cell(bash_token)
 
 
 def _drain_output() -> None:

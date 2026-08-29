@@ -498,7 +498,17 @@ export class IpythonKernelProvisioner {
 					this.emitStartupProgress("Restoring Python state...");
 					const restore = await raceWithAbort(m.restoreState(), startupSignal);
 					if (snapshotExisted) {
-						pendingRestore = restore ?? { restored: [], failed: [], path: snapshotPathIn(snapshotDir) };
+						// restoreState() resolves null only for a real failure (corrupt payload,
+						// timeout): surface it so the model knows the saved state was not revived.
+						// The on-disk snapshot stays untouched either way.
+						pendingRestore =
+							restore ??
+							({
+								restored: [],
+								failed: [],
+								path: snapshotPathIn(snapshotDir),
+								error: "the saved snapshot exists but could not be restored (corrupt or unreadable); the kernel starts empty and the saved snapshot was kept untouched",
+							} satisfies RestoreResult);
 					}
 				}
 				this.emitStartupProgress("Preparing Python runtime...");

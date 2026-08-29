@@ -23,7 +23,9 @@ import {
 	KERNEL_ABORT_GRACE_MS,
 	KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
 	KERNEL_BUSY_REUSE_WAIT_MS,
+	KERNEL_KILL_GRACE_MS,
 	KERNEL_SHUTDOWN_TIMEOUT_MS,
+	KERNEL_TERM_GRACE_MS,
 	type KernelAttachment,
 	KernelBusyAfterInterruptError,
 	type KernelDiffDisplay,
@@ -180,6 +182,9 @@ export class ReplKernelManager {
 	private pendingRebootstrap = false;
 	/** Restore the saved namespace on that fresh start too (false when the snapshot itself is the declared culprit). */
 	private pendingRestore = false;
+	/** A restore attempt failed (whole load or individual names): the namespace is older than the
+	 * on-disk snapshot, so no snapshot (debounced, explicit, prune, or dispose flush) may overwrite it. */
+	private restoreFailed = false;
 	private rebootstrapPromise?: Promise<boolean>;
 	private teardownInFlight = 0;
 
@@ -1234,6 +1239,10 @@ export class ReplKernelManager {
 			await this.flushSnapshotForDispose();
 			if (this.startStale(generation)) return false;
 		}
+		// Free the runtime's FIFO before asking it to shut down: the queued shutdown
+		// request only runs once the active request finishes, so a busy cell would
+		// otherwise stall the graceful path all the way to the kill deadline.
+		if (this.activeExecution) void this.interrupt().catch(() => undefined);
 		// Protocol shutdown first: the runtime closes MCP servers and kills live bash() process groups a bare hard-kill would leak.
 		const protocolShutdownAvailable = this.state === "running";
 		this.state = "shutdown";
@@ -1285,12 +1294,58 @@ export class ReplKernelManager {
 			if (doneWaiterId) this.pendingDoneWaiters.delete(doneWaiterId);
 			if (this.gracefulShutdownGeneration === generation) this.gracefulShutdownGeneration = undefined;
 			if (!this.startStale(generation)) {
+				await this.terminateKernelProcess();
 				this.cleanupResources();
 				performedCleanup = true;
 			}
 		}
 
 		return performedCleanup;
+	}
+
+	/**
+	 * Bounded kill escalation for a kernel that did not exit gracefully: SIGTERM,
+	 * wait for a confirmed exit, then SIGKILL and wait again. A cell may rebind or
+	 * ignore signal handlers in-process, so TERM alone is not a guaranteed kill;
+	 * waiting on each step keeps teardown observers from racing a half-dead child.
+	 */
+	private async terminateKernelProcess(): Promise<void> {
+		const child = this.child;
+		if (!child || child.exitCode !== null || child.signalCode !== null) return;
+		try {
+			child.kill("SIGTERM");
+		} catch {
+			// The kernel has already exited.
+		}
+		if (await this.waitForChildExit(child, KERNEL_TERM_GRACE_MS)) return;
+		this.appendKernelDiagnostic(`kernel did not exit within ${KERNEL_TERM_GRACE_MS}ms of SIGTERM; sending SIGKILL`);
+		try {
+			child.kill("SIGKILL");
+		} catch {
+			// The kernel has already exited.
+		}
+		if (!(await this.waitForChildExit(child, KERNEL_KILL_GRACE_MS))) {
+			this.appendKernelDiagnostic("kernel did not exit after SIGKILL; giving up waiting");
+		}
+	}
+
+	/** Resolves true when the child exits within the timeout (already exited: true). */
+	private waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+		if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+		return new Promise<boolean>((resolve) => {
+			let settled = false;
+			const finish = (exited: boolean) => {
+				if (settled) return;
+				settled = true;
+				globalThis.clearTimeout(timer);
+				child.removeListener("exit", onExit);
+				resolve(exited);
+			};
+			const onExit = () => finish(true);
+			child.once("exit", onExit);
+			const timer = globalThis.setTimeout(() => finish(false), timeoutMs);
+			timer.unref?.();
+		});
 	}
 
 	async restart(): Promise<void> {
@@ -1343,6 +1398,15 @@ export class ReplKernelManager {
 	): Promise<SnapshotResult | null> {
 		const cfg = this.options.snapshot;
 		if (!cfg || !this.isRunning) return null;
+		// Hard guard behind every snapshot write (debounced, explicit, prune, dispose
+		// flush): a namespace never (or incompletely) revived is older than the
+		// on-disk snapshot.
+		if (this.restoreFailed || this.pendingRestore) {
+			this.appendKernelDiagnostic(
+				"state snapshot skipped: the last restore failed, so the on-disk snapshot is preserved",
+			);
+			return null;
+		}
 		try {
 			const r = await this.enqueueRequest(
 				{
@@ -1386,7 +1450,7 @@ export class ReplKernelManager {
 		return this.performRestore(false);
 	}
 
-	/** Repair restores bypass the repair gate and are bounded so a stalled kernel cannot wedge it. */
+	/** Every restore (resume and repair alike) is bounded so a stalled kernel cannot wedge it. */
 	private async performRestore(protocolRepair: boolean): Promise<RestoreResult | null> {
 		const cfg = this.options.snapshot;
 		if (!cfg) return null;
@@ -1395,21 +1459,27 @@ export class ReplKernelManager {
 				{ type: "restore", path: cfg.path },
 				"",
 				{ internal: true, protocolRepair },
-				protocolRepair ? REPAIR_STEP_TIMEOUT_MS : undefined,
+				REPAIR_STEP_TIMEOUT_MS,
 			);
 			if (r.status !== "ok" || !r.doneFields) {
+				// Whole-load failure: the namespace stayed empty; the on-disk snapshot is
+				// the only copy of the prior state and must survive untouched.
+				this.restoreFailed = true;
 				this.appendKernelDiagnostic(
 					`state restore ${r.status === "aborted" ? "timed out" : "failed"}: ${r.error?.evalue ?? r.stderr}`,
 				);
 				return null;
 			}
 			this.pendingRestore = false;
-			return {
-				restored: asStringArray(r.doneFields.restored),
-				failed: asReasonArray(r.doneFields.failed),
-				path: cfg.path,
-			};
+			const restored = asStringArray(r.doneFields.restored);
+			const failed = asReasonArray(r.doneFields.failed);
+			// A partial revive is a failure for snapshot purposes too: the namespace is
+			// missing names the on-disk snapshot still carries, so it must not overwrite it.
+			// A later fully successful restore clears the flag.
+			this.restoreFailed = failed.length > 0;
+			return { restored, failed, path: cfg.path };
 		} catch (error) {
+			this.restoreFailed = true;
 			this.appendKernelDiagnostic(`state restore error: ${errorMessage(error)}`);
 			return null;
 		}
@@ -1433,7 +1503,9 @@ export class ReplKernelManager {
 
 	private scheduleSnapshot(): void {
 		const cfg = this.options.snapshot;
-		if (!cfg) return;
+		// A namespace never (or incompletely) revived is older than the on-disk
+		// snapshot; never overwrite it.
+		if (!cfg || this.restoreFailed || this.pendingRestore) return;
 		if (this.snapshotTimer) clearTimeout(this.snapshotTimer);
 		this.snapshotTimer = globalThis.setTimeout(() => {
 			this.snapshotTimer = undefined;
@@ -1464,7 +1536,10 @@ export class ReplKernelManager {
 	private async runSnapshotFlushForDispose(): Promise<void> {
 		if (!this.options.snapshot || !this.isRunning) return;
 		// A kernel that never restored the saved namespace must not overwrite it:
-		// the on-disk snapshot is strictly fresher than this namespace.
+		// the on-disk snapshot is strictly fresher than this namespace. A FAILED
+		// restore must not write either, but it still settles the queue here —
+		// skipping the wait would let the teardown race and kill in-flight work
+		// (e.g. the lazy re-bootstrap); captureSnapshot enforces the write ban.
 		if (this.pendingRestore) return;
 		// Block new external executions so none can splice ahead of the final snapshot and stall dispose.
 		this.flushingSnapshotForDispose = true;

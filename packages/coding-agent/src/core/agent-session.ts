@@ -7603,6 +7603,9 @@ export class AgentSession {
 				`These could not be restored and must be recreated if needed: ${result.failed.map((f) => f.name).join(", ")}.`,
 			);
 		}
+		if (result.error) {
+			lines.push(`Restore failure: ${result.error}.`);
+		}
 		lines.push("</ipython_state_restored>");
 		void this.sendCustomMessage(
 			{
