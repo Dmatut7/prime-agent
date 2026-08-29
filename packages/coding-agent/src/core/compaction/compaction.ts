@@ -202,11 +202,31 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 
 /**
  * Check if compaction should trigger based on context usage.
+ *
+ * When the configured reserve consumes the whole window (or more), no sustainable
+ * threshold exists: any retained context, including a fresh summary, would sit
+ * above it again immediately and retrigger every turn. Threshold compaction is
+ * then disabled; overflow recovery remains the backstop.
  */
 export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
 	if (!settings.enabled) return false;
 	if (contextWindow <= 0) return false;
-	return contextTokens > contextWindow - settings.reserveTokens;
+	const threshold = contextWindow - settings.reserveTokens;
+	if (threshold <= 0) return false;
+	return contextTokens > threshold;
+}
+
+/**
+ * Cap keepRecentTokens so the retained slice can fit under the post-reserve
+ * threshold. An uncapped keepRecent above `contextWindow - reserveTokens` makes
+ * every compaction re-trigger on the very next turn, because the retained
+ * context already exceeds the threshold by construction.
+ */
+export function capKeepRecentTokens(settings: CompactionSettings, contextWindow?: number): number {
+	if (!contextWindow || contextWindow <= 0) return settings.keepRecentTokens;
+	const threshold = contextWindow - settings.reserveTokens;
+	if (threshold <= 0) return 0;
+	return Math.min(settings.keepRecentTokens, threshold);
 }
 /**
  * Estimate token count for a message using chars/4 heuristic.
@@ -387,12 +407,19 @@ export function findCutPoint(
 		const messageTokens = estimateTokens(entry.message);
 		accumulatedTokens += messageTokens;
 		if (accumulatedTokens >= keepRecentTokens) {
+			let nearestCut: number | undefined;
 			for (let c = 0; c < cutPoints.length; c++) {
 				if (cutPoints[c] >= i) {
-					cutIndex = cutPoints[c];
+					nearestCut = cutPoints[c];
 					break;
 				}
 			}
+			// The budget can be crossed at an entry with no cut point at or after it
+			// (typically one huge trailing tool result). Cutting at the first cut
+			// point then keeps everything and summarizes nothing, so the threshold
+			// re-fires every turn. Cut at the closest valid point before it instead:
+			// its tool results still follow, and everything older gets summarized.
+			cutIndex = nearestCut ?? cutPoints[cutPoints.length - 1];
 			break;
 		}
 	}
@@ -582,6 +609,7 @@ export interface CompactionPreparation {
 export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
+	contextWindow?: number,
 ): CompactionPreparation | undefined {
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
@@ -607,7 +635,8 @@ export function prepareCompaction(
 
 	const tokensBefore = estimateContextTokens(buildSessionContext(pathEntries).messages).tokens;
 
-	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
+	const keepRecentTokens = capKeepRecentTokens(settings, contextWindow);
+	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, keepRecentTokens);
 	const firstKeptEntry = pathEntries[cutPoint.firstKeptEntryIndex];
 	if (!firstKeptEntry?.id) {
 		return undefined; // Session needs migration

@@ -3015,6 +3015,7 @@ export class AgentSession {
 				const preparation = prepareCompaction(
 					this.sessionManager.getBranch(),
 					this.settingsManager.getCompactionSettings(),
+					this.model?.contextWindow,
 				);
 				if (!preparation) {
 					const lastEntry = this.sessionManager.getBranch().at(-1);
@@ -7497,7 +7498,7 @@ export class AgentSession {
 		const pathEntries = this.sessionManager.getBranch();
 		const settings = this.settingsManager.getCompactionSettings();
 
-		const preparation = prepareCompaction(pathEntries, settings);
+		const preparation = prepareCompaction(pathEntries, settings, model.contextWindow);
 		if (!preparation) {
 			const lastEntry = pathEntries[pathEntries.length - 1];
 			if (lastEntry?.type === "compaction") {
