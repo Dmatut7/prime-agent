@@ -47,6 +47,7 @@ const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
+const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 const CODEX_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
 
@@ -91,7 +92,71 @@ function isRetryableError(status: number, errorText: string): boolean {
 	if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
 		return true;
 	}
+	if (status >= 400 && status < 500) {
+		return false;
+	}
 	return /rate.?limit|overloaded|service.?unavailable|upstream.?connect|connection.?refused/i.test(errorText);
+}
+
+class RetryDelayCapError extends Error {
+	readonly delayMs: number;
+	readonly capMs: number;
+
+	constructor(delayMs: number, capMs: number) {
+		super(`Requested retry delay ${delayMs}ms exceeds maxRetryDelayMs ${capMs}ms`);
+		this.name = "RetryDelayCapError";
+		this.delayMs = delayMs;
+		this.capMs = capMs;
+	}
+}
+
+function parseRetryAfterMs(headers: Headers): number | undefined {
+	const raw = headers.get("retry-after");
+	if (raw == null) {
+		return undefined;
+	}
+	const trimmed = raw.trim();
+	if (trimmed === "") {
+		return undefined;
+	}
+	if (/^\d+(\.\d+)?$/.test(trimmed)) {
+		const seconds = Number(trimmed);
+		if (Number.isFinite(seconds) && seconds >= 0) {
+			return seconds * 1000;
+		}
+	}
+	const dateMs = Date.parse(trimmed);
+	if (!Number.isNaN(dateMs)) {
+		return Math.max(0, dateMs - Date.now());
+	}
+	return undefined;
+}
+
+function resolveRetryDelayMs(response: Response, attempt: number, maxRetryDelayMs?: number): number {
+	const retryAfterMs = parseRetryAfterMs(response.headers);
+	const delayMs = retryAfterMs ?? BASE_DELAY_MS * 2 ** attempt;
+	const capMs = maxRetryDelayMs === 0 ? undefined : (maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS);
+	if (capMs !== undefined && delayMs > capMs) {
+		throw new RetryDelayCapError(delayMs, capMs);
+	}
+	return delayMs;
+}
+
+function isNonRetryableClientErrorStatus(status: number): boolean {
+	return status >= 400 && status < 500 && status !== 429;
+}
+
+function shouldRetryCaughtError(error: Error, status: number | undefined): boolean {
+	if (error instanceof RetryDelayCapError) {
+		return false;
+	}
+	if (error.message.includes("usage limit") && status !== 429) {
+		return false;
+	}
+	if (status !== undefined && isNonRetryableClientErrorStatus(status)) {
+		return false;
+	}
+	return true;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -213,8 +278,9 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 
 			let response: Response | undefined;
 			let lastError: Error | undefined;
+			const maxRetries = Math.max(0, options?.maxRetries ?? MAX_RETRIES);
 
-			for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+			for (let attempt = 0; attempt <= maxRetries; attempt++) {
 				if (options?.signal?.aborted) {
 					throw new Error("Request was aborted");
 				}
@@ -236,8 +302,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					}
 
 					const errorText = await response.text();
-					if (attempt < MAX_RETRIES && isRetryableError(response.status, errorText)) {
-						const delayMs = BASE_DELAY_MS * 2 ** attempt;
+					if (attempt < maxRetries && isRetryableError(response.status, errorText)) {
+						const delayMs = resolveRetryDelayMs(response, attempt);
 						await sleep(delayMs, options?.signal);
 						continue;
 					}
@@ -249,13 +315,16 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					const info = await parseErrorResponse(fakeResponse);
 					throw new Error(info.friendlyMessage || info.message);
 				} catch (error) {
+					if (error instanceof RetryDelayCapError) {
+						throw error;
+					}
 					if (error instanceof Error) {
 						if (error.name === "AbortError" || error.message === "Request was aborted") {
 							throw new Error("Request was aborted");
 						}
 					}
 					lastError = error instanceof Error ? error : new Error(String(error));
-					if (attempt < MAX_RETRIES && !lastError.message.includes("usage limit")) {
+					if (attempt < maxRetries && shouldRetryCaughtError(lastError, response?.status)) {
 						const delayMs = BASE_DELAY_MS * 2 ** attempt;
 						await sleep(delayMs, options?.signal);
 						continue;

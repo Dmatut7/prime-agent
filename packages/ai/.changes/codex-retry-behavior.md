@@ -1,0 +1,1 @@
+- Fixed OpenAI Codex SSE retries to skip non-429 4xx responses, honor `Retry-After`, and respect `maxRetries`.
