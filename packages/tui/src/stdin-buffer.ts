@@ -177,10 +177,11 @@ function extractCompleteSequences(buffer: string): { sequences: string[]; remain
 
 		if (remaining.startsWith(ESC)) {
 			// Two ESC bytes in a row are two Escape keys, not ctrl+alt+[.
-			// ESC+letter still forms alt+letter for existing keybindings.
+			// Consume only the first byte so the next loop can parse ESC[A as CSI.
+			// A lone second ESC stays incomplete and flushes as Escape after timeout.
 			if (remaining.length >= 2 && remaining[1] === ESC) {
-				sequences.push(ESC, ESC);
-				pos += 2;
+				sequences.push(ESC);
+				pos += 1;
 				continue;
 			}
 			let seqEnd = 1;
