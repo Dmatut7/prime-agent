@@ -216,7 +216,7 @@ export type StdinBufferOptions = {
 	 */
 	timeout?: number;
 	/**
-	 * Wall-clock time to wait for `201~` after entering paste mode.
+	 * Idle time without stdin chunks to wait for `201~` after entering paste mode.
 	 * Missing terminator flushes the buffer as ordinary input.
 	 */
 	pasteTimeoutMs?: number;
@@ -229,10 +229,6 @@ export type StdinBufferEventMap = {
 	paste: [string];
 };
 
-/**
- * Buffers stdin input and emits complete sequences via the 'data' event.
- * Handles partial escape sequences that arrive across multiple chunks.
- */
 function isImmediatePasteEscapeAbort(data: string): boolean {
 	return data === "\x1b[27u" || (data.startsWith("\x1b[27;") && data.endsWith("u"));
 }
@@ -345,6 +341,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			this.exitPasteAsOrdinaryInput();
 			return;
 		}
+		// Idle timeout: each chunk proves the paste is still flowing.
+		this.armPasteWatchdog();
 		this.armPasteEscapeTimerIfNeeded();
 	}
 

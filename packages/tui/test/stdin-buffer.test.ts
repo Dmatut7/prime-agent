@@ -390,6 +390,30 @@ describe("StdinBuffer", () => {
 			assert.deepStrictEqual(emittedSequences, []);
 		});
 
+		it("does not abort a slow paste while chunks keep arriving", async () => {
+			buffer = new StdinBuffer({ timeout: 10, pasteTimeoutMs: 40 });
+			emittedSequences = [];
+			emittedPaste = [];
+			buffer.on("data", (sequence) => {
+				emittedSequences.push(sequence);
+			});
+			buffer.on("paste", (data) => {
+				emittedPaste.push(data);
+			});
+
+			processInput("\x1b[200~");
+			for (const chunk of ["one", "two", "three"]) {
+				processInput(chunk);
+				await wait(25);
+			}
+
+			assert.deepStrictEqual(emittedPaste, []);
+			assert.deepStrictEqual(emittedSequences, []);
+
+			await wait(55);
+			assert.ok(emittedPaste.length + emittedSequences.length > 0, "idle timeout should flush after chunks stop");
+		});
+
 		it("flushes an unterminated paste as ordinary input after pasteTimeoutMs", async () => {
 			buffer = new StdinBuffer({ timeout: 10, pasteTimeoutMs: 25 });
 			emittedSequences = [];
