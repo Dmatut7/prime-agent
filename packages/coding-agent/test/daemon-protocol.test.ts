@@ -8,7 +8,10 @@ import {
 	createDaemonEventMeta,
 	createDaemonReplayInfo,
 	DAEMON_COMMAND_COMPATIBILITY,
+	DAEMON_CONTROL_PLANE_COMMANDS,
 	DAEMON_DEFAULT_SERVER_CAPABILITIES,
+	DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES,
+	DAEMON_FIRST_PARTY_SESSION_CAPABILITIES,
 	DAEMON_OUTBOUND_COMPATIBILITY,
 	DAEMON_PROTOCOL_INFO,
 	DAEMON_PROTOCOL_VERSION,
@@ -19,6 +22,8 @@ import {
 	getDaemonCommandCompatibilities,
 	isDaemonCommandEnvelope,
 	isDaemonMutatingCommand,
+	missingDeclaredCommandCapability,
+	normalizeDeclaredCapabilities,
 	salvageDaemonCommandId,
 } from "../src/modes/daemon/daemon-protocol.js";
 import {
@@ -364,6 +369,35 @@ describe("daemon protocol helpers", () => {
 
 		expect(isDaemonCommandEnvelope(createDaemonCommandEnvelope(command, "cmd-1", "client-1", 7))).toBe(true);
 		expect(isDaemonCommandEnvelope(createDaemonCommandEnvelope(command, "cmd-1", "client-1", 6))).toBe(false);
+	});
+
+	it("server-enforces capability-gated commands and control-plane auth without client-side shutdown breakage", () => {
+		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(26);
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("control_plane");
+		expect(DAEMON_FIRST_PARTY_SESSION_CAPABILITIES).not.toContain("control_plane");
+		expect(DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES).toContain("control_plane");
+		expect([...DAEMON_CONTROL_PLANE_COMMANDS].sort()).toEqual(["prepare_update_restart", "restart", "shutdown"]);
+		// Shutdown stays a legacy command so a new CLI can still stop an old daemon.
+		expect(DAEMON_COMMAND_COMPATIBILITY.shutdown).toEqual({ minProtocol: 7 });
+		expect(DAEMON_COMMAND_COMPATIBILITY.restart).toEqual({ minProtocol: 7 });
+		expect(DAEMON_COMMAND_COMPATIBILITY.prepare_update_restart).toEqual({ minProtocol: 7 });
+		expect(DAEMON_COMMAND_COMPATIBILITY.declare_client_capabilities).toEqual({ minProtocol: 7 });
+		expect(isDaemonMutatingCommand({ type: "declare_client_capabilities" })).toBe(false);
+		expect(normalizeDeclaredCapabilities(["heartbeat_catalog", "not-a-cap", "heartbeat_catalog"] as never)).toEqual([
+			"heartbeat_catalog",
+		]);
+		expect(missingDeclaredCommandCapability(undefined, undefined, { type: "shutdown" })).toBeUndefined();
+		expect(missingDeclaredCommandCapability(true, new Set(), { type: "shutdown" })).toBe("control_plane");
+		expect(missingDeclaredCommandCapability(true, new Set(["control_plane"]), { type: "shutdown" })).toBeUndefined();
+		expect(missingDeclaredCommandCapability(true, new Set(["event_sequence"]), { type: "heartbeats_list" })).toBe(
+			"heartbeat_catalog",
+		);
+		expect(
+			missingDeclaredCommandCapability(true, new Set(["event_sequence"]), {
+				type: "list",
+				omitStreamingMessages: true,
+			}),
+		).toBe("list_without_streaming_messages");
 	});
 
 	it("keeps attachment routing and pure waits out of the durable mutation journal", () => {

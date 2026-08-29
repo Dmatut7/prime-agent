@@ -10,6 +10,7 @@ import {
 	type DaemonCommand,
 	type DaemonCommandCompatibility,
 	type DaemonCommandEnvelope,
+	type DaemonDeclaredCapability,
 	type DaemonOutbound,
 	type DaemonProtocolVersion,
 	type DaemonRequestProgress,
@@ -125,10 +126,39 @@ export class DaemonClient {
 		timeout: ReturnType<typeof setTimeout>;
 	}>();
 
-	constructor(private readonly socketPath: string) {}
+	constructor(
+		private readonly socketPath: string,
+		private readonly options: { declaredCapabilities?: readonly DaemonDeclaredCapability[] } = {},
+	) {}
 
 	get hello(): DaemonHello | undefined {
 		return this.helloMessage;
+	}
+
+	private capabilityDeclaration?: Promise<void>;
+
+	/**
+	 * Declare this connection's command-gating set once. Uses the hello envelope
+	 * so protocol-7 supervisors accept the command. Older daemons that reject it
+	 * do not gate commands on declarations, so the failure is ignored.
+	 */
+	private async declareCapabilities(): Promise<void> {
+		if (this.options.declaredCapabilities === undefined) return;
+		try {
+			const hello = this.helloMessage ?? (await this.waitForHello());
+			const envelopeProtocolVersion = Math.min(hello.protocol.version, DAEMON_PROTOCOL_VERSION);
+			if (envelopeProtocolVersion < DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION) {
+				return;
+			}
+			await this.requestWire(
+				{ type: "declare_client_capabilities", capabilities: this.options.declaredCapabilities },
+				3000,
+				{},
+				envelopeProtocolVersion,
+			);
+		} catch {
+			// A daemon without capability gating simply does not know the command.
+		}
 	}
 
 	get isConnected(): boolean {
@@ -220,6 +250,10 @@ export class DaemonClient {
 		socket.on("close", () =>
 			this.notifyClosed(socket, new DaemonSocketClosedError(this.socketPath, this.daemonClosingReason)),
 		);
+
+		// Re-declare on the next request() after connect/reconnect. Probes that
+		// only handshake must not send declare_client_capabilities.
+		this.capabilityDeclaration = undefined;
 	}
 
 	async reconnect(timeoutMs = 3000): Promise<void> {
@@ -299,6 +333,10 @@ export class DaemonClient {
 			throw new Error(
 				`Cannot send daemon command "${command.type}" because the Prime Agent daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
 			);
+		}
+		if (this.options.declaredCapabilities !== undefined) {
+			this.capabilityDeclaration ??= this.declareCapabilities();
+			await this.capabilityDeclaration;
 		}
 		const hello = this.helloMessage ?? (await this.waitForHello());
 		const compatibilities = getDaemonCommandCompatibilities(command);

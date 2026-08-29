@@ -12,7 +12,11 @@ import { appendRotatingLog, expandTildePath, getClientErrorLogPath, getDaemonLog
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../core/orphan-process-journal.js";
 import { getProcessStartId, SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
 import { DaemonClient, type DaemonHello } from "../modes/daemon/daemon-client.js";
-import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../modes/daemon/daemon-protocol.js";
+import {
+	DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES,
+	DAEMON_PROTOCOL_VERSION,
+	DAEMON_SCHEMA_ID,
+} from "../modes/daemon/daemon-protocol.js";
 import { getDaemonRuntimeIdentity } from "../modes/daemon/daemon-runtime-identity.js";
 import { isSessionSummaryBusy, type SessionSummary } from "../modes/daemon/daemon-session-list.js";
 import { defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
@@ -50,7 +54,7 @@ function logDaemonLaunch(message: string): void {
 }
 
 async function canConnectToDaemon(socketPath: string, timeoutMs: number): Promise<boolean> {
-	const client = new DaemonClient(socketPath);
+	const client = new DaemonClient(socketPath, { declaredCapabilities: DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES });
 	try {
 		await client.connect(timeoutMs);
 		return true;
@@ -70,7 +74,9 @@ type DaemonVersionProbe =
 export async function probeDaemonVersion(socketPath: string): Promise<DaemonVersionProbe> {
 	let client: DaemonClient | undefined;
 	for (const timeoutMs of [250, 2000]) {
-		const candidate = new DaemonClient(socketPath);
+		const candidate = new DaemonClient(socketPath, {
+			declaredCapabilities: DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES,
+		});
 		try {
 			await candidate.connect(timeoutMs);
 			client = candidate;
@@ -254,7 +260,7 @@ export async function shutdownConnectedDaemonAndWait(
 }
 
 export async function shutdownDaemonAndWait(socketPath: string, timeoutMs = 5000): Promise<boolean> {
-	const client = new DaemonClient(socketPath);
+	const client = new DaemonClient(socketPath, { declaredCapabilities: DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES });
 	try {
 		await client.connect(1000);
 		const hello = await client.waitForHello(2000).catch(() => undefined);
@@ -276,7 +282,7 @@ export function isSessionBusy(summary: SessionSummary): boolean {
 }
 
 export async function probeRunningDaemonSessions(socketPath: string): Promise<RunningDaemonProbe> {
-	const client = new DaemonClient(socketPath);
+	const client = new DaemonClient(socketPath, { declaredCapabilities: DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES });
 	try {
 		await client.connect(1000);
 	} catch {
@@ -302,7 +308,7 @@ export async function probeRunningDaemonSessions(socketPath: string): Promise<Ru
 // Idle-but-loaded sessions reload from disk on the fresh daemon, so only a busy
 // session blocks replacing a stale daemon.
 async function shutdownStaleDaemonIfNotBusy(socketPath: string): Promise<boolean> {
-	const client = new DaemonClient(socketPath);
+	const client = new DaemonClient(socketPath, { declaredCapabilities: DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES });
 	let connected = false;
 	let hasBusySessions = false;
 	let loadedSessionCount = 0;

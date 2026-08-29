@@ -80,8 +80,11 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 25 adds the streaming_deltas capability and the assistant_stream_delta
 // outbound event: the supervisor forwards compact per-token deltas to capable
 // clients instead of rebuilding the full message_update payload.
-export const DAEMON_SCHEMA_REVISION = 25;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-25-4044beb7c9f4";
+// Revision 26 adds server-side enforcement of capability-gated commands, the
+// control_plane capability for shutdown/restart/prepare_update_restart, and the
+// declare_client_capabilities connect-time declaration.
+export const DAEMON_SCHEMA_REVISION = 26;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-26-31fb64b6f4ee";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -135,7 +138,11 @@ export type DaemonServerCapability =
 	// The daemon honors omitStreamingMessages on list, leaving each row's
 	// in-flight assistant message out of the response. Senders must check before
 	// relying on the smaller payload.
-	| "list_without_streaming_messages";
+	| "list_without_streaming_messages"
+	// Control-plane authority: a connection that declared capabilities may
+	// issue shutdown / restart / prepare_update_restart only if it included
+	// this capability. Undeclared (legacy) connections keep the old path.
+	| "control_plane";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -164,6 +171,15 @@ export const DAEMON_SUPPORTED_CLIENT_CAPABILITIES: readonly DaemonClientCapabili
 	"streaming_deltas",
 ];
 
+/**
+ * Capabilities a client may declare on connect as the command-gating set for
+ * this connection. Declaring opts the connection into server-side enforcement:
+ * capability-gated commands and control-plane commands are refused unless the
+ * declaration includes them. Connections that never declare keep the legacy
+ * compatibility path so old clients and tests keep working.
+ */
+export type DaemonDeclaredCapability = DaemonServerCapability;
+
 export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
 	...DAEMON_SUPPORTED_CLIENT_CAPABILITIES,
 	"delete_rlm_subagent",
@@ -182,7 +198,39 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"session_input_pause",
 	"acp_mcp_servers",
 	"list_without_streaming_messages",
+	"control_plane",
 ];
+
+const DAEMON_KNOWN_DECLARED_CAPABILITY_SET: ReadonlySet<string> = new Set(DAEMON_DEFAULT_SERVER_CAPABILITIES);
+
+export function normalizeDeclaredCapabilities(
+	capabilities: readonly DaemonDeclaredCapability[] | undefined,
+): DaemonDeclaredCapability[] {
+	const normalized: DaemonDeclaredCapability[] = [];
+	const seen = new Set<string>();
+	for (const capability of capabilities ?? []) {
+		if (!DAEMON_KNOWN_DECLARED_CAPABILITY_SET.has(capability) || seen.has(capability)) {
+			continue;
+		}
+		seen.add(capability);
+		normalized.push(capability);
+	}
+	return normalized;
+}
+
+/** Session-plane first-party clients (TUI/agents view): every server feature except control_plane. */
+export const DAEMON_FIRST_PARTY_SESSION_CAPABILITIES: readonly DaemonDeclaredCapability[] =
+	DAEMON_DEFAULT_SERVER_CAPABILITIES.filter((capability) => capability !== "control_plane");
+
+/** Control-plane first-party clients (CLI stop/restart/update): session features plus control_plane. */
+export const DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES: readonly DaemonDeclaredCapability[] =
+	DAEMON_DEFAULT_SERVER_CAPABILITIES;
+
+export const DAEMON_CONTROL_PLANE_COMMANDS: ReadonlySet<string> = new Set([
+	"shutdown",
+	"restart",
+	"prepare_update_restart",
+]);
 
 export interface DaemonRuntimeIdentity {
 	buildId: string;
@@ -689,7 +737,11 @@ export type DaemonCommand =
 	| { id?: string; type: "prepare_update_restart" }
 	| { id?: string; type: "retry_worker"; activeSessionId: string }
 	| { id?: string; type: "restart" }
-	| { id?: string; type: "shutdown"; force?: boolean };
+	| { id?: string; type: "shutdown"; force?: boolean }
+	// Connect-time declaration of the capabilities this connection holds. The
+	// supervisor gates capability-marked commands on it; connections that never
+	// declare keep the legacy compatibility path.
+	| { id?: string; type: "declare_client_capabilities"; capabilities: readonly DaemonDeclaredCapability[] };
 
 type DaemonCommandName = DaemonCommand["type"];
 
@@ -859,6 +911,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	retry_worker: LEGACY_DAEMON_COMMAND,
 	restart: LEGACY_DAEMON_COMMAND,
 	shutdown: LEGACY_DAEMON_COMMAND,
+	declare_client_capabilities: CURRENT_DAEMON_COMMAND,
 } as const satisfies Record<DaemonCommandName, DaemonCommandCompatibility>;
 
 export function getDaemonCommandCompatibilities(command: DaemonCommand): readonly DaemonCommandCompatibility[] {
@@ -883,6 +936,30 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 		requirements.push(LIST_WITHOUT_STREAMING_MESSAGES_COMMAND);
 	}
 	return [...requirements, DAEMON_COMMAND_COMPATIBILITY[command.type]];
+}
+
+/**
+ * Server-side gate for connections that declared a command-capability set.
+ * Undeclared connections (legacy clients/tests) skip this check.
+ */
+export function missingDeclaredCommandCapability(
+	declaredCapabilities: boolean | undefined,
+	declaredCommandCapabilities: ReadonlySet<DaemonDeclaredCapability> | undefined,
+	command: DaemonCommand,
+): DaemonServerCapability | undefined {
+	if (declaredCapabilities !== true) {
+		return undefined;
+	}
+	const declared = declaredCommandCapabilities ?? new Set<DaemonDeclaredCapability>();
+	if (DAEMON_CONTROL_PLANE_COMMANDS.has(command.type) && !declared.has("control_plane")) {
+		return "control_plane";
+	}
+	for (const compatibility of getDaemonCommandCompatibilities(command)) {
+		if (compatibility.capability !== undefined && !declared.has(compatibility.capability)) {
+			return compatibility.capability;
+		}
+	}
+	return undefined;
 }
 
 export type DaemonResponse =
@@ -1172,6 +1249,7 @@ export function salvageDaemonCommandId(line: string): string | undefined {
 
 const READ_ONLY_DAEMON_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"ack_result",
+	"declare_client_capabilities",
 	"list",
 	"list_saved_sessions",
 	"list_agent_peers",

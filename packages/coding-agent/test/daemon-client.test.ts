@@ -914,6 +914,65 @@ describe("DaemonClient", () => {
 		await expect(response).resolves.toMatchObject({ id: firstEnvelope.id, success: true });
 		client.close();
 	});
+
+	it("declares connection capabilities over the hello envelope and ignores old-daemon rejection", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock", {
+			declaredCapabilities: ["heartbeat_catalog", "control_plane"],
+		});
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["heartbeat_catalog"], DAEMON_SCHEMA_REVISION);
+
+		const shutdown = client.request({ type: "shutdown" });
+		await vi.waitFor(() => expect(socket.writes).toHaveLength(1));
+		const declaration = JSON.parse(socket.writes[0]!.trim()) as {
+			id: string;
+			type?: string;
+			command?: { type?: string; capabilities?: string[] };
+		};
+		expect(declaration).toMatchObject({
+			type: "command",
+			command: { type: "declare_client_capabilities", capabilities: ["heartbeat_catalog", "control_plane"] },
+		});
+
+		socket.emit(
+			"data",
+			`${JSON.stringify({
+				id: declaration.id,
+				type: "response",
+				command: "declare_client_capabilities",
+				success: false,
+				error: "Unknown daemon command: declare_client_capabilities",
+			})}\n`,
+		);
+
+		await vi.waitFor(() => expect(socket.writes.length).toBeGreaterThanOrEqual(2));
+		const shutdownEnvelope = JSON.parse(socket.writes[1]!.trim()) as {
+			command?: { type?: string };
+		};
+		expect(shutdownEnvelope.command).toMatchObject({ type: "shutdown" });
+		client.close();
+		await expect(shutdown).rejects.toThrow("closed before the operation completed");
+	});
+
+	it("still sends shutdown to an old daemon that does not advertise control_plane", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["session_input_admission"], DAEMON_SCHEMA_REVISION - 1);
+
+		const shutdown = client.request({ type: "shutdown" });
+		await vi.waitFor(() => expect(socket.writes).toHaveLength(1));
+		expect(JSON.parse(socket.writes[0]!.trim())).toMatchObject({
+			command: { type: "shutdown" },
+		});
+		client.close();
+		await expect(shutdown).rejects.toThrow("closed before the operation completed");
+	});
 });
 
 async function captureRejection(promise: Promise<void>): Promise<Error> {

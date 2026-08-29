@@ -80,7 +80,11 @@ import { printTimings, resetTimings, time } from "./core/timings.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
 import { isDaemonCatalogProcess, runDaemonCatalogProcess } from "./modes/daemon/daemon-catalog-process.js";
 import { deserializeDaemonError } from "./modes/daemon/daemon-errors.js";
-import { collectDaemonClientEnv, collectDaemonLaunchEnv } from "./modes/daemon/daemon-protocol.js";
+import {
+	collectDaemonClientEnv,
+	collectDaemonLaunchEnv,
+	DAEMON_FIRST_PARTY_SESSION_CAPABILITIES,
+} from "./modes/daemon/daemon-protocol.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
 	isDaemonWorkerProcess,
@@ -905,7 +909,7 @@ async function findActiveDaemonSessionSummary(
 	socketPath: string,
 	selector: string,
 ): Promise<SessionSummary | undefined> {
-	const client = new DaemonClient(socketPath);
+	const client = new DaemonClient(socketPath, { declaredCapabilities: DAEMON_FIRST_PARTY_SESSION_CAPABILITIES });
 	await client.connect(250);
 
 	try {
@@ -968,7 +972,9 @@ async function createDaemonClientConnection(options: {
 	supportsExtensionUi?: boolean;
 }): Promise<{ connection: DaemonAgentConnection; summary: SessionSummary }> {
 	// Caller must have awaited ensureInteractiveDaemonRunning for this socket.
-	const client = new DaemonClient(options.socketPath);
+	const client = new DaemonClient(options.socketPath, {
+		declaredCapabilities: DAEMON_FIRST_PARTY_SESSION_CAPABILITIES,
+	});
 	await client.connect();
 
 	try {

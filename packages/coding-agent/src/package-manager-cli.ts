@@ -50,6 +50,7 @@ import { DefaultPackageManager } from "./core/package-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import { DaemonClient, type DaemonHello } from "./modes/daemon/daemon-client.js";
 import {
+	DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES,
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SCHEMA_ID,
 	DAEMON_UPDATE_RESTART_FORMAT_VERSION,
@@ -911,7 +912,7 @@ export async function prepareDaemonUpdateRestart(
 	agentDir: string,
 ): Promise<DaemonUpdateRestartManifest> {
 	const pendingManifest = tryReadPreparedDaemonUpdateRestartManifest(socketPath, agentDir);
-	const client = new DaemonClient(socketPath);
+	const client = new DaemonClient(socketPath, { declaredCapabilities: DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES });
 	let connected = false;
 	try {
 		await client.connect(1000);
@@ -1111,7 +1112,7 @@ async function restoreDaemonUpdateRestart(
 	if (manifest.sessions.length === 0) {
 		return { total: 0, restored: 0, resumed: 0, failed: 0, failures: [] };
 	}
-	const client = new DaemonClient(socketPath);
+	const client = new DaemonClient(socketPath, { declaredCapabilities: DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES });
 	let restored = 0;
 	let resumed = 0;
 	const failures: DaemonUpdateRestartFailure[] = [];
@@ -1270,7 +1271,9 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 		};
 		let predecessor: DaemonUpdateRestartProcessIdentity | undefined;
 		if (daemonProbe.reachable) {
-			connectedClient = new DaemonClient(options.socketPath);
+			connectedClient = new DaemonClient(options.socketPath, {
+				declaredCapabilities: DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES,
+			});
 			await connectedClient.connect(1000);
 			const hello = await connectedClient.waitForHello(2000);
 			predecessor = processIdentityFromDaemonHello(hello);
@@ -1346,7 +1349,9 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 		await shutdownAdmission.release();
 		shutdownAdmission = undefined;
 		await ensureInteractiveDaemonRunning(options.socketPath);
-		const successorClient = new DaemonClient(options.socketPath);
+		const successorClient = new DaemonClient(options.socketPath, {
+			declaredCapabilities: DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES,
+		});
 		let successor: DaemonUpdateRestartProcessIdentity;
 		try {
 			await successorClient.connect(1000);
