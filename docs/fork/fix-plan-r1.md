@@ -13,7 +13,7 @@
 > v3.2 终审修正：B1c 撤销（blockCache 每次 render 全量重建、自限于单消息，LRU 是负优化——mechanics 发现、父代理亲验 markdown.ts:254,270）；B1a 简化为「fallbackOnly 构造后即丢 base64Data」（全仓 Image 均 fallbackOnly，亲验 tool-execution.ts:435、earendil-announcement.ts:45）；A5 落点补 $EDITOR 临时文件/extension-editor/export-html/harness.py 四处；B7 保留（mechanics 称 upstream 已实现，父代理亲验驳回——merge 树里 isClientOwnedDaemonSession 仍是 2 参数老版，mechanics 误读了 exec-daemon 的 worktree）；A1 改「先 dry-run 再合」。
 > 执行架构：7 个执行代理各占一个 git worktree（/Users/a1/Desktop/_wt_prime/exec-*，分支 wt/exec-*），并行开工，完工后父代理逐个并回 merge/repl-kernel 统一验收。
 
-> 输入：`AUDIT_FINDINGS_20260829.md`（F1–F28 + PR 裁决 + 内存根因 S1–S8）。
+> 输入：`docs/fork/audit-findings.md`（F1–F28 + PR 裁决 + 内存根因 S1–S8）。
 > 基线：`merge/repl-kernel` @ bf542ce7e（新内核 rlm.repl 已合并，check + 117 测试全绿）。
 > 本文档是执行级工单：每项含机制、精确锚点、改法、冲突分析、验收标准。
 
