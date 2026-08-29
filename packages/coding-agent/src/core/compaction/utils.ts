@@ -18,8 +18,28 @@ export function createFileOps(): FileOperations {
 	};
 }
 
+/** Argument keys that carry a target file path in write-style tools. */
+const PATH_ARG_KEYS = ["path", "file_path", "filePath"] as const;
+
+/** Tool names whose calls modify a file at a known path. */
+const WRITING_TOOL_PATTERN = /^(?:edit|write|apply_patch)$|patch|str_replace/;
+
+function getToolCallPath(args: Record<string, unknown>): string | undefined {
+	for (const key of PATH_ARG_KEYS) {
+		const value = args[key];
+		if (typeof value === "string" && value.length > 0) return value;
+	}
+	return undefined;
+}
+
 /**
  * Extract file operations from tool calls in an assistant message.
+ *
+ * Only statically recognizable writes are recorded: tools whose name indicates a
+ * file modification and that expose a path-like argument (including write-style
+ * extension tools). File changes made inside bash or ipython cells (redirections,
+ * open(..., "w"), notebook edits) cannot be attributed statically and are
+ * deliberately not tracked; <modified-files> is best-effort for those tools.
  */
 export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOperations): void {
 	if (message.role !== "assistant") return;
@@ -33,13 +53,15 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
 		const args = block.arguments as Record<string, unknown> | undefined;
 		if (!args) continue;
 
-		const path = typeof args.path === "string" ? args.path : undefined;
+		const path = getToolCallPath(args);
 		if (!path) continue;
 
-		switch (block.name) {
-			case "edit":
+		if (WRITING_TOOL_PATTERN.test(block.name)) {
+			if (block.name === "write") {
+				fileOps.written.add(path);
+			} else {
 				fileOps.edited.add(path);
-				break;
+			}
 		}
 	}
 }
