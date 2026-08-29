@@ -42,6 +42,8 @@ export interface ActiveSessionState {
 	lastEventSequence: DaemonEventSequence;
 	/** Counts snapshot transfers so each one gets an id of its own. */
 	snapshotTransferSeq?: number;
+	/** In-flight bash execution the daemon awaits during close (#1858). */
+	inFlightBash?: Promise<void>;
 	unsubscribe?: () => void;
 	/** Latest background status summary, surfaced in the agents view. */
 	summaryState?: AgentStatus;
