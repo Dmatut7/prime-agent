@@ -60,7 +60,7 @@ function createHarness(options: {
 	const seed = vi.fn();
 	const clear = vi.fn();
 	const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-		streamReconstructor: { seed, clear },
+		streamReconstructor: { seed, clear, hasPartial: vi.fn(() => false) },
 		isWorkerStopping: () => false,
 		persistWorker: vi.fn(),
 		assertRecoveryAllowed: async () => {},
@@ -166,7 +166,7 @@ describe("client-driven list that omits in-flight messages", () => {
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			workers: new Map([[worker.descriptor.workerId, worker]]),
 			clients: new Set(),
-			streamReconstructor: { seed: vi.fn(), clear: vi.fn() },
+			streamReconstructor: { seed: vi.fn(), clear: vi.fn(), hasPartial: vi.fn(() => false) },
 			isWorkerStopping: () => false,
 			isVisibleWorker: () => true,
 			persistWorker: vi.fn(),

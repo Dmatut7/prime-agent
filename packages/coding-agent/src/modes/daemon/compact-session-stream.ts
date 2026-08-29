@@ -65,7 +65,18 @@ export class CompactAssistantStreamReconstructor {
 	private readonly toolCallJson = new Map<string, string>();
 
 	seed(activeSessionId: string, message: AssistantMessage): void {
-		this.partialMessages.set(activeSessionId, message);
+		// Own the partial: reconstruct() mutates content blocks in place, and
+		// seeds typically reference snapshot/summary messages that must stay
+		// unmodified.
+		this.partialMessages.set(activeSessionId, {
+			...message,
+			content: message.content.map((block) => ({ ...block })),
+		});
+	}
+
+	/** Whether a live partial message is currently tracked for the session. */
+	hasPartial(activeSessionId: string): boolean {
+		return this.partialMessages.has(activeSessionId);
 	}
 
 	observe(message: DaemonOutbound): void {
