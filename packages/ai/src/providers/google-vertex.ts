@@ -64,6 +64,8 @@ const THINKING_LEVEL_MAP: Record<GoogleThinkingLevel, ThinkingLevel> = {
 
 let toolCallCounter = 0;
 
+// This provider has no client-side retry loop. HTTP 429 is not retried;
+// StreamOptions.maxRetries / maxRetryDelayMs are ignored here.
 export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOptions> = (
 	model: Model<"google-vertex">,
 	context: Context,

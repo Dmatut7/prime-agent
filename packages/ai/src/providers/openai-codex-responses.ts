@@ -132,6 +132,7 @@ function parseRetryAfterMs(headers: Headers): number | undefined {
 	return undefined;
 }
 
+/** Cap for server-requested Retry-After waits. `maxRetryDelayMs === 0` disables the cap. */
 function resolveRetryDelayMs(response: Response, attempt: number, maxRetryDelayMs?: number): number {
 	const retryAfterMs = parseRetryAfterMs(response.headers);
 	const delayMs = retryAfterMs ?? BASE_DELAY_MS * 2 ** attempt;
@@ -303,7 +304,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 
 					const errorText = await response.text();
 					if (attempt < maxRetries && isRetryableError(response.status, errorText)) {
-						const delayMs = resolveRetryDelayMs(response, attempt);
+						const delayMs = resolveRetryDelayMs(response, attempt, options?.maxRetryDelayMs);
 						await sleep(delayMs, options?.signal);
 						continue;
 					}

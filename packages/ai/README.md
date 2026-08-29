@@ -1230,7 +1230,11 @@ const response = await complete(model, {
 
 ### Provider Notes
 
-**OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles session-based prompt caching when `sessionId` is provided in stream options. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId`, connections are reused per session and expire after 5 minutes of inactivity.
+**OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles session-based prompt caching when `sessionId` is provided in stream options. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId`, connections are reused per session and expire after 5 minutes of inactivity. SSE transport retries 429/5xx and honors `Retry-After`. Non-429 4xx responses are not retried. `maxRetries` defaults to 3 (`0` means a single attempt). `maxRetryDelayMs` caps the server-requested wait (default 60000ms; `0` disables the cap). If `Retry-After` exceeds the cap, the request fails immediately instead of waiting.
+
+**Google / Vertex AI**: The current clients do not retry HTTP 429. `maxRetries` and `maxRetryDelayMs` are ignored.
+
+**Mistral**: The SDK is configured with `retries: { strategy: "none" }`. HTTP 429 is not retried. `maxRetries` and `maxRetryDelayMs` are ignored.
 
 **Prime Inference**: Uses the OpenAI-compatible API at `https://api.pinference.ai/api/v1`. Set `PRIME_API_KEY` or pass an API key explicitly.
 
