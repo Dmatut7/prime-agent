@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { rm, unlink } from "node:fs/promises";
-import { basename } from "node:path";
-import { getSessionArtifactPathForFile } from "./session-manager.js";
+import { basename, dirname } from "node:path";
+import { getSessionArtifactPath } from "./session-manager.js";
 
 export type DeleteSessionFileResult = { ok: true; method: "trash" | "unlink" } | { ok: false; error: string };
 
@@ -18,8 +18,13 @@ export interface DeleteSessionFileOptions {
  */
 export async function deleteSessionArtifacts(sessionPath: string): Promise<void> {
 	// A degenerate name (".jsonl") would resolve to the artifacts root itself.
-	if (!basename(sessionPath).replace(/\.jsonl$/, "")) return;
-	await rm(getSessionArtifactPathForFile(sessionPath), { recursive: true, force: true });
+	const sessionId = basename(sessionPath).replace(/\.jsonl$/, "");
+	if (!sessionId) return;
+	// Repair the private modes before removal: legacy artifact directories can
+	// predate the 0700 hardening, and deletion must not strand them. Symlinked
+	// or escaping roots still throw and are never traversed.
+	const artifactDir = getSessionArtifactPath(dirname(sessionPath), sessionId, true);
+	await rm(artifactDir, { recursive: true, force: true });
 }
 
 /** Remove the session `.jsonl`, trying the `trash` CLI first, then falling back to unlink. */
