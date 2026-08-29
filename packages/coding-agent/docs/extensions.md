@@ -720,6 +720,7 @@ Behavior guarantees:
 - Later `tool_call` handlers see mutations made by earlier handlers
 - No re-validation is performed after your mutation
 - Return values from `tool_call` only control blocking via `{ block: true, reason?: string }`
+- A handler that never returns is timed out; the tool is then blocked with a visible warning. See [Error Handling](#error-handling).
 
 ```typescript
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
@@ -2528,6 +2529,8 @@ const highlighted = highlightCode(code, lang, theme);
 
 - Extension errors are logged, agent continues
 - `tool_call` errors block the tool (fail-safe)
+- Event handlers (including high-frequency `message_update`) are awaited so later work sees their results. Each handler also has a wall-clock timeout (`extensionHandlerTimeoutMs`, default 30s). On timeout the handler is skipped, the error is reported to diagnostics/UI, and the session stays live — including abort. Set the setting to `0` to disable the wall-clock timeout.
+- `tool_call` may intentionally wait (for example `ui.confirm` before returning `{ block: true }`). That contract is unchanged when the handler returns in time. If it hangs past the timeout, Prime Agent emits a visible warning and **blocks the tool** (fail-safe) instead of freezing the session.
 - Tool `execute` errors must be signaled by throwing; the thrown error is caught, reported to the LLM with `isError: true`, and execution continues
 
 ## Mode Behavior

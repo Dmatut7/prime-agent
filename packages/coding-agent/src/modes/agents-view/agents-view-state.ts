@@ -652,7 +652,7 @@ export function buildAgentsViewRows(
 			summary,
 			title: getAgentsViewSessionTitle(summary),
 			subtitle: getSessionSubtitle(summary),
-			statusLabel: getSessionStatusLabel(summary),
+			statusLabel: getSessionStatusLabel(summary) + getQuietDurationLabel(summary),
 			depth: 0,
 			selectable: true,
 			runningSubagentCount: 0,
@@ -741,7 +741,7 @@ function propagateHeartbeatStateToAncestors(
 		while (ancestor && !visited.has(ancestor)) {
 			visited.add(ancestor);
 			ancestor.section = "running";
-			ancestor.statusLabel = getSessionStatusLabel(ancestor.summary, true);
+			ancestor.statusLabel = getSessionStatusLabel(ancestor.summary, true) + getQuietDurationLabel(ancestor.summary);
 			ancestor = parentByChild.get(ancestor);
 		}
 	}
@@ -937,6 +937,38 @@ function getTimestamp(value: string | undefined): number {
 	}
 	const timestamp = Date.parse(value);
 	return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+/**
+ * Busy sessions whose last message activity is older than the stall watchdog's
+ * default warn threshold are likely wedged; surface the silence so a stuck
+ * "running tools"/"thinking" row does not read as healthy progress.
+ */
+const QUIET_SESSION_THRESHOLD_MS = 5 * 60_000;
+
+function getQuietDurationLabel(summary: SessionSummary): string {
+	// Only sessions that visibly look like they are doing work can read as
+	// "stuck" when they go quiet; sessions waiting for input say so already.
+	const appearsWorking =
+		summary.isStreaming ||
+		summary.isCompacting ||
+		summary.isRunningTools === true ||
+		summary.isBashRunning === true ||
+		summary.hasRunningRlmChildren === true;
+	if (!appearsWorking) {
+		return "";
+	}
+	const lastActivityAt = getTimestamp(summary.lastActivityAt);
+	if (lastActivityAt === 0) {
+		return "";
+	}
+	const quietMs = Date.now() - lastActivityAt;
+	if (quietMs < QUIET_SESSION_THRESHOLD_MS) {
+		return "";
+	}
+	const minutes = Math.floor(quietMs / 60_000);
+	const duration = minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
+	return ` (no activity ${duration})`;
 }
 
 export function getAgentsViewSessionTitle(summary: SessionSummary): string {

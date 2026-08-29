@@ -21,10 +21,36 @@ import { getTextOutput, invalidArgText, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.js";
 
+/**
+ * Default timeout (seconds) applied to bash tool calls when the model does not
+ * pass an explicit `timeout`. Keep in sync with DEFAULT_BASH_TIMEOUT_SECONDS in
+ * settings-manager.ts (the settings-level default for tools.bashTimeoutSeconds).
+ */
+export const DEFAULT_BASH_TIMEOUT_SECONDS = 600;
+
+function describeTimeout(defaultTimeoutSeconds: number): string {
+	return defaultTimeoutSeconds > 0
+		? `Timeout in seconds. Defaults to ${defaultTimeoutSeconds}s when omitted. Pass 0 (or a negative number) to run without any timeout.`
+		: "Timeout in seconds (optional, no default timeout). Pass 0 for no timeout.";
+}
+
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Bash command to execute" }),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+	timeout: Type.Optional(Type.Number({ description: describeTimeout(DEFAULT_BASH_TIMEOUT_SECONDS) })),
 });
+
+/**
+ * Resolve the timeout for one bash invocation.
+ * - An explicit positive `timeout` from the model wins.
+ * - An explicit `timeout <= 0` is the documented escape hatch: no timeout.
+ * - Otherwise the configured default applies (a default of 0 means unlimited).
+ */
+function resolveBashTimeout(requestedTimeout: number | undefined, defaultTimeoutSeconds: number): number | undefined {
+	if (requestedTimeout !== undefined && Number.isFinite(requestedTimeout)) {
+		return requestedTimeout > 0 ? requestedTimeout : undefined;
+	}
+	return defaultTimeoutSeconds > 0 ? defaultTimeoutSeconds : undefined;
+}
 
 export type BashToolInput = Static<typeof bashSchema>;
 
@@ -146,6 +172,12 @@ export interface BashToolOptions {
 	shellPath?: string;
 	/** Hook to adjust command, cwd, or env before execution */
 	spawnHook?: BashSpawnHook;
+	/**
+	 * Default timeout (seconds) applied when the model passes no `timeout`.
+	 * Default: `DEFAULT_BASH_TIMEOUT_SECONDS` (600). Pass 0 for no default
+	 * timeout. An explicit `timeout <= 0` from the model always means "no limit".
+	 */
+	defaultTimeoutSeconds?: number;
 }
 
 const BASH_PREVIEW_LINES = 5;
@@ -277,12 +309,20 @@ export function createBashToolDefinition(
 	const ops = options?.operations ?? createLocalBashOperations({ shellPath: options?.shellPath });
 	const commandPrefix = options?.commandPrefix;
 	const spawnHook = options?.spawnHook;
+	const defaultTimeoutSeconds = options?.defaultTimeoutSeconds ?? DEFAULT_BASH_TIMEOUT_SECONDS;
+	const timeoutHint =
+		defaultTimeoutSeconds > 0
+			? `Commands time out after ${defaultTimeoutSeconds}s unless a different timeout (seconds) is passed; timeout: 0 disables the timeout.`
+			: "Optionally provide a timeout in seconds; there is no default timeout.";
 	const definition: ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState> = {
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. ${timeoutHint}`,
 		promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
-		parameters: bashSchema,
+		parameters: Type.Object({
+			command: Type.String({ description: "Bash command to execute" }),
+			timeout: Type.Optional(Type.Number({ description: describeTimeout(defaultTimeoutSeconds) })),
+		}),
 		async execute(
 			_toolCallId,
 			{ command, timeout }: { command: string; timeout?: number },
@@ -292,6 +332,7 @@ export function createBashToolDefinition(
 		) {
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
 			const spawnContext = resolveSpawnContext(resolvedCommand, cwd, spawnHook);
+			const effectiveTimeout = resolveBashTimeout(timeout, defaultTimeoutSeconds);
 			const output = new OutputAccumulator({ tempFilePrefix: "pi-bash" });
 			let updateTimer: NodeJS.Timeout | undefined;
 			let updateDirty = false;
@@ -379,7 +420,7 @@ export function createBashToolDefinition(
 					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
 						onData: handleData,
 						signal,
-						timeout,
+						timeout: effectiveTimeout,
 						env: spawnContext.env,
 					});
 					exitCode = result.exitCode;
@@ -391,7 +432,13 @@ export function createBashToolDefinition(
 					}
 					if (err instanceof Error && err.message.startsWith("timeout:")) {
 						const timeoutSecs = err.message.split(":")[1];
-						throw new Error(appendStatus(text, `Command timed out after ${timeoutSecs} seconds`));
+						const guidance =
+							defaultTimeoutSeconds > 0
+								? ` Re-run with a larger timeout parameter (seconds; the default is ${defaultTimeoutSeconds}s when omitted), or pass timeout: 0 for no timeout.`
+								: " Re-run with a larger timeout parameter (seconds), or pass timeout: 0 for no timeout.";
+						throw new Error(
+							appendStatus(text, `Command timed out after ${timeoutSecs} seconds and was killed.${guidance}`),
+						);
 					}
 					throw err;
 				}

@@ -77,8 +77,10 @@ export interface GenerateBranchSummaryOptions {
  * Collect entries that should be summarized when navigating from one position to another.
  *
  * Walks from oldLeafId back to the common ancestor with targetId, collecting entries
- * along the way. Does NOT stop at compaction boundaries - those are included and their
- * summaries become context.
+ * along the way. Stops at the newest compaction boundary: the compaction entry itself
+ * is included (its summary already represents everything older), but entries before
+ * it are not, so abandoned exploration folded into an old compaction summary cannot be
+ * re-summarized and leak into branch summaries or goals as current context.
  *
  * @param session - Session manager (read-only access)
  * @param oldLeafId - Current position (where we're navigating from)
@@ -109,6 +111,7 @@ export function collectEntriesForBranchSummary(
 		const entry = session.getEntry(current);
 		if (!entry) break;
 		entries.push(entry);
+		if (entry.type === "compaction") break;
 		current = entry.parentId;
 	}
 	entries.reverse();

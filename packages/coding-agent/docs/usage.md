@@ -56,7 +56,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/copy` | Copy last assistant message to clipboard |
 | `/btw <question>`, `/side <question>` | Ask an inline side question without adding it to the session; replies continue the side conversation, esc returns |
 | `/export [file]` | Export session to HTML |
-| `/share` | Upload as private GitHub gist with shareable HTML link |
+| `/share` | Upload the full session (messages, system prompt, tools) as a private GitHub gist |
 | `/reload` | Reload keybindings, extensions, skills, prompts, and context files |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
@@ -154,7 +154,7 @@ Append to the default prompt without replacing it with `APPEND_SYSTEM.md` in eit
 
 Use `/export [file]` to write a session to HTML.
 
-Use `/share` to upload a private GitHub gist with a shareable HTML link.
+Use `/share` to upload a private GitHub gist with a shareable HTML link. The gist contains the **full session**: messages, system prompt, and tool definitions. If the session looks like it contains secrets (`sk-`, `AKIA`, `ghp_`, Bearer tokens), `/share` warns and asks for confirmation before uploading. Matched secret text is never shown in the warning.
 
 ## CLI Reference
 

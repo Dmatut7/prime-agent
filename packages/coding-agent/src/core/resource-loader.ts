@@ -410,7 +410,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 			? cliEnabledExtensions
 			: this.mergePaths(cliEnabledExtensions, enabledExtensions);
 
-		const extensionsResult = await loadExtensions(extensionPaths, this.cwd, this.eventBus);
+		const extensionsResult = await loadExtensions(
+			extensionPaths,
+			this.cwd,
+			this.eventBus,
+			this.settingsManager.getExtensionHandlerTimeoutMs(),
+		);
 		// Set before inline factories run so a factory can see which file-based
 		// extensions actually loaded this cycle (e.g. the built-in Herdr reporter
 		// defers to Herdr's own file-based integration only when it is active).
@@ -797,7 +802,14 @@ export class DefaultResourceLoader implements ResourceLoader {
 		for (const [index, factory] of this.extensionFactories.entries()) {
 			const extensionPath = `<inline:${index + 1}>`;
 			try {
-				const extension = await loadExtensionFromFactory(factory, this.cwd, this.eventBus, runtime, extensionPath);
+				const extension = await loadExtensionFromFactory(
+					factory,
+					this.cwd,
+					this.eventBus,
+					runtime,
+					extensionPath,
+					this.settingsManager.getExtensionHandlerTimeoutMs(),
+				);
 				extensions.push(extension);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : "failed to load extension";

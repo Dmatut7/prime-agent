@@ -240,9 +240,17 @@ function isImmediatePasteEscapeAbort(data: string): boolean {
 	return data === "\x1b[27u" || (data.startsWith("\x1b[27;") && data.endsWith("u"));
 }
 
-function containsCompleteKittyEscape(buffer: string): boolean {
-	if (buffer.includes("\x1b[27u")) return true;
-	return /\x1b\[27;[\d:]+u/.test(buffer);
+function findCompleteKittyEscape(buffer: string): { index: number; length: number } | null {
+	const simple = "\x1b[27u";
+	const simpleAt = buffer.indexOf(simple);
+	if (simpleAt !== -1) {
+		return { index: simpleAt, length: simple.length };
+	}
+	const match = buffer.match(/\x1b\[27;[\d:]+u/);
+	if (match?.index === undefined) {
+		return null;
+	}
+	return { index: match.index, length: match[0].length };
 }
 
 /**
@@ -364,8 +372,13 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			this.finishPasteWithoutTerminator();
 			return;
 		}
-		if (containsCompleteKittyEscape(this.pasteBuffer)) {
+		const kittyEsc = findCompleteKittyEscape(this.pasteBuffer);
+		if (kittyEsc) {
+			const remaining = this.pasteBuffer.slice(kittyEsc.index + kittyEsc.length);
 			this.discardPasteMode();
+			if (remaining.length > 0) {
+				this.process(remaining);
+			}
 			return;
 		}
 		// Idle timeout: each chunk proves the paste is still flowing.

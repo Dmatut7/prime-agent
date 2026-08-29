@@ -14,6 +14,7 @@ import { createEventBus, type EventBus } from "../event-bus.js";
 import type { ExecOptions } from "../exec.js";
 import { execCommand } from "../exec.js";
 import { createSyntheticSourceInfo } from "../source-info.js";
+import { awaitWithTimeout, DEFAULT_EXTENSION_HANDLER_TIMEOUT_MS } from "./timeout.js";
 import type {
 	Extension,
 	ExtensionAPI,
@@ -376,6 +377,7 @@ async function loadExtension(
 	cwd: string,
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
+	timeoutMs: number = DEFAULT_EXTENSION_HANDLER_TIMEOUT_MS,
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 
@@ -387,7 +389,10 @@ async function loadExtension(
 
 		const extension = createExtension(extensionPath, resolvedPath);
 		const api = createExtensionAPI(extension, runtime, cwd, eventBus);
-		await factory(api);
+		await awaitWithTimeout(Promise.resolve(factory(api)), {
+			timeoutMs,
+			label: "factory",
+		});
 
 		return { extension, error: null };
 	} catch (err) {
@@ -405,24 +410,33 @@ export async function loadExtensionFromFactory(
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
 	extensionPath = "<inline>",
+	timeoutMs: number = DEFAULT_EXTENSION_HANDLER_TIMEOUT_MS,
 ): Promise<Extension> {
 	const extension = createExtension(extensionPath, extensionPath);
 	const api = createExtensionAPI(extension, runtime, cwd, eventBus);
-	await factory(api);
+	await awaitWithTimeout(Promise.resolve(factory(api)), {
+		timeoutMs,
+		label: "factory",
+	});
 	return extension;
 }
 
 /**
  * Load extensions from paths.
  */
-export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
+export async function loadExtensions(
+	paths: string[],
+	cwd: string,
+	eventBus?: EventBus,
+	timeoutMs: number = DEFAULT_EXTENSION_HANDLER_TIMEOUT_MS,
+): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
 	const resolvedEventBus = eventBus ?? createEventBus();
 	const runtime = createExtensionRuntime();
 
 	for (const extPath of paths) {
-		const { extension, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime);
+		const { extension, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime, timeoutMs);
 
 		if (error) {
 			errors.push({ path: extPath, error });
@@ -554,6 +568,7 @@ export async function discoverAndLoadExtensions(
 	cwd: string,
 	agentDir: string = getAgentDir(),
 	eventBus?: EventBus,
+	timeoutMs: number = DEFAULT_EXTENSION_HANDLER_TIMEOUT_MS,
 ): Promise<LoadExtensionsResult> {
 	const allPaths: string[] = [];
 	const seen = new Set<string>();
@@ -589,5 +604,5 @@ export async function discoverAndLoadExtensions(
 		addPaths([resolved]);
 	}
 
-	return loadExtensions(allPaths, cwd, eventBus);
+	return loadExtensions(allPaths, cwd, eventBus, timeoutMs);
 }

@@ -140,9 +140,10 @@ prime-agent --offline
 | `retry.enabled` | boolean | `true` | Enable automatic agent-level retry on transient errors |
 | `retry.maxRetries` | number | `3` | Maximum agent-level retry attempts |
 | `retry.baseDelayMs` | number | `2000` | Base delay for agent-level exponential backoff (2s, 4s, 8s) |
-| `retry.provider.timeoutMs` | number | SDK default | Provider/SDK request timeout in milliseconds |
+| `retry.provider.timeoutMs` | number | SDK default | Provider/SDK request timeout in milliseconds (covers the request up to response headers) |
 | `retry.provider.maxRetries` | number | SDK default | Provider/SDK retry attempts |
 | `retry.provider.maxRetryDelayMs` | number | `60000` | Max server-requested delay before failing (60s) |
+| `retry.provider.streamStallTimeoutMs` | number | `300000` | Abort a provider stream after this many milliseconds without any response events (5 min). The turn settles as a retryable error, so auto-retry picks it up. Set to `0` to disable |
 
 When a provider requests a retry delay longer than `retry.provider.maxRetryDelayMs` (e.g., Google's "quota will reset after 5h"), the request fails immediately with an informative error instead of waiting silently. Set to `0` to disable the cap.
 
@@ -161,6 +162,43 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 }
 ```
 
+### Stall Watchdog
+
+Last-resort protection against sessions that go silent mid-turn (dead provider
+stream, wedged tool, loop that never settles). While a turn is running, the
+watchdog counts time since the last observed session activity:
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `stallWatchdog.enabled` | boolean | `true` | Enable the session stall watchdog |
+| `stallWatchdog.warnAfterSeconds` | number | `300` | Warn (and log diagnostics) after this many silent seconds (5 min) |
+| `stallWatchdog.abortAfterSeconds` | number | `900` | Automatically abort the current turn after this many silent seconds (15 min). Set to `0` for warn-only mode |
+
+When the warn stage fires, Prime Agent writes a diagnostics snapshot (last
+event type/time, in-flight tool calls, input-pump state, unfinished queued
+actions) to the structured agent log and shows a warning. If silence reaches
+`abortAfterSeconds`, the turn is aborted automatically so the session becomes
+usable again instead of appearing busy forever; the abort behaves like pressing
+Escape. Phases that legitimately own the turn boundary (compaction, branch
+summaries, serialized refinement) pause escalation instead of counting against it.
+
+Interactions: provider-stream silence is usually caught earlier by
+`retry.provider.streamStallTimeoutMs` (retryable error + auto-retry). Commands
+that are legitimately long and silent should set `timeout` explicitly in the
+bash tool (or raise/disable the watchdog thresholds for such workloads).
+
+```json
+{
+  "stallWatchdog": {
+    "enabled": true,
+    "warnAfterSeconds": 300,
+    "abortAfterSeconds": 900
+  }
+}
+```
+
+To disable entirely: `{ "stallWatchdog": { "enabled": false } }`.
+
 ### Message Delivery
 
 | Setting | Type | Default | Description |
@@ -177,6 +215,22 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 | `terminal.clearOnShrink` | boolean | `false` | Clear empty rows when content shrinks (can cause flicker) |
 | `images.autoResize` | boolean | `true` | Resize images to 2000x2000 max |
 | `images.blockImages` | boolean | `false` | Block all images from being sent to LLM |
+
+### Tools
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `tools.bashTimeoutSeconds` | number | `600` | Default timeout (seconds) for bash tool calls when the model passes no `timeout`. The model can override per call, and `timeout: 0` disables the timeout for that call. Set to `0` to make "no timeout" the default (not recommended: a hung command can wedge the turn until the stall watchdog aborts it) |
+
+When a command hits the timeout, its process group is killed and the model
+receives an error explaining that the command was killed and how to re-run it
+with a larger `timeout` (or `timeout: 0` for no limit).
+
+```json
+{
+  "tools": { "bashTimeoutSeconds": 600 }
+}
+```
 
 ### Shell
 
@@ -244,6 +298,7 @@ Paths in `~/.prime/agent/settings.json` resolve relative to `~/.prime/agent`. Pa
 |---------|------|---------|-------------|
 | `packages` | array | `[]` | npm/git packages to load resources from |
 | `extensions` | string[] | `[]` | Local extension file paths or directories |
+| `extensionHandlerTimeoutMs` | number | `30000` | Per-handler and factory load timeout in milliseconds. Timed-out event handlers are skipped so the session stays live; timed-out `tool_call` handlers block the tool (fail-safe). `0` disables the wall-clock timeout. |
 | `skills` | string[] | `[]` | Local skill file paths or directories |
 | `prompts` | string[] | `[]` | Local prompt template paths or directories |
 | `themes` | string[] | `[]` | Local theme file paths or directories |

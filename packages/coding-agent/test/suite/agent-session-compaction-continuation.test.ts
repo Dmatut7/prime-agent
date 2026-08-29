@@ -162,7 +162,7 @@ describe("compaction continuation", () => {
 		expect(continueSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("e2e: tool loop interrupted by a skipped threshold compaction resumes", async () => {
+	it("e2e: tool loop interrupted by threshold compaction summarizes the turn prefix and resumes", async () => {
 		const bigTool = {
 			name: "big",
 			label: "big",
@@ -175,7 +175,8 @@ describe("compaction continuation", () => {
 		};
 		const harness = await createHarness({
 			tools: [bigTool],
-			// Huge keepRecentTokens: prepareCompaction finds nothing to summarize and throws CompactionSkippedError.
+			// Huge keepRecentTokens is capped to the post-reserve window, so the
+			// giant turn is split instead of being declared uncompactable.
 			settings: { compaction: { enabled: true, reserveTokens: 500, keepRecentTokens: 1_000_000 } },
 			models: [{ id: "faux-1", contextWindow: 6_000 }],
 			persistSession: true,
@@ -183,6 +184,7 @@ describe("compaction continuation", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("big", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("turn prefix summary"),
 			fauxAssistantMessage("final answer after the tool call"),
 		]);
 
@@ -192,8 +194,14 @@ describe("compaction continuation", () => {
 		await new Promise((resolve) => setTimeout(resolve, 300));
 
 		expect(harness.eventsOfType("compaction_start").map((event) => event.reason)).toContain("threshold");
-		expect(harness.eventsOfType("compaction_end")[0]?.errorMessage).toContain("skipped");
+		const endEvents = harness.eventsOfType("compaction_end");
+		expect(endEvents[0]?.errorMessage).toBeUndefined();
+		expect(endEvents[0]?.result).toBeDefined();
 		expect(harness.getPendingResponseCount()).toBe(0);
+		expect(harness.session.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "final answer after the tool call" }],
+		});
 	});
 
 	it("headless idle includes a successful post-compaction continuation", async () => {

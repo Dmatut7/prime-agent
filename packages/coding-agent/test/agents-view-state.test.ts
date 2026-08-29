@@ -124,6 +124,22 @@ describe("agents view state", () => {
 		expect(sectionTitle("running")).toBe("Running");
 	});
 
+	test("flags busy sessions that went quiet for a long time", () => {
+		const fresh = new Date().toISOString();
+		const stale = new Date(Date.now() - 12 * 60_000).toISOString();
+		const [freshRow] = buildAgentsViewRows([
+			makeSummary({ isStreaming: true, isRunningTools: true, lastActivityAt: fresh }),
+		]);
+		expect(freshRow.statusLabel).toBe("running tools");
+		const [staleRow] = buildAgentsViewRows([
+			makeSummary({ isStreaming: true, isRunningTools: true, lastActivityAt: stale }),
+		]);
+		expect(staleRow.statusLabel).toBe("running tools (no activity 12m)");
+		// Idle sessions never get the quiet marker, even with stale activity.
+		const [idleRow] = buildAgentsViewRows([makeSummary({ activity: "idle", lastActivityAt: stale })]);
+		expect(idleRow.statusLabel).not.toContain("no activity");
+	});
+
 	test("labels replied subagents with active heartbeats as heartbeat active", () => {
 		const summaries = [
 			makeSummary({

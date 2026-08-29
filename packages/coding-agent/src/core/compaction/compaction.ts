@@ -202,11 +202,31 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 
 /**
  * Check if compaction should trigger based on context usage.
+ *
+ * When the configured reserve consumes the whole window (or more), no sustainable
+ * threshold exists: any retained context, including a fresh summary, would sit
+ * above it again immediately and retrigger every turn. Threshold compaction is
+ * then disabled; overflow recovery remains the backstop.
  */
 export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
 	if (!settings.enabled) return false;
 	if (contextWindow <= 0) return false;
-	return contextTokens > contextWindow - settings.reserveTokens;
+	const threshold = contextWindow - settings.reserveTokens;
+	if (threshold <= 0) return false;
+	return contextTokens > threshold;
+}
+
+/**
+ * Cap keepRecentTokens so the retained slice can fit under the post-reserve
+ * threshold. An uncapped keepRecent above `contextWindow - reserveTokens` makes
+ * every compaction re-trigger on the very next turn, because the retained
+ * context already exceeds the threshold by construction.
+ */
+export function capKeepRecentTokens(settings: CompactionSettings, contextWindow?: number): number {
+	if (!contextWindow || contextWindow <= 0) return settings.keepRecentTokens;
+	const threshold = contextWindow - settings.reserveTokens;
+	if (threshold <= 0) return 0;
+	return Math.min(settings.keepRecentTokens, threshold);
 }
 /**
  * Estimate token count for a message using chars/4 heuristic.
@@ -224,6 +244,9 @@ export function estimateTokens(message: AgentMessage): number {
 				for (const block of content) {
 					if (block.type === "text" && block.text) {
 						chars += block.text.length;
+					}
+					if (block.type === "image") {
+						chars += 4800; // Same image estimate as tool results
 					}
 				}
 			}
@@ -384,12 +407,19 @@ export function findCutPoint(
 		const messageTokens = estimateTokens(entry.message);
 		accumulatedTokens += messageTokens;
 		if (accumulatedTokens >= keepRecentTokens) {
+			let nearestCut: number | undefined;
 			for (let c = 0; c < cutPoints.length; c++) {
 				if (cutPoints[c] >= i) {
-					cutIndex = cutPoints[c];
+					nearestCut = cutPoints[c];
 					break;
 				}
 			}
+			// The budget can be crossed at an entry with no cut point at or after it
+			// (typically one huge trailing tool result). Cutting at the first cut
+			// point then keeps everything and summarizes nothing, so the threshold
+			// re-fires every turn. Cut at the closest valid point before it instead:
+			// its tool results still follow, and everything older gets summarized.
+			cutIndex = nearestCut ?? cutPoints[cutPoints.length - 1];
 			break;
 		}
 	}
@@ -502,8 +532,36 @@ export function buildSummarizationPrompt(customInstructions?: string, previousSu
 }
 
 /**
+ * Trim summarization input to fit a token budget, keeping the newest messages.
+ * Returns the kept messages and how many older messages were elided. A budget of
+ * 0 (or unknown window) disables trimming. The newest message is always kept so
+ * summarization has something to work with.
+ */
+export function budgetSummarizationInput(
+	messages: AgentMessage[],
+	tokenBudget: number,
+): { messages: AgentMessage[]; elided: number } {
+	if (tokenBudget <= 0) return { messages, elided: 0 };
+	let totalTokens = 0;
+	let start = messages.length;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const tokens = estimateTokens(messages[i]);
+		if (totalTokens + tokens > tokenBudget) break;
+		totalTokens += tokens;
+		start = i;
+	}
+	if (start === messages.length && messages.length > 0) start = messages.length - 1;
+	return { messages: messages.slice(start), elided: start };
+}
+
+/**
  * Generate a summary of the conversation using the LLM.
  * If previousSummary is provided, uses the update prompt to merge.
+ *
+ * The input is trimmed to the model's usable window (mirroring branch
+ * summarization) so a large context cannot overflow the summarization request
+ * itself. Oldest messages are elided first; file-operation tracking is computed
+ * from the full preparation elsewhere and is unaffected.
  */
 export async function generateSummary(
 	currentMessages: AgentMessage[],
@@ -520,9 +578,16 @@ export async function generateSummary(
 
 	const basePrompt = buildSummarizationPrompt(customInstructions, previousSummary);
 	// Serialize before the LLM call so it summarizes rather than continues this conversation.
-	const llmMessages = convertToLlm(currentMessages);
+	const contextWindow = model.contextWindow || 0;
+	const inputBudget = contextWindow > 0 ? contextWindow - reserveTokens : 0;
+	const { messages: budgetedMessages, elided } = budgetSummarizationInput(currentMessages, inputBudget);
+	const llmMessages = convertToLlm(budgetedMessages);
 	const conversationText = serializeConversation(llmMessages);
-	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
+	let promptText = "";
+	if (elided > 0) {
+		promptText += `[Note: ${elided} older message(s) were elided to fit the summarization budget. Reflect any preserved prior summary instead of them.]\n`;
+	}
+	promptText += `<conversation>\n${conversationText}\n</conversation>\n\n`;
 	if (previousSummary) {
 		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
 	}
@@ -579,6 +644,7 @@ export interface CompactionPreparation {
 export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
+	contextWindow?: number,
 ): CompactionPreparation | undefined {
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
@@ -604,7 +670,8 @@ export function prepareCompaction(
 
 	const tokensBefore = estimateContextTokens(buildSessionContext(pathEntries).messages).tokens;
 
-	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
+	const keepRecentTokens = capKeepRecentTokens(settings, contextWindow);
+	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, keepRecentTokens);
 	const firstKeptEntry = pathEntries[cutPoint.firstKeptEntryIndex];
 	if (!firstKeptEntry?.id) {
 		return undefined; // Session needs migration

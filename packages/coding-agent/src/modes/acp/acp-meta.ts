@@ -64,6 +64,12 @@ export interface PrimeAgentSessionPersistMeta {
 	error: string;
 }
 
+export interface PrimeAgentStallWatchdogMeta {
+	status: "warning" | "aborted";
+	message: string;
+	silentMs: number;
+}
+
 export interface PrimeAgentQuiescenceMeta {
 	/** Subagents that have not reached a terminal state at the observation point. */
 	outstandingSubagents: number;
@@ -120,6 +126,7 @@ export interface PrimeAgentSessionMeta {
 	goal?: PrimeAgentGoalMeta;
 	refinement?: PrimeAgentRefinementMeta;
 	sessionPersistence?: PrimeAgentSessionPersistMeta;
+	stallWatchdog?: PrimeAgentStallWatchdogMeta;
 	agentMessage?: PrimeAgentAgentMessageMeta;
 	sessionId?: string;
 	rlmDepth?: number;

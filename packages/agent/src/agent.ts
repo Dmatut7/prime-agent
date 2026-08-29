@@ -114,6 +114,8 @@ export interface AgentOptions {
 	transport?: Transport;
 	maxRetryDelayMs?: number;
 	toolExecution?: ToolExecutionMode;
+	/** See `AgentLoopConfig.streamStallTimeoutMs`. */
+	streamStallTimeoutMs?: number;
 }
 
 class PendingMessageQueue {
@@ -218,6 +220,7 @@ export class Agent {
 	public transport: Transport;
 	public maxRetryDelayMs?: number;
 	public toolExecution: ToolExecutionMode;
+	public streamStallTimeoutMs?: number;
 
 	constructor(options: AgentOptions = {}) {
 		this._state = createMutableAgentState(options.initialState);
@@ -239,6 +242,7 @@ export class Agent {
 		this.transport = options.transport ?? "auto";
 		this.maxRetryDelayMs = options.maxRetryDelayMs;
 		this.toolExecution = options.toolExecution ?? "parallel";
+		this.streamStallTimeoutMs = options.streamStallTimeoutMs;
 	}
 
 	/**
@@ -472,6 +476,7 @@ export class Agent {
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
 			toolExecution: this.toolExecution,
+			streamStallTimeoutMs: this.streamStallTimeoutMs,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
 			shouldStopAfterTurn: async (context) => this.shouldStopAfterTurn?.(context) ?? false,
