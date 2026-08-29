@@ -85,6 +85,32 @@ describe("F1 agent message wakes a suspended session input pump", () => {
 		expect(getAssistantTexts(harness)).toEqual(["queued done", "agent message done"]);
 	});
 
+	it("does not break the update-restart fence when an agent message is queued", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("must not run"), fauxAssistantMessage("also must not run")]);
+
+		await harness.session.followUp("queued before restart");
+		harness.session.abortForUpdateRestart();
+		expect(harness.session.isQueuedWorkSuspended).toBe(true);
+
+		// Queued work must survive into the restart manifest; an agent message may
+		// join the queue but must not lift the update-restart suspension.
+		const message = createAgentSessionMessage(createPayload("agentmsg_f1_update_restart", "behind the fence"));
+		await harness.session.acceptAgentMessagePrompt(message.content, {
+			expandPromptTemplates: false,
+			streamingBehavior: "followUp",
+			queueIfBusy: true,
+			customMessage: message,
+		});
+
+		expect(harness.session.isQueuedWorkSuspended).toBe(true);
+		expect(harness.session.getFollowUpMessages()).toEqual(["queued before restart", message.content]);
+		await new Promise<void>((resolve) => setTimeout(resolve, 20));
+		expect(getAssistantTexts(harness)).toEqual([]);
+		expect(harness.getPendingResponseCount()).toBe(2);
+	});
+
 	it("still rejects a direct agent message when suspended with an empty queue", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

@@ -4572,6 +4572,7 @@ export class DaemonSupervisor {
 			return;
 		}
 		let publicPayload = frame.payload;
+		let streamingDeltaPayload: Uint8Array | undefined;
 		let decodedOutbound: DaemonOutbound | undefined;
 		if (payloadEncoding === "assistant-delta") {
 			let compactValue: unknown;
@@ -4585,12 +4586,20 @@ export class DaemonSupervisor {
 				this.scheduleCompactCatchup(worker, activeSessionId);
 				return;
 			}
+			// Always reconstruct: it validates the delta and drives desync
+			// catch-up even when only streaming_deltas clients are attached.
 			const reconstructed = this.streamReconstructor.reconstruct(compactValue);
 			if (!reconstructed) {
 				this.scheduleCompactCatchup(worker, activeSessionId);
 				return;
 			}
-			publicPayload = Buffer.from(serializeJsonLine(reconstructed));
+			// Capable clients consume the worker's original compact bytes
+			// verbatim; the full message_update serialization happens only when
+			// a legacy client still needs it.
+			streamingDeltaPayload = frame.payload;
+			if (this.sessionHasAttachedLegacyClient(activeSessionId)) {
+				publicPayload = Buffer.from(serializeJsonLine(reconstructed));
+			}
 		} else if (
 			sessionEventType === "message_start" ||
 			sessionEventType === "message_end" ||
@@ -4632,7 +4641,11 @@ export class DaemonSupervisor {
 				this.queueCatchup(client, activeSessionId, outboundType === "session_replaced" ? "replacement" : "resync");
 				continue;
 			}
-			this.writeSerialized(client, publicPayload);
+			const payload =
+				streamingDeltaPayload !== undefined && client.capabilities.has("streaming_deltas")
+					? streamingDeltaPayload
+					: publicPayload;
+			this.writeSerialized(client, payload);
 		}
 		if (
 			outboundType === "session_replaced" ||
@@ -4673,6 +4686,16 @@ export class DaemonSupervisor {
 		if (transcript) {
 			this.retireWorkerSnapshotCache(worker, activeSessionId, transcript);
 		}
+	}
+
+	/** Whether any client attached to the session still needs rebuilt full message_update payloads. */
+	private sessionHasAttachedLegacyClient(activeSessionId: string): boolean {
+		for (const client of this.clients) {
+			if (client.attachedActiveSessionIds.has(activeSessionId) && !client.capabilities.has("streaming_deltas")) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private scheduleCompactCatchup(worker: ResidentWorker, activeSessionId: string): void {

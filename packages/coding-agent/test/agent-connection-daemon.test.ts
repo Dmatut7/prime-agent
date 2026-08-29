@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { getModel } from "@earendil-works/pi-ai";
+import { type AssistantMessage, getModel } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import { MissingSessionCwdError } from "../src/core/session-cwd.js";
 import { SessionImportFileNotFoundError } from "../src/core/session-import-errors.js";
@@ -13,6 +13,7 @@ import type {
 	AgentConnectionSavedSessionInfo,
 	AgentConnectionState,
 } from "../src/modes/agent-connection/types.js";
+import { createCompactAssistantDelta } from "../src/modes/daemon/compact-session-stream.js";
 
 import {
 	DaemonCapabilityUnavailableError,
@@ -28,6 +29,7 @@ import {
 	DAEMON_SCHEMA_REVISION,
 	type DaemonAttachResult,
 	type DaemonCommand,
+	type DaemonEventMeta,
 	type DaemonOutbound,
 	type DaemonResponse,
 } from "../src/modes/daemon/daemon-protocol.js";
@@ -2118,7 +2120,14 @@ describe("DaemonAgentConnection", () => {
 		expect(fakeClient.requests.at(-1)).toMatchObject({
 			type: "attach",
 			activeSessionId: "active-1",
-			capabilities: ["attach_snapshot", "event_sequence", "extension_ui", "slim_attach", "chunked_snapshot"],
+			capabilities: [
+				"attach_snapshot",
+				"event_sequence",
+				"extension_ui",
+				"slim_attach",
+				"chunked_snapshot",
+				"streaming_deltas",
+			],
 			resumeCursor: {
 				activeSessionId: "active-1",
 				generation: "generation-active-1",
@@ -2804,7 +2813,14 @@ describe("DaemonAgentConnection", () => {
 			type: "attach",
 			activeSessionId: "active-1",
 			clientId: expect.any(String),
-			capabilities: ["attach_snapshot", "event_sequence", "extension_ui", "slim_attach", "chunked_snapshot"],
+			capabilities: [
+				"attach_snapshot",
+				"event_sequence",
+				"extension_ui",
+				"slim_attach",
+				"chunked_snapshot",
+				"streaming_deltas",
+			],
 			resumeCursor: {
 				activeSessionId: "active-1",
 				generation: "generation-active-1",
@@ -2816,7 +2832,14 @@ describe("DaemonAgentConnection", () => {
 		expect(fakeClient.requests.at(-1)).toMatchObject({
 			type: "attach",
 			activeSessionId: "active-1",
-			capabilities: ["attach_snapshot", "event_sequence", "extension_ui", "slim_attach", "chunked_snapshot"],
+			capabilities: [
+				"attach_snapshot",
+				"event_sequence",
+				"extension_ui",
+				"slim_attach",
+				"chunked_snapshot",
+				"streaming_deltas",
+			],
 			resumeCursor: {
 				activeSessionId: "active-1",
 				generation: "generation-active-1",
@@ -2875,7 +2898,14 @@ describe("DaemonAgentConnection", () => {
 			activeSessionId: "active-1",
 			supportsExtensionUi: true,
 			clientId: expect.any(String),
-			capabilities: ["attach_snapshot", "event_sequence", "extension_ui", "slim_attach", "chunked_snapshot"],
+			capabilities: [
+				"attach_snapshot",
+				"event_sequence",
+				"extension_ui",
+				"slim_attach",
+				"chunked_snapshot",
+				"streaming_deltas",
+			],
 		});
 
 		fakeClient.emitMessage({
@@ -3038,5 +3068,204 @@ describe("DaemonAgentConnection", () => {
 		expect(fakeClient.getCloseListenerCount()).toBe(0);
 		expect(fakeClient.requests.map((request) => request.type)).toEqual(["attach", "detach"]);
 		expect(fakeClient.closeCount).toBe(1);
+	});
+});
+
+function b2AssistantMessage(content: AssistantMessage["content"]): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
+		api: "test-api",
+		provider: "test-provider",
+		model: "test-model",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 2,
+	};
+}
+
+function b2Meta(activeSessionId: string, sequence: number): DaemonEventMeta {
+	return {
+		id: `${activeSessionId}:${sequence}`,
+		protocol: DAEMON_PROTOCOL_INFO,
+		activeSessionId,
+		sequence,
+		cursor: { generation: "generation-active-1", sequence },
+		emittedAt: "2026-01-01T00:00:00.000Z",
+	};
+}
+
+describe("DaemonAgentConnection streaming deltas (B2)", () => {
+	it("accumulates assistant_stream_delta events into streamed message updates", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+		const updates: AgentMessage[] = [];
+		connection.subscribe((event) => {
+			if (event.type === "session_event" && event.event.type === "message_update") {
+				updates.push(event.event.message);
+			}
+		});
+		await connection.attach();
+
+		fakeClient.emitMessage({
+			type: "session_event",
+			activeSessionId: "active-1",
+			event: { type: "message_start", message: b2AssistantMessage([]) },
+			meta: b2Meta("active-1", 21),
+		});
+		const started = b2AssistantMessage([{ type: "text", text: "" }]);
+		const startDelta = createCompactAssistantDelta({
+			type: "session_event",
+			activeSessionId: "active-1",
+			event: {
+				type: "message_update",
+				message: started,
+				assistantMessageEvent: { type: "text_start", contentIndex: 0, partial: started },
+			},
+			meta: b2Meta("active-1", 22),
+		});
+		if (!startDelta) throw new Error("expected text_start delta");
+		fakeClient.emitMessage(startDelta);
+		const partial = b2AssistantMessage([{ type: "text", text: "Hel" }]);
+		const firstDelta = createCompactAssistantDelta({
+			type: "session_event",
+			activeSessionId: "active-1",
+			event: {
+				type: "message_update",
+				message: partial,
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Hel", partial },
+			},
+			meta: b2Meta("active-1", 23),
+		});
+		if (!firstDelta) throw new Error("expected first text_delta");
+		fakeClient.emitMessage(firstDelta);
+		const fuller = b2AssistantMessage([{ type: "text", text: "Hello" }]);
+		const secondDelta = createCompactAssistantDelta({
+			type: "session_event",
+			activeSessionId: "active-1",
+			event: {
+				type: "message_update",
+				message: fuller,
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "lo", partial: fuller },
+			},
+			meta: b2Meta("active-1", 24),
+		});
+		if (!secondDelta) throw new Error("expected second text_delta");
+		fakeClient.emitMessage(secondDelta);
+
+		await vi.waitFor(() => expect(updates).toHaveLength(3));
+		expect(
+			updates.map(
+				(message) => ((message as AssistantMessage).content[0] as { type: string; text?: string }).text ?? "",
+			),
+		).toEqual(["", "Hel", "Hello"]);
+	});
+
+	it("drops a compact delta that arrives without a seeded stream", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+		const updates: AgentMessage[] = [];
+		connection.subscribe((event) => {
+			if (event.type === "session_event" && event.event.type === "message_update") {
+				updates.push(event.event.message);
+			}
+		});
+		await connection.attach();
+
+		const orphan = b2AssistantMessage([{ type: "text", text: "orphan" }]);
+		const orphanDelta = createCompactAssistantDelta({
+			type: "session_event",
+			activeSessionId: "active-1",
+			event: {
+				type: "message_update",
+				message: orphan,
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "orphan", partial: orphan },
+			},
+			meta: b2Meta("active-1", 31),
+		});
+		if (!orphanDelta) throw new Error("expected orphan text_delta");
+		fakeClient.emitMessage(orphanDelta);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(updates).toEqual([]);
+
+		// A fresh message_start re-seeds the accumulator and later deltas flow again.
+		fakeClient.emitMessage({
+			type: "session_event",
+			activeSessionId: "active-1",
+			event: { type: "message_start", message: b2AssistantMessage([]) },
+			meta: b2Meta("active-1", 32),
+		});
+		const reseeded = b2AssistantMessage([{ type: "text", text: "" }]);
+		const reseedStart = createCompactAssistantDelta({
+			type: "session_event",
+			activeSessionId: "active-1",
+			event: {
+				type: "message_update",
+				message: reseeded,
+				assistantMessageEvent: { type: "text_start", contentIndex: 0, partial: reseeded },
+			},
+			meta: b2Meta("active-1", 33),
+		});
+		if (!reseedStart) throw new Error("expected reseeded text_start");
+		fakeClient.emitMessage(reseedStart);
+		const seeded = b2AssistantMessage([{ type: "text", text: "back" }]);
+		const seededDelta = createCompactAssistantDelta({
+			type: "session_event",
+			activeSessionId: "active-1",
+			event: {
+				type: "message_update",
+				message: seeded,
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "back", partial: seeded },
+			},
+			meta: b2Meta("active-1", 34),
+		});
+		if (!seededDelta) throw new Error("expected seeded text_delta");
+		fakeClient.emitMessage(seededDelta);
+		await vi.waitFor(() => expect(updates).toHaveLength(2));
+		expect(
+			((updates[1] as AssistantMessage | undefined)?.content[0] as { type: string; text?: string } | undefined)
+				?.text,
+		).toBe("back");
+	});
+
+	it("still consumes full legacy message_update events after advertising streaming_deltas", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+		const updates: AgentMessage[] = [];
+		connection.subscribe((event) => {
+			if (event.type === "session_event" && event.event.type === "message_update") {
+				updates.push(event.event.message);
+			}
+		});
+		await connection.attach();
+		expect(fakeClient.requests.at(-1)).toMatchObject({
+			type: "attach",
+			capabilities: expect.arrayContaining(["streaming_deltas"]),
+		});
+
+		// An old daemon ignores the capability and keeps sending rebuilt updates.
+		const full = b2AssistantMessage([{ type: "text", text: "legacy full update" }]);
+		fakeClient.emitMessage({
+			type: "session_event",
+			activeSessionId: "active-1",
+			event: {
+				type: "message_update",
+				message: full,
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "legacy full update", partial: full },
+			},
+			meta: b2Meta("active-1", 41),
+		});
+		await vi.waitFor(() => expect(updates).toHaveLength(1));
+		expect(
+			((updates[0] as AssistantMessage | undefined)?.content[0] as { type: string; text?: string } | undefined)
+				?.text,
+		).toBe("legacy full update");
 	});
 });

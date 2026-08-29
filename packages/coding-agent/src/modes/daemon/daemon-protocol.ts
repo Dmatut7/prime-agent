@@ -1,5 +1,12 @@
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { ImageContent, ServiceTier, TextContent, Transport } from "@earendil-works/pi-ai";
+import type {
+	AssistantMessage,
+	AssistantMessageEvent,
+	ImageContent,
+	ServiceTier,
+	TextContent,
+	Transport,
+} from "@earendil-works/pi-ai";
 import type {
 	AgentSessionMessageDeliveryMode,
 	AgentSessionMessageReceipt,
@@ -70,8 +77,11 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 23 was claimed twice: upstream assigned it to the worker roster pull
 // (list_agent_peers), this fork assigned it to omitStreamingMessages on list.
 // Revision 24 unifies the fork merge and carries both.
-export const DAEMON_SCHEMA_REVISION = 24;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-24-3e65c87439aa";
+// Revision 25 adds the streaming_deltas capability and the assistant_stream_delta
+// outbound event: the supervisor forwards compact per-token deltas to capable
+// clients instead of rebuilding the full message_update payload.
+export const DAEMON_SCHEMA_REVISION = 25;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-25-4044beb7c9f4";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -89,7 +99,12 @@ export type DaemonClientCapability =
 	| "extension_ui"
 	| "slim_attach"
 	| "chunked_snapshot"
-	| "client_owned_sessions";
+	| "client_owned_sessions"
+	// The supervisor forwards compact assistant stream deltas
+	// (assistant_stream_delta) instead of rebuilt full message_update events to
+	// clients that advertise this capability. Clients must accumulate the deltas
+	// into the streaming assistant message themselves.
+	| "streaming_deltas";
 export type DaemonPromptAdmissionCancellationStatus = "cancelled" | "owned" | "unknown";
 export interface DaemonPromptAdmissionCancellationResult {
 	status: DaemonPromptAdmissionCancellationStatus;
@@ -146,6 +161,7 @@ export const DAEMON_SUPPORTED_CLIENT_CAPABILITIES: readonly DaemonClientCapabili
 	"slim_attach",
 	"chunked_snapshot",
 	"client_owned_sessions",
+	"streaming_deltas",
 ];
 
 export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
@@ -948,6 +964,26 @@ export type DaemonHeartbeat = AgentConnectionHeartbeat;
 export type DaemonAgentSessionMessageReceipt = AgentSessionMessageReceipt;
 export type DaemonAgentSessionMessageSafetyStatus = AgentSessionMessageSafetyStatus;
 
+/** Assistant stream events without the full `partial` message snapshot. */
+type WithoutPartialMessage<T> = T extends { partial: AssistantMessage } ? Omit<T, "partial"> : T;
+export type CompactAssistantMessageEvent = WithoutPartialMessage<AssistantMessageEvent>;
+
+/**
+ * Compact per-token assistant streaming delta sent to clients that negotiate the
+ * streaming_deltas capability instead of the rebuilt full message_update event.
+ * Clients accumulate these into the streaming assistant message; contentStart
+ * seeds a new content block and toolCallArguments carries the parsed arguments
+ * snapshot for tool-call deltas.
+ */
+export interface CompactAssistantDelta {
+	type: "assistant_stream_delta";
+	activeSessionId: string;
+	assistantMessageEvent: CompactAssistantMessageEvent;
+	contentStart?: AssistantMessage["content"][number];
+	toolCallArguments?: Record<string, unknown>;
+	meta?: DaemonEventMeta;
+}
+
 export type DaemonOutbound =
 	| DaemonResponse
 	| DaemonRequestProgress
@@ -1049,7 +1085,8 @@ export type DaemonOutbound =
 			event: string;
 			error: string;
 			meta?: DaemonEventMeta;
-	  };
+	  }
+	| CompactAssistantDelta;
 
 export const DAEMON_OUTBOUND_COMPATIBILITY = {
 	response: LEGACY_DAEMON_COMMAND,
@@ -1072,6 +1109,7 @@ export const DAEMON_OUTBOUND_COMPATIBILITY = {
 	session_closed: LEGACY_DAEMON_COMMAND,
 	extension_ui_request: LEGACY_DAEMON_COMMAND,
 	extension_error: LEGACY_DAEMON_COMMAND,
+	assistant_stream_delta: { minProtocol: 7, minSchemaRevision: 25, capability: "streaming_deltas" },
 } as const satisfies Record<DaemonOutbound["type"], DaemonCommandCompatibility>;
 
 export function createDaemonCommandEnvelope<TCommand extends DaemonCommand>(
