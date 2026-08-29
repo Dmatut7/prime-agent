@@ -339,9 +339,36 @@ describe("Kitty image cursor movement", () => {
 			);
 
 			assert.deepStrictEqual(image.render(80), ["    ╰─ [result.png · image/png · 20×10]"]);
+			assert.strictEqual(image.getRetainedBase64Length(), 0);
 		} finally {
 			resetCapabilitiesCache();
 		}
+	});
+
+	it("drops the base64 payload after constructing a fallback-only image", () => {
+		const payload = "A".repeat(4096);
+		const image = new Image(
+			payload,
+			"image/png",
+			{ fallbackColor: (value) => value },
+			{ fallbackOnly: true, filename: "shot.png" },
+			{ widthPx: 20, heightPx: 10 },
+		);
+		assert.strictEqual(image.getRetainedBase64Length(), 0);
+		assert.deepStrictEqual(image.render(80), ["[shot.png · image/png · 20×10]"]);
+		assert.strictEqual(image.getRetainedBase64Length(), 0);
+	});
+
+	it("keeps base64 when terminal graphics may still need it", () => {
+		const payload = "AAAA";
+		const image = new Image(
+			payload,
+			"image/png",
+			{ fallbackColor: (value) => value },
+			{ fallbackOnly: false },
+			{ widthPx: 20, heightPx: 20 },
+		);
+		assert.strictEqual(image.getRetainedBase64Length(), payload.length);
 	});
 });
 
