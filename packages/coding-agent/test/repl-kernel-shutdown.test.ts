@@ -68,14 +68,47 @@ describe("ReplKernelManager graceful shutdown", () => {
 			vi.spyOn(manager as unknown as { captureSnapshot: () => Promise<null> }, "captureSnapshot").mockResolvedValue(
 				null,
 			);
+			const child = internals.child;
 			const shutdown = manager.shutdown(options);
+			// Graceful deadline, then the SIGTERM grace and the SIGKILL confirmation waits.
 			await vi.advanceTimersByTimeAsync(5_000);
+			await vi.advanceTimersByTimeAsync(2_000);
+			await vi.advanceTimersByTimeAsync(2_000);
 			await expect(shutdown).resolves.toBe(true);
 			expect(internals.kernelStderr).toContain("Kernel did not shut down within 5000ms");
+			expect(internals.kernelStderr).toContain("sending SIGKILL");
+			const killSignals = (child.kill as unknown as { mock: { calls: [NodeJS.Signals?][] } }).mock.calls.map(
+				(call) => call[0],
+			);
+			expect(killSignals[0]).toBe("SIGTERM");
+			expect(killSignals).toContain("SIGKILL");
 			expect(internals.child).toBeUndefined();
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("interrupts a busy cell before the protocol shutdown so the runtime FIFO drains", async () => {
+		const sent: { type?: string; id?: string }[] = [];
+		const { manager } = configuredManager(async (request, state) => {
+			sent.push({ type: request.type as string, id: request.id as string });
+			if (request.type === "shutdown") {
+				state.handleEvent({ event: "done", id: request.id, status: "ok" });
+				state.child.exitCode = 0;
+				state.child.emit("exit", 0, null);
+			}
+		});
+		// A cell still running: the queued shutdown request would wedge behind it.
+		(manager as unknown as { activeExecution?: object }).activeExecution = {
+			requestId: "cell-busy",
+			reject: () => {},
+			resolve: () => {},
+		};
+
+		await manager.shutdown();
+
+		expect(sent.map((request) => request.type)).toEqual(["interrupt", "shutdown"]);
+		expect(sent[0]?.id).toBe("cell-busy");
 	});
 
 	it("does not finish shutdown before the stdin write settles", async () => {

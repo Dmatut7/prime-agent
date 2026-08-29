@@ -23,7 +23,9 @@ import {
 	KERNEL_ABORT_GRACE_MS,
 	KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
 	KERNEL_BUSY_REUSE_WAIT_MS,
+	KERNEL_KILL_GRACE_MS,
 	KERNEL_SHUTDOWN_TIMEOUT_MS,
+	KERNEL_TERM_GRACE_MS,
 	type KernelAttachment,
 	KernelBusyAfterInterruptError,
 	type KernelDiffDisplay,
@@ -1237,6 +1239,10 @@ export class ReplKernelManager {
 			await this.flushSnapshotForDispose();
 			if (this.startStale(generation)) return false;
 		}
+		// Free the runtime's FIFO before asking it to shut down: the queued shutdown
+		// request only runs once the active request finishes, so a busy cell would
+		// otherwise stall the graceful path all the way to the kill deadline.
+		if (this.activeExecution) void this.interrupt().catch(() => undefined);
 		// Protocol shutdown first: the runtime closes MCP servers and kills live bash() process groups a bare hard-kill would leak.
 		const protocolShutdownAvailable = this.state === "running";
 		this.state = "shutdown";
@@ -1288,12 +1294,58 @@ export class ReplKernelManager {
 			if (doneWaiterId) this.pendingDoneWaiters.delete(doneWaiterId);
 			if (this.gracefulShutdownGeneration === generation) this.gracefulShutdownGeneration = undefined;
 			if (!this.startStale(generation)) {
+				await this.terminateKernelProcess();
 				this.cleanupResources();
 				performedCleanup = true;
 			}
 		}
 
 		return performedCleanup;
+	}
+
+	/**
+	 * Bounded kill escalation for a kernel that did not exit gracefully: SIGTERM,
+	 * wait for a confirmed exit, then SIGKILL and wait again. A cell may rebind or
+	 * ignore signal handlers in-process, so TERM alone is not a guaranteed kill;
+	 * waiting on each step keeps teardown observers from racing a half-dead child.
+	 */
+	private async terminateKernelProcess(): Promise<void> {
+		const child = this.child;
+		if (!child || child.exitCode !== null || child.signalCode !== null) return;
+		try {
+			child.kill("SIGTERM");
+		} catch {
+			// The kernel has already exited.
+		}
+		if (await this.waitForChildExit(child, KERNEL_TERM_GRACE_MS)) return;
+		this.appendKernelDiagnostic(`kernel did not exit within ${KERNEL_TERM_GRACE_MS}ms of SIGTERM; sending SIGKILL`);
+		try {
+			child.kill("SIGKILL");
+		} catch {
+			// The kernel has already exited.
+		}
+		if (!(await this.waitForChildExit(child, KERNEL_KILL_GRACE_MS))) {
+			this.appendKernelDiagnostic("kernel did not exit after SIGKILL; giving up waiting");
+		}
+	}
+
+	/** Resolves true when the child exits within the timeout (already exited: true). */
+	private waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+		if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+		return new Promise<boolean>((resolve) => {
+			let settled = false;
+			const finish = (exited: boolean) => {
+				if (settled) return;
+				settled = true;
+				globalThis.clearTimeout(timer);
+				child.removeListener("exit", onExit);
+				resolve(exited);
+			};
+			const onExit = () => finish(true);
+			child.once("exit", onExit);
+			const timer = globalThis.setTimeout(() => finish(false), timeoutMs);
+			timer.unref?.();
+		});
 	}
 
 	async restart(): Promise<void> {

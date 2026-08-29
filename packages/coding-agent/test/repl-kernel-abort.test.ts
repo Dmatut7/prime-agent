@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	AGENT_MESSAGE_DISPLAY_MIME,
@@ -555,23 +556,34 @@ describe("ReplKernelManager abort handling", () => {
 		manager.disposeSync();
 	});
 
-	it("dispose writes a protocol shutdown request before hard-killing the child", async () => {
-		const writeLine = vi.fn(async (_request: Record<string, unknown>) => {});
-		const { manager, internals } = runningManagerWith(writeLine);
-		const killSignals: (NodeJS.Signals | number | undefined)[] = [];
-		internals.child = {
-			kill: (signal?: NodeJS.Signals | number) => {
-				killSignals.push(signal);
-				return true;
-			},
-			pid: undefined,
-			stdin: { destroyed: false, destroy: () => undefined },
-		};
+	it("dispose writes a protocol shutdown request and escalates TERM to KILL", async () => {
+		vi.useFakeTimers();
+		try {
+			const writeLine = vi.fn(async (_request: Record<string, unknown>) => {});
+			const { manager, internals } = runningManagerWith(writeLine);
+			const killSignals: (NodeJS.Signals | number | undefined)[] = [];
+			internals.child = Object.assign(new EventEmitter(), {
+				exitCode: null,
+				signalCode: null,
+				kill: (signal?: NodeJS.Signals | number) => {
+					killSignals.push(signal);
+					return true;
+				},
+				pid: undefined,
+				stdin: { destroyed: false, destroy: () => undefined },
+			});
 
-		await manager.shutdown({ snapshot: true, drainHostRequests: true });
-		const types = writeLine.mock.calls.map((call) => (call[0] as { type?: string }).type);
-		expect(types).toContain("shutdown");
-		expect(killSignals).toContain("SIGTERM");
+			const shutdown = manager.shutdown({ snapshot: true, drainHostRequests: true });
+			// Graceful deadline, then the SIGTERM grace and SIGKILL confirmation waits.
+			await vi.advanceTimersByTimeAsync(5_000 + 2_000 + 2_000);
+			await expect(shutdown).resolves.toBe(true);
+			const types = writeLine.mock.calls.map((call) => (call[0] as { type?: string }).type);
+			expect(types).toContain("shutdown");
+			expect(killSignals[0]).toBe("SIGTERM");
+			expect(killSignals).toContain("SIGKILL");
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("drops stale between-cell background output on kernel teardown", async () => {
