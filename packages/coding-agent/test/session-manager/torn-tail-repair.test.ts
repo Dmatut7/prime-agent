@@ -79,7 +79,7 @@ describe("session transcripts with a torn tail", () => {
 		};
 		const torn = '{"type":"session_info","id":"info-torn","nam';
 		mkdirSync(sessionDir, { recursive: true });
-		writeFileSync(sessionFile, [JSON.stringify(header), JSON.stringify(goodEntry)].join("\n") + `\n${torn}`);
+		writeFileSync(sessionFile, `${[JSON.stringify(header), JSON.stringify(goodEntry)].join("\n")}\n${torn}`);
 
 		const manager = SessionManager.open(sessionFile, sessionDir);
 		manager.appendSessionInfo("after-repair");

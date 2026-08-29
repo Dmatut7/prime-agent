@@ -75,7 +75,7 @@ describe("loadEntriesFromFile", () => {
 		const file = join(tempDir, "buffered.jsonl");
 		writeFileSync(
 			file,
-			[
+			`${[
 				'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}',
 				JSON.stringify({
 					type: "message",
@@ -84,7 +84,7 @@ describe("loadEntriesFromFile", () => {
 					timestamp: "2025-01-01T00:00:01Z",
 					message: { role: "user", content: "x".repeat(5 * 1024 * 1024), timestamp: 1 },
 				}),
-			].join("\n") + "\n",
+			].join("\n")}\n`,
 		);
 		const setImmediateSpy = vi.spyOn(globalThis, "setImmediate");
 		try {
@@ -115,7 +115,7 @@ describe("loadEntriesFromFile", () => {
 		const content = "before\u2028middle\u2029after";
 		writeFileSync(
 			file,
-			[
+			`${[
 				'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}',
 				JSON.stringify({
 					type: "message",
@@ -124,7 +124,7 @@ describe("loadEntriesFromFile", () => {
 					timestamp: "2025-01-01T00:00:01Z",
 					message: { role: "user", content, timestamp: 1 },
 				}),
-			].join("\n") + "\n",
+			].join("\n")}\n`,
 		);
 
 		const streamed = await loadEntriesFromFileAsync(file, { streamThresholdBytes: 0 });
@@ -138,7 +138,7 @@ describe("loadEntriesFromFile", () => {
 		const largeContent = "x".repeat(2 * 1024 * 1024);
 		writeFileSync(
 			file,
-			[
+			`${[
 				'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}',
 				JSON.stringify({
 					type: "message",
@@ -148,7 +148,7 @@ describe("loadEntriesFromFile", () => {
 					message: { role: "user", content: largeContent, timestamp: 1 },
 				}),
 				'{"type":"message","id":"2","parentId":"1","timestamp":"2025-01-01T00:00:02Z","message":{"role":"user","content":"after","timestamp":2}}',
-			].join("\n") + "\n",
+			].join("\n")}\n`,
 		);
 
 		const entries = await loadEntriesFromFileAsync(file, { streamThresholdBytes: 0 });
