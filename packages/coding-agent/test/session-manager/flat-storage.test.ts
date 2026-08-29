@@ -64,6 +64,25 @@ describe("SessionManager flat storage", () => {
 		}
 	});
 
+	it.runIf(process.platform !== "win32")(
+		"still refuses an operator-locked artifact directory instead of tightening it",
+		() => {
+			const tempDir = mkdtempSync(join(tmpdir(), "session-artifact-locked-"));
+			try {
+				const session = SessionManager.create(tempDir, join(tempDir, "sessions"));
+				const artifactPath = session.getSessionArtifactDir()!;
+				// Deliberately fenced (no owner write): must stay untouched.
+				chmodSync(artifactPath, 0o555);
+				expect(() => session.getSessionArtifactDir({ create: false })).toThrow(
+					"non-private session artifact directory",
+				);
+				expect(statSync(artifactPath).mode & 0o777).toBe(0o555);
+			} finally {
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
+
 	it.runIf(process.platform !== "win32")("rejects a symlinked artifact root without traversing it", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "session-artifact-root-"));
 		try {
@@ -80,17 +99,18 @@ describe("SessionManager flat storage", () => {
 	});
 
 	it.runIf(process.platform !== "win32")(
-		"does not traverse or repair a permissive artifact directory during read-only lookup",
+		"tightens a legacy permissive artifact directory during read-only lookup",
 		() => {
+			// Pre-hardening versions created artifact directories at 0755. Read
+			// paths must upgrade them in place instead of failing, or upgrading
+			// users lose supervisor startup and session listing.
 			const tempDir = mkdtempSync(join(tmpdir(), "session-artifact-private-"));
 			try {
 				const session = SessionManager.create(tempDir, join(tempDir, "sessions"));
 				const artifactPath = session.getSessionArtifactDir()!;
 				chmodSync(artifactPath, 0o755);
-				expect(() => session.getSessionArtifactDir({ create: false })).toThrow(
-					"non-private session artifact directory",
-				);
-				expect(statSync(artifactPath).mode & 0o777).toBe(0o755);
+				expect(session.getSessionArtifactDir({ create: false })).toBe(artifactPath);
+				expect(statSync(artifactPath).mode & 0o777).toBe(0o700);
 			} finally {
 				rmSync(tempDir, { recursive: true, force: true });
 			}

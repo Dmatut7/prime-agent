@@ -1,4 +1,15 @@
-import { appendFileSync, chmodSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -1605,5 +1616,68 @@ describePosix("persistAppliedRefinement order and mtime", () => {
 		});
 		expect(audit).toEqual(["refine_ok"]);
 		expect(loadHarnessState(dir, "local").entries.memory.note?.content).toBe("applied");
+	});
+});
+
+describe("harness storage beneath a symlinked home layout", () => {
+	const tempRoots: string[] = [];
+
+	afterEach(() => {
+		for (const root of tempRoots.splice(0)) {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	const describePosix = process.platform === "win32" ? describe.skip : describe;
+
+	describePosix("posix layouts", () => {
+		it("reads and writes harness state through a symlinked home directory", () => {
+			const realStore = mkdtempSync(join(tmpdir(), "pi-real-store-"));
+			const home = mkdtempSync(join(tmpdir(), "pi-home-"));
+			tempRoots.push(realStore, home);
+			// A relocated home: ~/.prime is a symlink to the real store.
+			symlinkSync(realStore, join(home, ".prime"));
+			const harnessDir = join(home, ".prime", "agent", "harness");
+
+			const state = loadHarnessState(harnessDir);
+			expect(state.persistentWriteError).toBeUndefined();
+			const statePath = saveHarnessState(harnessDir, state);
+			expect(readFileSync(statePath, "utf8")).toContain('"schema"');
+			expect(statSync(statePath).mode & 0o777).toBe(0o600);
+			expect(statSync(join(realStore, "agent", "harness")).mode & 0o777).toBe(0o700);
+			expect(loadHarnessState(harnessDir).persistentWriteError).toBeUndefined();
+		});
+
+		it("appends refinement history through a symlinked home directory", () => {
+			const realStore = mkdtempSync(join(tmpdir(), "pi-real-store-"));
+			const home = mkdtempSync(join(tmpdir(), "pi-home-"));
+			tempRoots.push(realStore, home);
+			symlinkSync(realStore, join(home, ".prime"));
+			const harnessDir = join(home, ".prime", "agent", "harness");
+
+			const historyPath = appendGlobalRefinement(harnessDir, {
+				id: "refine-symlinked",
+				summary: "summary",
+				rationale: "rationale",
+				expectedOutcome: "outcome",
+				appliedEdits: [],
+				harnessStatePath: getHarnessStatePath(harnessDir),
+			});
+			expect(readFileSync(historyPath, "utf8")).toContain("refine-symlinked");
+			expect(loadGlobalRefinementHistory(harnessDir).map((result) => result.id)).toContain("refine-symlinked");
+		});
+
+		it("still refuses a symlinked harness directory itself", () => {
+			const realStore = mkdtempSync(join(tmpdir(), "pi-real-store-"));
+			const home = mkdtempSync(join(tmpdir(), "pi-home-"));
+			tempRoots.push(realStore, home);
+			const realHarness = join(realStore, "harness");
+			mkdirSync(realHarness);
+			const linkedHarness = join(home, "harness-link");
+			symlinkSync(realHarness, linkedHarness);
+
+			const state = loadHarnessState(linkedHarness);
+			expect(state.persistentWriteError).toContain("non-directory private path");
+		});
 	});
 });

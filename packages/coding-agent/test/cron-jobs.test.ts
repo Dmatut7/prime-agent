@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -293,6 +293,34 @@ describe("AgentCronJobStore", () => {
 		migrated.registerSessionArtifact("session-1", join(root, "session-artifacts", "session-1"));
 		migrated.registerSessionArtifact("session-2", join(root, "session-artifacts", "session-2"));
 		expect(migrated.list().map((job) => job.id)).toEqual(expect.arrayContaining([first.id, second.id]));
+	});
+
+	it.runIf(process.platform !== "win32")("migrates through legacy 0755 artifact directories and tightens them", () => {
+		// Upgrading users have session-artifacts directories created at 0755 by
+		// pre-hardening versions. The supervisor-start migration must survive
+		// them, and the read path must tighten them instead of throwing.
+		const root = makeTempDir(tempDirs);
+		const legacyPath = join(root, "cron-jobs.json");
+		const legacy = new AgentCronJobStore(legacyPath);
+		legacy.create({
+			activeSessionId: "active-1",
+			sessionId: "session-legacy",
+			sessionFile: join(root, "sessions", "session-legacy.jsonl"),
+			cwd: root,
+			scheduleText: "in 1h",
+			prompt: "legacy layout job",
+			now: start,
+		});
+		const artifactsRoot = join(root, "session-artifacts");
+		const legacyArtifactDir = join(artifactsRoot, "session-legacy");
+		mkdirSync(legacyArtifactDir, { recursive: true });
+		chmodSync(artifactsRoot, 0o755);
+		chmodSync(legacyArtifactDir, 0o755);
+
+		expect(migrateLegacyCronJobsToSessionArtifacts(legacyPath)).toBe(1);
+		expect(statSync(artifactsRoot).mode & 0o777).toBe(0o700);
+		expect(statSync(legacyArtifactDir).mode & 0o777).toBe(0o700);
+		expect(existsSync(join(legacyArtifactDir, SESSION_SCHEDULED_JOBS_FILENAME))).toBe(true);
 	});
 
 	it("marks in-flight legacy dispatches interrupted during migration", () => {

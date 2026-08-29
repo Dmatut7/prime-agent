@@ -1,7 +1,18 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, ServiceTier, TextContent, Usage } from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "fs";
+import {
+	closeSync,
+	constants,
+	existsSync,
+	fchmodSync,
+	lstatSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	statSync,
+} from "fs";
 import { lstat, readdir, readFile, stat } from "fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "path";
 import { v7 as uuidv7 } from "uuid";
@@ -12,6 +23,7 @@ import {
 	appendPrivateFile,
 	assertRegularFileNoSymlink,
 	ensurePrivateDirectory,
+	requireNoFollow,
 	writePrivateFileAtomicLines,
 } from "../utils/private-files.js";
 import {
@@ -283,6 +295,50 @@ export function getSessionArtifactsRoot(sessionDir: string): string {
 	return resolve(dirname(sessionDir), "session-artifacts");
 }
 
+const tightenedArtifactDirectories = new Set<string>();
+
+/**
+ * Enforce the private mode of an existing artifact directory on a read path.
+ * Over-permissive directories with owner write (the default 0755/0775 that
+ * pre-hardening versions created) are legacy layouts and are tightened in
+ * place: an upgrade must not break supervisor startup, session listing, or
+ * sweeps. Anything else (e.g. an operator-locked 0555) keeps the strict
+ * refusal so deliberately fenced layouts are never silently altered.
+ */
+function enforceArtifactDirectoryMode(path: string, rawMode: number): void {
+	if (process.platform === "win32") return;
+	const mode = rawMode & 0o777;
+	if (mode === 0o700) return;
+	if ((mode & 0o077) !== 0 && (mode & 0o200) !== 0) {
+		tightenLegacyArtifactDirectory(path);
+		return;
+	}
+	throw new Error(`Refusing to read non-private session artifact directory: ${path}`);
+}
+
+/**
+ * Pre-hardening versions created artifact directories with default 0755 modes.
+ * Read paths tighten such legacy owner-owned directories instead of throwing:
+ * an upgrade must not break supervisor startup, session listing, or artifact
+ * sweeps. Symlinks and non-directories are still rejected before this runs; a
+ * directory we do not own (fchmod refused) still fails closed.
+ */
+function tightenLegacyArtifactDirectory(path: string): void {
+	const descriptor = openSync(
+		path,
+		constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | requireNoFollow(constants.O_NOFOLLOW),
+	);
+	try {
+		fchmodSync(descriptor, 0o700);
+	} finally {
+		closeSync(descriptor);
+	}
+	if (!tightenedArtifactDirectories.has(path)) {
+		tightenedArtifactDirectories.add(path);
+		console.error(`Tightened legacy session artifact directory to 0700: ${path}`);
+	}
+}
+
 export function getSessionArtifactPath(
 	sessionDir: string,
 	sessionId: string,
@@ -303,16 +359,16 @@ export function getSessionArtifactPath(
 		if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) {
 			throw new Error(`Refusing to use non-directory private path: ${artifactRoot}`);
 		}
-		if (enforcePrivateMode && process.platform !== "win32" && (rootStats.mode & 0o777) !== 0o700) {
-			throw new Error(`Refusing to read non-private session artifact directory: ${artifactRoot}`);
+		if (enforcePrivateMode) {
+			enforceArtifactDirectoryMode(artifactRoot, rootStats.mode);
 		}
 		if (!existsSync(artifactPath)) return artifactPath;
 		const artifactStats = lstatSync(artifactPath);
 		if (artifactStats.isSymbolicLink() || !artifactStats.isDirectory()) {
 			throw new Error(`Refusing to use non-directory private path: ${artifactPath}`);
 		}
-		if (enforcePrivateMode && process.platform !== "win32" && (artifactStats.mode & 0o777) !== 0o700) {
-			throw new Error(`Refusing to read non-private session artifact directory: ${artifactPath}`);
+		if (enforcePrivateMode) {
+			enforceArtifactDirectoryMode(artifactPath, artifactStats.mode);
 		}
 		const canonicalRoot = realpathSync(artifactRoot);
 		const canonicalArtifactPath = realpathSync(artifactPath);
