@@ -176,6 +176,13 @@ function extractCompleteSequences(buffer: string): { sequences: string[]; remain
 		const remaining = buffer.slice(pos);
 
 		if (remaining.startsWith(ESC)) {
+			// Two ESC bytes in a row are two Escape keys, not ctrl+alt+[.
+			// ESC+letter still forms alt+letter for existing keybindings.
+			if (remaining.length >= 2 && remaining[1] === ESC) {
+				sequences.push(ESC, ESC);
+				pos += 2;
+				continue;
+			}
 			let seqEnd = 1;
 			while (seqEnd <= remaining.length) {
 				const candidate = remaining.slice(0, seqEnd);

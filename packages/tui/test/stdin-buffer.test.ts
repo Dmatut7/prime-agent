@@ -259,6 +259,28 @@ describe("StdinBuffer", () => {
 		});
 	});
 
+	describe("Escape key timing", () => {
+		it("emits two escape keys when ESC arrives twice within the sequence timeout", async () => {
+			processInput("\x1b");
+			assert.deepStrictEqual(emittedSequences, []);
+			await wait(5);
+			processInput("\x1b");
+			assert.deepStrictEqual(emittedSequences, ["\x1b", "\x1b"]);
+		});
+
+		it("keeps ESC plus a letter as alt+letter within the sequence timeout", async () => {
+			processInput("\x1b");
+			await wait(5);
+			processInput("i");
+			assert.deepStrictEqual(emittedSequences, ["\x1bi"]);
+		});
+
+		it("splits a single chunk of two ESC bytes into two escape keys", () => {
+			processInput("\x1b\x1b");
+			assert.deepStrictEqual(emittedSequences, ["\x1b", "\x1b"]);
+		});
+	});
+
 	describe("Edge Cases", () => {
 		it("should handle empty input", () => {
 			processInput("");
