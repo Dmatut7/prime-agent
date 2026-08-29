@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "../src/autocomplete.js";
 import { Editor, wordWrapLine } from "../src/components/editor.js";
+import { StdinBuffer } from "../src/stdin-buffer.js";
 import { TUI } from "../src/tui.js";
 import { visibleWidth } from "../src/utils.js";
 import { defaultEditorTheme } from "./test-themes.js";
@@ -3654,6 +3655,43 @@ describe("Editor component", () => {
 			editor.handleInput("\r");
 
 			assert.strictEqual(submitted, pastedText);
+		});
+	});
+
+	describe("bracketed paste abort via StdinBuffer", () => {
+		function attach(editor: Editor, stdin: StdinBuffer): void {
+			stdin.on("data", (sequence) => {
+				editor.handleInput(sequence);
+			});
+			stdin.on("paste", (content) => {
+				editor.handleInput(`\x1b[200~${content}\x1b[201~`);
+			});
+		}
+
+		it("keeps the draft and discards the buffer on Esc during unterminated paste", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			for (const ch of "hello") editor.handleInput(ch);
+			const stdin = new StdinBuffer({ timeout: 10 });
+			attach(editor, stdin);
+
+			stdin.process("\x1b[200~abc");
+			stdin.process("\x1b[27u");
+
+			assert.strictEqual(editor.getText(), "hello");
+		});
+
+		it("applies a timed-out paste as one undo unit", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			for (const ch of "hello") editor.handleInput(ch);
+			const stdin = new StdinBuffer({ timeout: 10, pasteTimeoutMs: 25 });
+			attach(editor, stdin);
+
+			stdin.process("\x1b[200~abc");
+			await new Promise((resolve) => setTimeout(resolve, 50));
+
+			assert.strictEqual(editor.getText(), "helloabc");
+			editor.handleInput("\x1b[45;5u");
+			assert.strictEqual(editor.getText(), "hello");
 		});
 	});
 });

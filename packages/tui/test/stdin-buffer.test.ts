@@ -411,10 +411,11 @@ describe("StdinBuffer", () => {
 			assert.deepStrictEqual(emittedSequences, []);
 
 			await wait(55);
-			assert.ok(emittedPaste.length + emittedSequences.length > 0, "idle timeout should flush after chunks stop");
+			assert.deepStrictEqual(emittedPaste, ["onetwothree"]);
+			assert.deepStrictEqual(emittedSequences, []);
 		});
 
-		it("flushes an unterminated paste as ordinary input after pasteTimeoutMs", async () => {
+		it("emits an unterminated paste atomically after pasteTimeoutMs", async () => {
 			buffer = new StdinBuffer({ timeout: 10, pasteTimeoutMs: 25 });
 			emittedSequences = [];
 			emittedPaste = [];
@@ -431,14 +432,14 @@ describe("StdinBuffer", () => {
 
 			await wait(50);
 
-			assert.deepStrictEqual(emittedPaste, []);
-			assert.deepStrictEqual(emittedSequences, ["h", "e", "l", "l", "o"]);
+			assert.deepStrictEqual(emittedPaste, ["hello"]);
+			assert.deepStrictEqual(emittedSequences, []);
 
 			processInput("x");
-			assert.deepStrictEqual(emittedSequences, ["h", "e", "l", "l", "o", "x"]);
+			assert.deepStrictEqual(emittedSequences, ["x"]);
 		});
 
-		it("flushes an oversized paste as ordinary input", () => {
+		it("emits an oversized paste atomically", () => {
 			buffer = new StdinBuffer({ timeout: 10, pasteMaxBytes: 8 });
 			emittedSequences = [];
 			emittedPaste = [];
@@ -450,22 +451,22 @@ describe("StdinBuffer", () => {
 			});
 
 			processInput("\x1b[200~abcdefghij");
-			assert.deepStrictEqual(emittedPaste, []);
-			assert.deepStrictEqual(emittedSequences, ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]);
+			assert.deepStrictEqual(emittedPaste, ["abcdefghij"]);
+			assert.deepStrictEqual(emittedSequences, []);
 
 			processInput("x");
-			assert.ok(emittedSequences.includes("x"));
+			assert.deepStrictEqual(emittedSequences, ["x"]);
 		});
 
-		it("exits paste mode on Kitty Esc and keeps buffered text as ordinary input", () => {
+		it("discards an unterminated paste on Kitty Esc without inserting it", () => {
 			processInput("\x1b[200~hello");
 			processInput("\x1b[27u");
 
 			assert.deepStrictEqual(emittedPaste, []);
-			assert.deepStrictEqual(emittedSequences, ["h", "e", "l", "l", "o"]);
+			assert.deepStrictEqual(emittedSequences, []);
 
 			processInput("x");
-			assert.deepStrictEqual(emittedSequences, ["h", "e", "l", "l", "o", "x"]);
+			assert.deepStrictEqual(emittedSequences, ["x"]);
 		});
 
 		it("still completes paste when 201~ arrives split after a lone ESC", () => {
@@ -477,7 +478,7 @@ describe("StdinBuffer", () => {
 			assert.deepStrictEqual(emittedSequences, []);
 		});
 
-		it("treats a lone trailing ESC as abort after the sequence timeout", async () => {
+		it("discards an unterminated paste on a lone trailing ESC", async () => {
 			processInput("\x1b[200~hello");
 			processInput("\x1b");
 			assert.strictEqual(emittedPaste.length, 0);
@@ -486,11 +487,10 @@ describe("StdinBuffer", () => {
 			await wait(15);
 
 			assert.strictEqual(emittedPaste.length, 0);
-			assert.ok(emittedSequences.includes("h"));
+			assert.strictEqual(emittedSequences.length, 0);
 
-			await wait(15);
 			processInput("x");
-			assert.ok(emittedSequences.includes("x"));
+			assert.deepStrictEqual(emittedSequences, ["x"]);
 		});
 	});
 
