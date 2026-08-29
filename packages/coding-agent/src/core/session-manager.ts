@@ -1578,11 +1578,13 @@ export class SessionManager {
 		details?: T,
 		fromHook?: boolean,
 		customInstructions?: string,
+		leafId?: string,
 	): string {
+		const targetLeaf = leafId ?? this.leafId;
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
 			id: generateId(this.byId),
-			parentId: this.leafId,
+			parentId: targetLeaf,
 			timestamp: new Date().toISOString(),
 			summary,
 			firstKeptEntryId,
@@ -1591,7 +1593,15 @@ export class SessionManager {
 			fromHook,
 			customInstructions,
 		};
-		this._appendEntry(entry);
+		// A pinned leaf means the session moved (branch navigation) while the
+		// summary was being generated. The entry still belongs to the branch it
+		// summarized, but it must not drag the current position back to it.
+		this.fileEntries.push(entry);
+		this.byId.set(entry.id, entry);
+		if (targetLeaf === this.leafId) {
+			this.leafId = entry.id;
+		}
+		this._persist(entry);
 		return entry.id;
 	}
 

@@ -7513,6 +7513,10 @@ export class AgentSession {
 		const { model, apiKey, headers, customInstructions, signal } = options;
 		const pathEntries = this.sessionManager.getBranch();
 		const settings = this.settingsManager.getCompactionSettings();
+		// Pin the branch position for the duration of the summarization call. If
+		// the user navigates the tree while the summary is being generated, the
+		// resulting entry still attaches to the branch it summarized.
+		const compactionLeafId = this.sessionManager.getLeafId();
 
 		const preparation = prepareCompaction(pathEntries, settings, model.contextWindow);
 		if (!preparation) {
@@ -7560,6 +7564,7 @@ export class AgentSession {
 			details,
 			fromExtension,
 			customInstructions,
+			compactionLeafId ?? undefined,
 		);
 		const newEntries = this.sessionManager.getEntries();
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
