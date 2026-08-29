@@ -564,6 +564,10 @@ const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 // evicted past the cap to keep a long session bounded.
 const MAX_PASTED_IMAGE_BYTES = 64 * 1024 * 1024;
 const INITIAL_TRANSCRIPT_RENDER_MESSAGE_LIMIT = 400;
+// Live streaming only ever appends to the chat tree. When the settled tree grows
+// past this component cap, rebuild it through the initial-render window so a long
+// session's transcript stays bounded in memory.
+const LIVE_CHAT_COMPONENT_LIMIT = 800;
 
 function initialRenderMessages(messages: AgentMessage[]): AgentMessage[] {
 	if (messages.length <= INITIAL_TRANSCRIPT_RENDER_MESSAGE_LIMIT) {
@@ -966,6 +970,11 @@ export class InteractiveMode {
 	private pendingToolCreations = new Set<string>();
 	private startedToolCalls = new Set<string>();
 	private pendingToolGeneration = 0;
+	/** The chat tree currently shows a windowed tail instead of the full transcript. */
+	private chatTranscriptTrimmed = false;
+	/** Component count left by the last cap rebuild; prevents re-trimming a window that is itself over the cap. */
+	private chatCapRebuildFloor = 0;
+	private chatCapRebuildInFlight = false;
 	private toolDefinitionCache = new Map<string, ToolExecutionDefinition | undefined>();
 	private agentRunFileChanges = new Map<string, FileChangeSummary>();
 
@@ -2882,6 +2891,8 @@ export class InteractiveMode {
 		this.renderRecap();
 		this.ipythonToolComponents.clear();
 		this.lateIpythonSentAgentMessages.clear();
+		this.chatTranscriptTrimmed = false;
+		this.chatCapRebuildFloor = 0;
 		this.resetSubagentSummary();
 		this.setGoalAnnouncementBaseline(this.getGoalState());
 		this.syncGoalTray(this.getGoalState());
@@ -5757,6 +5768,10 @@ export class InteractiveMode {
 			case "refine_complete":
 				break;
 		}
+
+		// A long session must not grow the component tree without bound; at settle
+		// points over the cap this rebuilds through the initial-render window.
+		await this.enforceChatComponentCap();
 	}
 
 	private startAssistantStreamingMessage(message: AssistantMessage): void {
@@ -6463,6 +6478,9 @@ export class InteractiveMode {
 		this.resetPendingToolState();
 		const transcriptMessages = this.orderMessagesForTranscript(sessionContext.messages);
 		const messagesToRender = options.limitTranscript ? initialRenderMessages(transcriptMessages) : transcriptMessages;
+		this.chatTranscriptTrimmed = messagesToRender.length < transcriptMessages.length;
+		// A full (unwindowed) render resets the cap-rebuild floor.
+		if (!options.limitTranscript) this.chatCapRebuildFloor = 0;
 		this.ipythonToolComponents.clear();
 		this.lateIpythonSentAgentMessages.clear();
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
@@ -6640,6 +6658,39 @@ export class InteractiveMode {
 	private async rebuildChatFromMessages(): Promise<void> {
 		const context = await this.agentConnection.getSessionContext();
 		await this.renderSessionContext(context, { clearChat: true });
+	}
+
+	/**
+	 * Live appends only ever grow the chat tree, so a long session accumulates
+	 * components without bound. Once the settled tree passes the live cap, trigger
+	 * a windowed rebuild: the same initialRenderMessages path used on session open,
+	 * including its toolCall/toolResult pairing repair, so the evicted components
+	 * (and their result data) can be collected. Only runs at settle points;
+	 * streaming, compacting, or running bash own components a rebuild would detach.
+	 */
+	private async enforceChatComponentCap(): Promise<void> {
+		if (this.chatCapRebuildInFlight) return;
+		const rebuildFloor = this.chatCapRebuildFloor ?? 0;
+		if (this.chatContainer.children.length <= Math.max(LIVE_CHAT_COMPONENT_LIMIT, rebuildFloor)) {
+			return;
+		}
+		if (this.isAgentStreaming() || this.isAgentCompacting() || this.isBashRunning()) return;
+		if (this.streamingComponent || this.activeBashComponent) return;
+		// Fullscreen review scrolls the whole tree and must not lose segments.
+		if (this.ui.isFullscreen()) return;
+		this.chatCapRebuildInFlight = true;
+		try {
+			const context = await this.agentConnection.getSessionContext();
+			await this.renderSessionContext(context, { clearChat: true, limitTranscript: true });
+			this.chatCapRebuildFloor = this.chatContainer.children.length;
+			this.ui.requestRender();
+		} catch (error) {
+			this.showError(
+				`Failed to trim the chat transcript: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		} finally {
+			this.chatCapRebuildInFlight = false;
+		}
 	}
 
 	private handleEscape(): void {
@@ -7259,13 +7310,25 @@ export class InteractiveMode {
 			return;
 		}
 		this.fullscreenEnabled = enabled;
-		this.applyFullscreen(enabled);
-		const followKey = this.getEditorKeyDisplay("tui.viewport.follow");
-		this.showStatus(
-			enabled
-				? `Fullscreen rendering on — wheel/pageUp scroll, ${followKey} follows output`
-				: "Fullscreen rendering off",
-		);
+		void (async () => {
+			if (enabled && this.chatTranscriptTrimmed) {
+				// Fullscreen pageUp/top scroll the whole transcript; restore the tail
+				// trimmed by the live component cap before entering.
+				try {
+					await this.rebuildChatFromMessages();
+				} catch (error) {
+					this.showError(error instanceof Error ? error.message : String(error));
+					return;
+				}
+			}
+			this.applyFullscreen(enabled);
+			const followKey = this.getEditorKeyDisplay("tui.viewport.follow");
+			this.showStatus(
+				enabled
+					? `Fullscreen rendering on — wheel/pageUp scroll, ${followKey} follows output`
+					: "Fullscreen rendering off",
+			);
+		})();
 	}
 
 	private toggleToolOutputExpansion(): void {

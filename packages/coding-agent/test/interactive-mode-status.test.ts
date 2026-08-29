@@ -5434,6 +5434,7 @@ test("only the queued user /refine settlement stops its loader", async () => {
 		activityTracker: { handleEvent: vi.fn(), reset: vi.fn() },
 		updateWorkingLoaderMessage: vi.fn(),
 		renderRecap: vi.fn(),
+		chatContainer: new Container(),
 	} as unknown as InteractiveMode;
 	Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
 	const prototype = InteractiveMode.prototype as unknown as {
