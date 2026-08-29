@@ -6509,7 +6509,13 @@ export class AgentSession {
 			this._refineInFlight !== undefined ||
 			this._branchSummaryOperation !== undefined ||
 			this._postCompactionContinuationSettlement !== undefined ||
-			this.unfinishedActionCount > 0
+			this.unfinishedActionCount > 0 ||
+			// Deferred RLM terminal notices are undelivered work: requestAbort demotes
+			// admitted notices back to next-turn deferral, and a session holding only
+			// those would otherwise look idle and be passivated/evicted, dropping the
+			// child's terminal report before the parent ever receives it. Counting them
+			// as activity keeps the session resident until a resume flushes them.
+			this._hasDeferredRlmTerminalNotices()
 		);
 	}
 
