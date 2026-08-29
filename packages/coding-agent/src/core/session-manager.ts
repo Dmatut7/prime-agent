@@ -64,6 +64,7 @@ export interface NewSessionOptions {
 }
 
 export type SessionPersistListener = (sessionFile: string) => void;
+export type SessionPersistFailureListener = (error: unknown) => void;
 
 export interface SessionEntryBase {
 	type: string;
@@ -1243,6 +1244,7 @@ export class SessionManager {
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
 	private persistListeners = new Set<SessionPersistListener>();
+	private persistFailureListeners = new Set<SessionPersistFailureListener>();
 
 	private constructor(
 		cwd: string,
@@ -1435,6 +1437,25 @@ export class SessionManager {
 		};
 	}
 
+	/** Observe failed writes. The failed entry stays in memory and the next
+	 * successful persist backfills it via a full rewrite. */
+	onPersistFailure(listener: SessionPersistFailureListener): () => void {
+		this.persistFailureListeners.add(listener);
+		return () => {
+			this.persistFailureListeners.delete(listener);
+		};
+	}
+
+	private _notifyPersistFailureListeners(error: unknown): void {
+		for (const listener of this.persistFailureListeners) {
+			try {
+				listener(error);
+			} catch {
+				// Persistence observers must not break session writes.
+			}
+		}
+	}
+
 	allowsPersistence(): boolean {
 		return this.persist;
 	}
@@ -1520,7 +1541,13 @@ export class SessionManager {
 		}
 
 		if (!this.flushed || !existsSync(this.sessionFile)) {
-			this._rewriteFile();
+			try {
+				this._rewriteFile();
+			} catch (error) {
+				this.flushed = false;
+				this._notifyPersistFailureListeners(error);
+				throw error;
+			}
 			this.flushed = true;
 		} else {
 			try {
@@ -1530,6 +1557,7 @@ export class SessionManager {
 				// persist rewrites the whole transcript and backfills the gap instead
 				// of appending past a lost line.
 				this.flushed = false;
+				this._notifyPersistFailureListeners(error);
 				throw error;
 			}
 			this._notifyPersistListeners();
