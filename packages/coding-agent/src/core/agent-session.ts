@@ -44,6 +44,7 @@ import {
 	AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL,
 	AGENT_MESSAGE_SKILL_NAME,
 	type AgentFamilyCatalogEntry,
+	type AgentFamilyRosterEntry,
 	type AgentFamilyRosterResult,
 	type AgentSessionMessage,
 	type AgentSessionMessageAgentSummary,
@@ -56,6 +57,7 @@ import {
 	createAgentMessageHostHandlers,
 	DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
 	formatAgentSessionNameUnavailable,
+	formatSubagentTerminalErrorNotice,
 	isAgentSessionMessage,
 	isAgentSessionMessagePrompt,
 	normalizeAgentSessionMessage,
@@ -1224,6 +1226,13 @@ export class AgentSession {
 	private _rlmParentAgent?: string;
 	private _repliedToParentSinceTask: boolean | undefined;
 	private _parentReplyCount = 0;
+	/**
+	 * Retry attempts consumed by the failure sequence that reached the last
+	 * terminal-error junction. Lets the parent-facing terminal notice say whether
+	 * retries were exhausted or never attempted, even though `_retryAttempt` is
+	 * already reset by the time the notice is composed.
+	 */
+	private _terminalFailureAttemptCount = 0;
 	private _subagentRuntimeHost?: SubagentRuntimeHost;
 	private _activeRlmChildRuns = new Map<string, RlmChildRun>();
 	private _unsettledRlmChildRuns = new Set<RlmChildRun>();
@@ -3894,6 +3903,7 @@ export class AgentSession {
 						attempt: this._retryAttempt,
 					});
 					this._retryAttempt = 0;
+					this._terminalFailureAttemptCount = 0;
 					this._retryAuthFailureSources = [];
 				}
 				if (this._accountGoalUsageForAssistantMessage(assistantMsg)) {
@@ -3940,6 +3950,13 @@ export class AgentSession {
 				return;
 			}
 			this._finishActiveRetryWithFailure(msg);
+			if (!compactionWillRetry && msg.stopReason === "error") {
+				// Terminal failure: retries are exhausted, disabled, or the error was
+				// never retryable. A subagent must tell its parent instead of parking
+				// silently in needs_input (the synthesized completed_without_reply
+				// notice carries no error context and reads like a normal completion).
+				await this._notifyParentOfTerminalError(msg);
+			}
 			this._resolveRetry();
 			if (!compactionWillRetry) {
 				this._finishGoalForTerminalAssistantMessage(msg);
@@ -11417,8 +11434,65 @@ export class AgentSession {
 			attempt: this._retryAttempt,
 			finalError: message.errorMessage,
 		});
+		this._terminalFailureAttemptCount = this._retryAttempt;
 		this._retryAttempt = 0;
 		this._retryAuthFailureSources = [];
+	}
+
+	/**
+	 * Tell the parent agent when a turn ends in a terminal model/provider failure.
+	 * Without this, a subagent session parks silently in needs_input and the parent
+	 * only sees the synthesized completed_without_reply notice, which carries no
+	 * error context and reads like a normal completion. A successful delivery counts
+	 * as a parent reply, which suppresses that misleading notice; when delivery
+	 * fails here, the synthesized notice remains as the fallback.
+	 */
+	private async _notifyParentOfTerminalError(message: AssistantMessage): Promise<void> {
+		if (this._rlmDepth <= 0 || this._disposed || this._disposing) return;
+		const controller = this._agentMessageController;
+		if (!controller?.roster || !controller.sendAgentMessage) return;
+		let parent: AgentFamilyRosterEntry | undefined;
+		try {
+			const roster = await controller.roster();
+			parent = roster.entries.find((entry) => entry.relationship === "parent");
+		} catch {
+			return;
+		}
+		if (!parent) return;
+		const retrySettings = this.settingsManager.getRetrySettings();
+		const attempts = this._terminalFailureAttemptCount;
+		const retrySummary =
+			attempts > 0
+				? retrySettings.enabled && attempts >= retrySettings.maxRetries
+					? `auto-retry exhausted after ${attempts} attempt(s)`
+					: `auto-retry stopped after ${attempts} attempt(s)`
+				: retrySettings.enabled
+					? "error classified as non-retryable; no retries attempted"
+					: "auto-retry disabled; no retries attempted";
+		const notice = formatSubagentTerminalErrorNotice({
+			errorMessage: message.errorMessage,
+			provider: message.provider,
+			model: message.model,
+			retrySummary,
+		});
+		const target = parent.name.trim() || parent.id;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			// A hung send on a broken transport must not freeze the event queue of a
+			// session whose turn already failed.
+			await Promise.race([
+				controller.sendAgentMessage({ target, message: notice, receiverRole: "parent" }),
+				new Promise<never>((_, reject) => {
+					timer = setTimeout(() => reject(new Error("Subagent terminal-error notice timed out")), 10_000);
+				}),
+			]);
+		} catch {
+			return;
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
+		}
+		this._repliedToParentSinceTask = true;
+		this._parentReplyCount += 1;
 	}
 
 	private async _handleRetryableError(
@@ -11432,6 +11506,7 @@ export class AgentSession {
 		if (!settings.enabled) {
 			this._markProviderAuthStaleForRetryFailure(message, options);
 			this._retryAuthFailureSources = [];
+			this._terminalFailureAttemptCount = 0;
 			this._resolveRetry();
 			return false;
 		}
@@ -11452,6 +11527,7 @@ export class AgentSession {
 				attempt: this._retryAttempt - 1,
 				finalError: message.errorMessage,
 			});
+			this._terminalFailureAttemptCount = this._retryAttempt - 1;
 			this._retryAttempt = 0;
 			this._retryAuthFailureSources = [];
 			this._resolveRetry(); // Resolve so waitForRetry() completes
@@ -11480,6 +11556,7 @@ export class AgentSession {
 			const attempt = this._retryAttempt;
 			this._markProviderAuthStaleForRetryFailure(message, options);
 			this._retryAttempt = 0;
+			this._terminalFailureAttemptCount = attempt;
 			this._retryAbortController = undefined;
 			this._emit({
 				type: "auto_retry_end",
@@ -11516,6 +11593,7 @@ export class AgentSession {
 			});
 			this._retryAttempt = 0;
 		}
+		this._terminalFailureAttemptCount = 0;
 		this._retryAuthFailureSources = [];
 		this._resolveRetry();
 	}
