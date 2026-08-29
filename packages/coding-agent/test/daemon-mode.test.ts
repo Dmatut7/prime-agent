@@ -8103,14 +8103,20 @@ describe("daemon mode helpers", () => {
 				throw new Error("unexpected runtime creation");
 			},
 		});
-		const resumeQueuedWork = vi.fn(() => true);
+		const resumeQueuedWorkFromConnection = vi.fn(() => true);
 		const continueAgent = vi.fn(async () => {});
 		const state = makeState("active-1") as ActiveSessionState & {
 			runtime: ActiveSessionState["runtime"] & {
-				session: { resumeQueuedWork: typeof resumeQueuedWork; agent: { continue: typeof continueAgent } };
+				session: {
+					resumeQueuedWorkFromConnection: typeof resumeQueuedWorkFromConnection;
+					agent: { continue: typeof continueAgent };
+				};
 			};
 		};
-		state.runtime = { ...state.runtime, session: { resumeQueuedWork, agent: { continue: continueAgent } } } as never;
+		state.runtime = {
+			...state.runtime,
+			session: { resumeQueuedWorkFromConnection, agent: { continue: continueAgent } },
+		} as never;
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
 			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
@@ -8124,7 +8130,7 @@ describe("daemon mode helpers", () => {
 				activeSessionId: state.activeSessionId,
 			}),
 		).resolves.toMatchObject({ success: true, command: "resume_queue" });
-		expect(resumeQueuedWork).toHaveBeenCalledOnce();
+		expect(resumeQueuedWorkFromConnection).toHaveBeenCalledOnce();
 		expect(continueAgent).not.toHaveBeenCalled();
 	});
 
@@ -8750,6 +8756,7 @@ function makeCronAdmissionFixture(
 	);
 	const followUp = vi.fn(async () => true);
 	const removeQueuedFollowUp = vi.fn(() => true);
+	const wakeSuspendedSessionInput = vi.fn(() => {});
 	const state = makeState(activeSessionId) as ActiveSessionState & {
 		runtime: ActiveSessionState["runtime"] & { session: Record<string, unknown> };
 	};
@@ -8768,6 +8775,7 @@ function makeCronAdmissionFixture(
 			promptHeartbeat,
 			followUp,
 			removeQueuedFollowUp,
+			wakeSuspendedSessionInput,
 		},
 	} as never;
 	const internals = daemon as unknown as {
