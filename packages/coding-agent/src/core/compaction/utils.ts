@@ -22,7 +22,7 @@ export function createFileOps(): FileOperations {
 const PATH_ARG_KEYS = ["path", "file_path", "filePath"] as const;
 
 /** Tool names whose calls modify a file at a known path. */
-const WRITING_TOOL_PATTERN = /^(?:edit|write|apply_patch)$|patch|str_replace/;
+const WRITING_TOOL_PATTERN = /^(?:edit|write|apply_patch|patch|str_replace)$/;
 
 function getToolCallPath(args: Record<string, unknown>): string | undefined {
 	for (const key of PATH_ARG_KEYS) {

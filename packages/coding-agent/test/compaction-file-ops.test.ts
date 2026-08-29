@@ -43,4 +43,14 @@ describe("extractFileOpsFromMessage write-tool coverage (scan2 C5)", () => {
 		expect(ops.written.size).toBe(0);
 		expect(ops.edited.size).toBe(0);
 	});
+
+	it("does not match extension tool names that merely contain 'patch' or 'str_replace'", () => {
+		const ops = createFileOps();
+		// "dispatch" contains "patch" as a substring; the unanchored pattern
+		// previously matched it. "my_str_replace_v2" contains "str_replace".
+		extractFileOpsFromMessage(assistantWithCall("dispatch", { path: "/tmp/d.txt" }), ops);
+		extractFileOpsFromMessage(assistantWithCall("my_str_replace_v2", { path: "/tmp/s.txt" }), ops);
+		expect(ops.written.size).toBe(0);
+		expect(ops.edited.size).toBe(0);
+	});
 });
