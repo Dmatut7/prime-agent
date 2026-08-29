@@ -21,6 +21,7 @@ const ENV_KEYS = [
 	"TMUX",
 	"KITTY_WINDOW_ID",
 	"GHOSTTY_RESOURCES_DIR",
+	"PI_ENABLE_GHOSTTY_IMAGES",
 	"WEZTERM_PANE",
 	"ITERM_SESSION_ID",
 	"CMUX_WORKSPACE_ID",
@@ -217,8 +218,16 @@ describe("detectCapabilities", () => {
 		});
 	});
 
-	it("does not disable Ghostty images solely because cmux is present", () => {
+	it("disables Ghostty images by default to avoid inline image freezes", () => {
 		withEnv({ TERM_PROGRAM: "ghostty", CMUX_WORKSPACE_ID: "workspace" }, () => {
+			const caps = detectCapabilities();
+			assert.strictEqual(caps.images, null);
+			assert.strictEqual(caps.hyperlinks, true);
+		});
+	});
+
+	it("can opt Ghostty back into Kitty images for rendering tests", () => {
+		withEnv({ TERM_PROGRAM: "ghostty", PI_ENABLE_GHOSTTY_IMAGES: "1" }, () => {
 			const caps = detectCapabilities();
 			assert.strictEqual(caps.images, "kitty");
 			assert.strictEqual(caps.hyperlinks, true);
@@ -330,9 +339,36 @@ describe("Kitty image cursor movement", () => {
 			);
 
 			assert.deepStrictEqual(image.render(80), ["    ╰─ [result.png · image/png · 20×10]"]);
+			assert.strictEqual(image.getRetainedBase64Length(), 0);
 		} finally {
 			resetCapabilitiesCache();
 		}
+	});
+
+	it("drops the base64 payload after constructing a fallback-only image", () => {
+		const payload = "A".repeat(4096);
+		const image = new Image(
+			payload,
+			"image/png",
+			{ fallbackColor: (value) => value },
+			{ fallbackOnly: true, filename: "shot.png" },
+			{ widthPx: 20, heightPx: 10 },
+		);
+		assert.strictEqual(image.getRetainedBase64Length(), 0);
+		assert.deepStrictEqual(image.render(80), ["[shot.png · image/png · 20×10]"]);
+		assert.strictEqual(image.getRetainedBase64Length(), 0);
+	});
+
+	it("keeps base64 when terminal graphics may still need it", () => {
+		const payload = "AAAA";
+		const image = new Image(
+			payload,
+			"image/png",
+			{ fallbackColor: (value) => value },
+			{ fallbackOnly: false },
+			{ widthPx: 20, heightPx: 20 },
+		);
+		assert.strictEqual(image.getRetainedBase64Length(), payload.length);
 	});
 });
 

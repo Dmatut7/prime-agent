@@ -1118,7 +1118,11 @@ export class Editor implements Component, Focusable {
 		this.lastAction = null;
 		this.historyIndex = -1; // Exit history browsing mode
 		const normalized = this.normalizeText(text);
-		if (this.getText() !== normalized) {
+		if (normalized.length === 0) {
+			// Session reset and other external clears must not leave the previous
+			// buffer reachable via undo.
+			this.undoStack.clear();
+		} else if (this.getText() !== normalized) {
 			this.pushUndoSnapshot();
 		}
 		this.setTextInternal(normalized);

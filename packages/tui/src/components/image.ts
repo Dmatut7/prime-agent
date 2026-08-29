@@ -37,7 +37,7 @@ export interface ImageOptions {
 }
 
 export class Image implements Component {
-	private base64Data: string;
+	private base64Data: string | undefined;
 	private mimeType: string;
 	private dimensions: ImageDimensions;
 	private theme: ImageTheme;
@@ -55,12 +55,19 @@ export class Image implements Component {
 		options: ImageOptions = {},
 		dimensions?: ImageDimensions,
 	) {
-		this.base64Data = base64Data;
 		this.mimeType = mimeType;
 		this.theme = theme;
 		this.options = options;
 		this.dimensions = dimensions || getImageDimensions(base64Data, mimeType) || { widthPx: 800, heightPx: 600 };
 		this.imageId = options.imageId;
+		// Fallback-only rendering uses mimeType + dimensions. Drop the base64
+		// copy immediately so tool-output images cannot pin decoded payloads.
+		this.base64Data = options.fallbackOnly === true ? undefined : base64Data;
+	}
+
+	/** Bytes of base64 still held by this component. Zero after fallback-only release. */
+	getRetainedBase64Length(): number {
+		return this.base64Data?.length ?? 0;
 	}
 
 	/** Returns the Kitty image ID allocated or supplied for this image. */
@@ -89,7 +96,7 @@ export class Image implements Component {
 			parts.push(`${this.dimensions.widthPx}×${this.dimensions.heightPx}`);
 			if (this.options.filename) parts.unshift(this.options.filename);
 			lines = [this.theme.fallbackColor(`${this.options.fallbackPrefix ?? ""}[${parts.join(" · ")}]`)];
-		} else if (caps.images) {
+		} else if (caps.images && this.base64Data !== undefined) {
 			if (caps.images === "kitty" && this.imageId === undefined) {
 				this.imageId = allocateImageId();
 			}
