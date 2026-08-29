@@ -415,6 +415,91 @@ class ReplTest(unittest.TestCase):
             time.sleep(1.6)
             self.assertFalse(os.path.exists(marker))
 
+    def test_interrupt_kills_background_bash_handles_of_interrupted_cell(self):
+        # Background handles (pid touched before any await) used to survive
+        # interrupts; they must die with their cell like one-shot awaits do.
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = os.path.join(tmp, "marker")
+            code = (
+                "import asyncio\n"
+                "from rlm import bash\n"
+                f"h = bash('sleep 1.5 && touch {marker}')\n"
+                "print('spawned', h.pid, flush=True)\n"
+                "await asyncio.sleep(30)\n"
+            )
+            self.repl.send({"type": "execute", "id": "bgkill", "code": code})
+            # print() writes each argument separately, so the pid can span frames.
+            text = ""
+            pid = None
+            while pid is None:
+                event = self.repl.read_event()
+                if event.get("event") == "stdout":
+                    text += event.get("text", "")
+                    parts = text.split()
+                    if len(parts) >= 2 and parts[0] == "spawned":
+                        pid = int(parts[1])
+            self.repl.send({"type": "interrupt"})
+            events = self.repl.until_done("bgkill")
+            self.assertEqual(one(events, "error")["ename"], "KeyboardInterrupt")
+            # TERM grace (0.5s) escalates to KILL; the reaped leader must vanish.
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail(f"bash process {pid} survived the interrupt")
+            time.sleep(1.5)  # past the original window: the side effect must never land
+            self.assertFalse(os.path.exists(marker))
+
+    def test_background_bash_handle_from_earlier_cell_survives_later_interrupt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = os.path.join(tmp, "marker-early")
+            setup = (
+                "from rlm import bash\n"
+                f"early = bash('sleep 1.0 && touch {marker}')\n"
+                "early_pid = early.pid\n"
+            )
+            events = self.repl.execute("early", setup)
+            self.assertEqual(one(events, "done")["status"], "ok")
+
+            self.repl.send(
+                {"type": "execute", "id": "late", "code": "import asyncio\nawait asyncio.sleep(30)"}
+            )
+            time.sleep(0.4)
+            self.repl.send({"type": "interrupt"})
+            events = self.repl.until_done("late")
+            self.assertEqual(one(events, "error")["ename"], "KeyboardInterrupt")
+
+            # The earlier cell's background handle kept running to completion.
+            events = self.repl.execute("chk", "r = await early\nprint(r.exit_code)")
+            self.assertEqual(stream_text(events, "stdout").strip(), "0")
+            self.assertTrue(os.path.exists(marker))
+
+    def test_interrupt_kills_handle_spawned_by_detached_task_of_interrupted_cell(self):
+        # Detached asyncio tasks keep the spawning cell's attribution, so their
+        # handles die with that cell too.
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = os.path.join(tmp, "marker-task")
+            code = (
+                "import asyncio\n"
+                "from rlm import bash\n"
+                "async def spawn_later():\n"
+                "    await asyncio.sleep(0.3)\n"
+                f"    bash('sleep 1.5 && touch {marker}')\n"
+                "asyncio.create_task(spawn_later())\n"
+                "await asyncio.sleep(30)\n"
+            )
+            self.repl.send({"type": "execute", "id": "taskkill", "code": code})
+            time.sleep(0.8)  # let the detached task spawn its handle
+            self.repl.send({"type": "interrupt"})
+            events = self.repl.until_done("taskkill")
+            self.assertEqual(one(events, "error")["ename"], "KeyboardInterrupt")
+            time.sleep(2.0)
+            self.assertFalse(os.path.exists(marker))
+
     def _interrupt_after_running(self, rid: str, code: str) -> list[dict]:
         self.repl.send({"type": "execute", "id": rid, "code": code})
         # Give the cell time to enter its blocking region before interrupting.

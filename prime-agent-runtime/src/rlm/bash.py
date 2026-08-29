@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import contextvars
 import json
 import os
 import secrets
@@ -48,6 +49,16 @@ _live_handles: set["BashHandle"] = set()
 _live_lock = threading.Lock()
 _hook_installed = False
 _hook_lock = threading.Lock()
+
+# Cell attribution for interrupt kills: repl.py sets the active cell id around
+# each execute; asyncio tasks spawned by the cell copy the context and keep the
+# attribution, threads start with the None default and stay unattributed.
+_current_cell: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_prime_agent_bash_cell", default=None
+)
+# Live handles by spawning cell id; an interrupt TERM/KILLs the interrupted
+# cell's handles (one-shot parity). Guarded by _live_lock.
+_cell_handles: dict[str, set["BashHandle"]] = {}
 
 
 @dataclass(frozen=True)
@@ -113,6 +124,10 @@ class BashHandle:
     cancelling that await kills the process group. Touching .pid/.running/
     .output()/.tail()/.poll()/.kill() first marks the handle as a background
     handle; later awaits only wait and cancelling them leaves it running.
+
+    Interrupt parity: an interrupt delivered to the spawning cell TERM/KILLs
+    every handle that cell created, one-shot and background alike; handles
+    created by other cells survive it.
     """
 
     def __init__(self, command: str) -> None:
@@ -206,8 +221,12 @@ class BashHandle:
                 os.close(status_write)
         self._pid: int = self._proc.pid
         self._released = False
+        # The spawning cell (when any) owns this handle for interrupt kills.
+        self._cell_id: str | None = _current_cell.get()
         with _live_lock:
             _live_handles.add(self)
+            if self._cell_id is not None:
+                _cell_handles.setdefault(self._cell_id, set()).add(self)
         enrolled = _record_journal(self._pid, active=True)
         if not enrolled:
             # Fail closed: a configured journal that cannot enroll the pid must
@@ -413,6 +432,18 @@ class BashHandle:
             _record_journal(self._pid, active=False)
         with _live_lock:
             _live_handles.discard(self)
+            self._untrack_cell_handle()
+
+    def _untrack_cell_handle(self) -> None:
+        """The caller must hold _live_lock."""
+        if self._cell_id is None:
+            return
+        group = _cell_handles.get(self._cell_id)
+        if group is None:
+            return
+        group.discard(self)
+        if not group:
+            del _cell_handles[self._cell_id]
 
     def _reap_group(self) -> bool:
         # Group liveness, not leader death, gates the inactive record: members
@@ -632,6 +663,7 @@ class BashHandle:
                 cast("_winjob.JobProcess", self._proc).close()
         with _live_lock:
             _live_handles.discard(self)
+            self._untrack_cell_handle()
         if delivered:
             _record_journal(self._pid, active=False)
 
@@ -655,8 +687,10 @@ def bash(command: str) -> BashHandle:
     `await bash(cmd)` is a one-shot: cancelling the await (e.g. an interrupt)
     kills the command's process group. `h = bash(cmd)` used as a background
     handle (any .pid/.running/.output()/.tail()/.poll()/.kill() access before
-    the first await) survives cancellation; awaiting it only waits. Leak
-    containment is per-platform: process groups plus the orphan journal on
+    the first await) survives cancelling its own awaits; awaiting it only
+    waits. Either way, an interrupt delivered to the cell that spawned the
+    handle kills that cell's handles; handles from other cells are untouched.
+    Leak containment is per-platform: process groups plus the orphan journal on
     POSIX; a kill-on-close job object on Windows entered while the child is
     still suspended, so no descendant can escape it and kill()/crash cleanup
     are unconditional -- bash() raises if containment cannot be established.
@@ -855,6 +889,41 @@ def _record_journal(pid: int, active: bool) -> bool:
     except OSError:
         return False
     return True
+
+
+def _set_current_cell(cell_id: str | None) -> contextvars.Token:
+    """repl.py hook: attribute handles spawned while this cell executes."""
+    return _current_cell.set(cell_id)
+
+
+def _reset_current_cell(token: contextvars.Token) -> None:
+    _current_cell.reset(token)
+
+
+def _kill_cell_handles(cell_id: str) -> None:
+    """TERM (escalating to KILL) every live handle spawned by one cell.
+
+    The runtime calls this when an interrupt lands on that cell, matching
+    one-shot cancellation semantics: an interrupted cell must not leave its
+    commands running. Handles from other cells are untouched.
+    """
+    with _live_lock:
+        handles = list(_cell_handles.get(cell_id, ()))
+    for handle in handles:
+        try:
+            handle.kill(signal.SIGTERM, grace=_CANCEL_TERM_GRACE)
+        except Exception:  # noqa: BLE001 - one broken handle must not shield the rest
+            pass
+
+
+def _forget_cell(cell_id: str) -> None:
+    """Drop per-cell bookkeeping when the request finishes.
+
+    The handles themselves keep running as background handles; they only stop
+    being killable by interrupts that target the finished cell.
+    """
+    with _live_lock:
+        _cell_handles.pop(cell_id, None)
 
 
 def _kill_live_handles() -> None:
