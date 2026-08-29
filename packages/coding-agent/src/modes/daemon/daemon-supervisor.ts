@@ -81,6 +81,8 @@ import {
 	failure,
 	isDaemonCommandEnvelope,
 	isDaemonMutatingCommand,
+	missingDeclaredCommandCapability,
+	normalizeDeclaredCapabilities,
 	salvageDaemonCommandId,
 	success,
 	UPDATE_RESTART_DRAIN_COMMANDS,
@@ -184,6 +186,7 @@ const WORKER_STARTUP_GATE_FD = 3;
 
 const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"ack_result",
+	"declare_client_capabilities",
 	"list",
 	"list_agent_peers",
 	"list_saved_sessions",
@@ -1436,6 +1439,25 @@ export class DaemonSupervisor {
 			);
 			return;
 		}
+		// Capability-gated and control-plane commands require the connection to
+		// have declared the capability. Connections that never declared keep the
+		// legacy compatibility path (pre-gating clients and tests).
+		const missingCapability = missingDeclaredCommandCapability(
+			client.declaredCapabilities,
+			client.declaredCommandCapabilities,
+			command,
+		);
+		if (missingCapability !== undefined) {
+			this.write(
+				client,
+				failure(
+					command.id,
+					command.type,
+					`Daemon command ${command.type} requires the connection to declare the "${missingCapability}" capability`,
+				),
+			);
+			return;
+		}
 
 		try {
 			await waitForPromptAdmission(this.assertCurrentOwnership(), parsedAdmission?.controller.signal);
@@ -1575,6 +1597,13 @@ export class DaemonSupervisor {
 			case "ack_result":
 				this.commandJournal.acknowledge(client.id, command.commandId);
 				return undefined;
+			case "declare_client_capabilities": {
+				// Connection-level command-gating set. Distinct from attach event
+				// capabilities. Re-declarations replace the previous set.
+				client.declaredCommandCapabilities = new Set(normalizeDeclaredCapabilities(command.capabilities));
+				client.declaredCapabilities = true;
+				return success(command.id, command.type, { declared: [...client.declaredCommandCapabilities] });
+			}
 			case "list":
 				return this.handleList(client, command);
 			case "list_agent_peers": {

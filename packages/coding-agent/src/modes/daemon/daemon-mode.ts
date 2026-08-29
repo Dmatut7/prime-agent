@@ -154,6 +154,8 @@ import {
 	isDaemonCommandEnvelope,
 	isDaemonDialogExtensionUiRequest,
 	isDaemonMutatingCommand,
+	missingDeclaredCommandCapability,
+	normalizeDeclaredCapabilities,
 	salvageDaemonCommandId,
 	success,
 	UPDATE_RESTART_DRAIN_COMMANDS,
@@ -243,6 +245,7 @@ const MAX_SESSION_SNAPSHOT_STABILIZATION_RETRIES = 3;
 
 const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"ack_result",
+	"declare_client_capabilities",
 	"list",
 	"list_saved_sessions",
 	"create",
@@ -3459,6 +3462,24 @@ export class AgentDaemon {
 			return;
 		}
 
+		const missingCapability = missingDeclaredCommandCapability(
+			client.declaredCapabilities,
+			client.declaredCommandCapabilities,
+			command,
+		);
+		if (missingCapability !== undefined) {
+			clearParsedAdmission();
+			this.write(
+				client,
+				failure(
+					command.id,
+					command.type,
+					`Daemon command ${command.type} requires the connection to declare the "${missingCapability}" capability`,
+				),
+			);
+			return;
+		}
+
 		const mutation = command.type !== "prepare_update_restart" && isDaemonMutatingCommand(command);
 		const restartPhase = this.updateRestart?.phase;
 		// Mirror the supervisor's drain/fence split: abort-style commands stay
@@ -4829,6 +4850,12 @@ export class AgentDaemon {
 				state.extensionUiRequests.delete(command.requestId);
 				pending.resolve(command.response);
 				return success(command.id, "extension_ui_response");
+			}
+
+			case "declare_client_capabilities": {
+				client.declaredCommandCapabilities = new Set(normalizeDeclaredCapabilities(command.capabilities));
+				client.declaredCapabilities = true;
+				return success(command.id, command.type, { declared: [...client.declaredCommandCapabilities] });
 			}
 
 			case "prepare_update_restart":
