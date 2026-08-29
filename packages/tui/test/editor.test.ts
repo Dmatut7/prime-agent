@@ -1655,7 +1655,7 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getText(), "x\ny\nz");
 		});
 
-		it("undoes setText to empty string", () => {
+		it("clears undo stack on setText to empty string", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 
 			editor.handleInput("h");
@@ -1675,7 +1675,7 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getText(), "");
 
 			editor.handleInput("\x1b[45;5u"); // Ctrl+- (undo)
-			assert.strictEqual(editor.getText(), "hello world");
+			assert.strictEqual(editor.getText(), "");
 		});
 
 		it("clears undo stack on submit", () => {
