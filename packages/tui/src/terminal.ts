@@ -92,6 +92,12 @@ export interface Terminal {
 	 */
 	drainInput(maxMs?: number, idleMs?: number): Promise<void>;
 
+	/**
+	 * Drop in-flight stdin (including unterminated bracketed paste) without
+	 * emitting paste or leftover keys. Used on session switch and shutdown drain.
+	 */
+	abortPendingInput(): void;
+
 	// Write output to terminal
 	write(data: string): void;
 
@@ -379,7 +385,12 @@ export class ProcessTerminal implements Terminal {
 		}
 	}
 
+	abortPendingInput(): void {
+		this.stdinBuffer?.clear();
+	}
+
 	async drainInput(maxMs = 1000, idleMs = 50): Promise<void> {
+		this.abortPendingInput();
 		if (this._kittyProtocolActive) {
 			// Disable Kitty keyboard protocol first so any late key releases
 			// do not generate new Kitty escape sequences.
@@ -413,6 +424,7 @@ export class ProcessTerminal implements Terminal {
 			}
 		} finally {
 			process.stdin.removeListener("data", onData);
+			this.abortPendingInput();
 			this.inputHandler = previousHandler;
 		}
 	}

@@ -3680,6 +3680,36 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getText(), "hello");
 		});
 
+		it("keeps the draft when Ctrl+C interrupts an unterminated paste", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const interrupted: string[] = [];
+			for (const ch of "hello") editor.handleInput(ch);
+			const stdin = new StdinBuffer({ timeout: 10 });
+			attach(editor, stdin);
+			stdin.on("data", (sequence) => {
+				interrupted.push(sequence);
+			});
+
+			stdin.process("\x1b[200~abc");
+			stdin.process("\x03");
+
+			assert.strictEqual(editor.getText(), "hello");
+			assert.ok(interrupted.includes("\x03"));
+		});
+
+		it("does not apply a late 201~ after abortPendingInput", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			for (const ch of "hello") editor.handleInput(ch);
+			const stdin = new StdinBuffer({ timeout: 10 });
+			attach(editor, stdin);
+
+			stdin.process("\x1b[200~abc");
+			stdin.abortPendingInput();
+			stdin.process("\x1b[201~");
+
+			assert.strictEqual(editor.getText(), "hello");
+		});
+
 		it("applies a timed-out paste as one undo unit", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			for (const ch of "hello") editor.handleInput(ch);

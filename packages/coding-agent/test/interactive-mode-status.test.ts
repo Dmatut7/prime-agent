@@ -1418,6 +1418,7 @@ describe("InteractiveMode pending bash components", () => {
 		const fakeThis = {
 			endFeatureHintRun,
 			queueSelection,
+			ui: { terminal: { abortPendingInput: vi.fn() } },
 			chatContainer: new Container(),
 			shortcutGuideContainer: new Container(),
 			pendingMessagesContainer: new Container(),

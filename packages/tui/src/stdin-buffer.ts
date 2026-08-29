@@ -176,6 +176,13 @@ function extractCompleteSequences(buffer: string): { sequences: string[]; remain
 		const remaining = buffer.slice(pos);
 
 		if (remaining.startsWith(ESC)) {
+			// Two ESC bytes in a row are two Escape keys, not ctrl+alt+[.
+			// ESC+letter still forms alt+letter for existing keybindings.
+			if (remaining.length >= 2 && remaining[1] === ESC) {
+				sequences.push(ESC, ESC);
+				pos += 2;
+				continue;
+			}
 			let seqEnd = 1;
 			while (seqEnd <= remaining.length) {
 				const candidate = remaining.slice(0, seqEnd);
@@ -233,6 +240,11 @@ function isImmediatePasteEscapeAbort(data: string): boolean {
 	return data === "\x1b[27u" || (data.startsWith("\x1b[27;") && data.endsWith("u"));
 }
 
+function containsCompleteKittyEscape(buffer: string): boolean {
+	if (buffer.includes("\x1b[27u")) return true;
+	return /\x1b\[27;[\d:]+u/.test(buffer);
+}
+
 /**
  * Buffers stdin input and emits complete sequences via the 'data' event.
  * Handles partial escape sequences that arrive across multiple chunks.
@@ -241,7 +253,6 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	private buffer: string = "";
 	private timeout: ReturnType<typeof setTimeout> | null = null;
 	private pasteWatchdog: ReturnType<typeof setTimeout> | null = null;
-	private pasteEscapeTimer: ReturnType<typeof setTimeout> | null = null;
 	private readonly timeoutMs: number;
 	private readonly pasteTimeoutMs: number;
 	private readonly pasteMaxBytes: number;
@@ -281,9 +292,21 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			return;
 		}
 
-		if (this.pasteMode && isImmediatePasteEscapeAbort(str)) {
-			this.discardPasteMode();
-			return;
+		if (this.pasteMode) {
+			const interruptAt = str.indexOf("\x03");
+			if (interruptAt !== -1) {
+				this.discardPasteMode();
+				this.emitDataSequence("\x03");
+				const remaining = str.slice(interruptAt + 1);
+				if (remaining.length > 0) {
+					this.process(remaining);
+				}
+				return;
+			}
+			if (isImmediatePasteEscapeAbort(str)) {
+				this.discardPasteMode();
+				return;
+			}
 		}
 
 		this.buffer += str;
@@ -341,9 +364,12 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			this.finishPasteWithoutTerminator();
 			return;
 		}
+		if (containsCompleteKittyEscape(this.pasteBuffer)) {
+			this.discardPasteMode();
+			return;
+		}
 		// Idle timeout: each chunk proves the paste is still flowing.
 		this.armPasteWatchdog();
-		this.armPasteEscapeTimerIfNeeded();
 	}
 
 	private finishPasteIfComplete(): boolean {
@@ -391,21 +417,6 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		}, this.pasteTimeoutMs);
 	}
 
-	private armPasteEscapeTimerIfNeeded(): void {
-		this.clearPasteEscapeTimer();
-		// A trailing ESC may be the Esc key or the start of `201~`. Wait briefly
-		// so a split terminator can complete; otherwise abort paste mode.
-		if (!this.pasteMode || !this.pasteBuffer.endsWith("\x1b")) {
-			return;
-		}
-		this.pasteEscapeTimer = setTimeout(() => {
-			this.pasteEscapeTimer = null;
-			if (this.pasteMode) {
-				this.discardPasteMode();
-			}
-		}, this.timeoutMs);
-	}
-
 	private clearPasteWatchdog(): void {
 		if (this.pasteWatchdog) {
 			clearTimeout(this.pasteWatchdog);
@@ -413,16 +424,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		}
 	}
 
-	private clearPasteEscapeTimer(): void {
-		if (this.pasteEscapeTimer) {
-			clearTimeout(this.pasteEscapeTimer);
-			this.pasteEscapeTimer = null;
-		}
-	}
-
 	private clearPasteTimers(): void {
 		this.clearPasteWatchdog();
-		this.clearPasteEscapeTimer();
 	}
 
 	private emitDataSequence(sequence: string): void {
@@ -462,6 +465,15 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.pasteMode = false;
 		this.pasteBuffer = "";
 		this.pendingKittyPrintableCodepoint = undefined;
+	}
+
+	/** Drop in-flight paste and incomplete sequences without emitting them. */
+	abortPendingInput(): void {
+		this.clear();
+	}
+
+	isPasteMode(): boolean {
+		return this.pasteMode;
 	}
 
 	getBuffer(): string {
