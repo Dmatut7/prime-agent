@@ -3697,7 +3697,7 @@ export class AgentSession {
 			diagnostics,
 		};
 		if (info.stage === "warn") {
-			const message = `Possible stall: no session activity for ${silentSeconds}s while a turn is running. If nothing recovers, the turn will be aborted automatically after ${settings.abortAfterSeconds}s of silence.`;
+			const message = `Possible stall: no session activity for ${silentSeconds}s while a turn is running. If nothing recovers, the turn will be aborted automatically after ${settings.abortAfterSeconds}s of silence. If a tool appears stuck, interrupt the turn manually to recover faster; check the daemon log for stall diagnostics.`;
 			sessionLog.warn("stall watchdog: no activity while turn running", logFields);
 			this._emit({
 				type: "stall_warning",

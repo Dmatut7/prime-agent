@@ -356,6 +356,8 @@ describe("AgentSession stall watchdog (integration)", () => {
 		expect(warning.type).toBe("stall_warning");
 		if (warning.type !== "stall_warning") throw new Error("unreachable");
 		expect(warning.message).toContain("no session activity");
+		// The warning must include actionable guidance, not just a description.
+		expect(warning.message).toContain("interrupt");
 		expect(warning.diagnostics.inFlightToolCalls.some((call) => call.toolName === "hang_forever")).toBe(true);
 
 		const abortEvent = await waitFor(events, (event) => event.type === "stall_abort");
