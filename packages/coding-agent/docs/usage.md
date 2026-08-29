@@ -202,6 +202,11 @@ In print mode, Prime Agent also reads piped stdin and merges it into the initial
 cat README.md | prime-agent -p "Summarize this text"
 ```
 
+Print and JSON mode wait for in-flight subagents to settle before exiting, so the
+run does not abort subagents whose results the root has not consumed yet. A
+subagent that never settles keeps the run open until the long-running request
+timeout (24 hours in daemon mode); interrupt with Ctrl+C to exit early.
+
 ### Model Options
 
 | Option | Description |
