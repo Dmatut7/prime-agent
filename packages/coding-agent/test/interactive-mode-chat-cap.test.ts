@@ -25,8 +25,9 @@ type CapHarness = {
 	hideThinkingBlock: boolean;
 	hiddenThinkingLabel: string;
 	defaultHiddenThinkingLabel: string;
-	streamingComponent: undefined;
-	activeBashComponent: undefined;
+	streamingComponent: AssistantMessageComponent | undefined;
+	streamingMessage: Extract<AgentMessage, { role: "assistant" }> | undefined;
+	activeBashComponent: { render: () => string[]; invalidate: () => void } | undefined;
 	customHeader: undefined;
 	builtInHeader: undefined;
 	connectionState: {
@@ -77,6 +78,11 @@ type Proto = {
 	applyChatExpansion(this: CapHarness): void;
 	setHiddenThinkingLabel(this: CapHarness, label?: string): void;
 	setFullscreenMode(this: CapHarness, enabled: boolean): void;
+	ensureAssistantStreamingComponent(
+		this: CapHarness,
+		message: Extract<AgentMessage, { role: "assistant" }>,
+	): AssistantMessageComponent;
+	reattachLiveChatComponents(this: CapHarness): void;
 };
 
 const proto = InteractiveMode.prototype as unknown as Proto;
@@ -151,6 +157,7 @@ function createCapHarness(overrides: Partial<CapHarness> = {}): CapHarness {
 		hiddenThinkingLabel: "Thinking...",
 		defaultHiddenThinkingLabel: "Thinking...",
 		streamingComponent: undefined,
+		streamingMessage: undefined,
 		activeBashComponent: undefined,
 		customHeader: undefined,
 		builtInHeader: undefined,
@@ -370,6 +377,54 @@ describe("InteractiveMode live chat component cap", () => {
 		);
 		expect(setShowImages.mock.calls.length).toBeGreaterThan(0);
 		expect(setHideThinkingBlock.mock.calls.length).toBeGreaterThan(0);
+	});
+
+	test("reattaches in-flight streaming after fullscreen restore rebuilds the tree", async () => {
+		const originalIsTTY = process.stdout.isTTY;
+		(process.stdout as { isTTY?: boolean }).isTTY = true;
+		try {
+			const harness = createCapHarness();
+			fillOverCap(harness.chatContainer);
+			await proto.enforceChatComponentCap.call(harness);
+			expect(harness.chatTranscriptTrimmed).toBe(true);
+
+			const streamingMessage = {
+				role: "assistant" as const,
+				content: [{ type: "text" as const, text: "partial" }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "test-model",
+				usage: emptyUsage(),
+				stopReason: "stop",
+				timestamp: Date.now(),
+			};
+			const streaming = new AssistantMessageComponent(undefined, false, getMarkdownTheme(), "Thinking...", {
+				expanded: false,
+				precededByToolActivity: false,
+			});
+			streaming.updateContent(streamingMessage);
+			harness.chatContainer.addChild(streaming);
+			harness.streamingComponent = streaming;
+			harness.streamingMessage = streamingMessage;
+			const bash = { render: () => ["bash"], invalidate: () => {} };
+			harness.activeBashComponent = bash;
+			harness.chatContainer.addChild(bash);
+
+			proto.setFullscreenMode.call(harness, true);
+			await vi.waitFor(() => expect(harness.ui.enterFullscreen).toHaveBeenCalled());
+
+			expect(harness.chatContainer.children).toContain(streaming);
+			expect(harness.chatContainer.children).toContain(bash);
+			const ensured = proto.ensureAssistantStreamingComponent.call(harness, streamingMessage);
+			expect(ensured).toBe(streaming);
+			expect(harness.chatContainer.children).toContain(ensured);
+
+			streamingMessage.content = [{ type: "text", text: "partial more" }];
+			ensured.updateContent(streamingMessage);
+			expect(harness.chatContainer.children).toContain(ensured);
+		} finally {
+			(process.stdout as { isTTY?: boolean }).isTTY = originalIsTTY;
+		}
 	});
 
 	test("entering fullscreen restores the full transcript trimmed by the cap", async () => {
