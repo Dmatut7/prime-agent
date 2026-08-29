@@ -388,9 +388,9 @@ describe("InteractiveMode live chat component cap", () => {
 			await proto.enforceChatComponentCap.call(harness);
 			expect(harness.chatTranscriptTrimmed).toBe(true);
 
-			const streamingMessage = {
-				role: "assistant" as const,
-				content: [{ type: "text" as const, text: "partial" }],
+			const streamingMessage: Extract<AgentMessage, { role: "assistant" }> = {
+				role: "assistant",
+				content: [{ type: "text", text: "partial" }],
 				api: "openai-responses",
 				provider: "openai",
 				model: "test-model",
