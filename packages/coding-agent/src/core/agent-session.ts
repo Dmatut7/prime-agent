@@ -6952,6 +6952,7 @@ export class AgentSession {
 				!this._durableRlmTerminalNoticeActionIds.has(action.id),
 			new Error("Prompt aborted before delivery."),
 		);
+		this._settleAbortedDispatchedTurnActions();
 		this._cancelPostCompactionContinue();
 		this.abortRetry();
 		this.abortCompaction();
@@ -6962,6 +6963,44 @@ export class AgentSession {
 		this._autoRefineReviewAbort?.abort();
 		this._refineAbortController?.abort();
 		this.agent.abort();
+	}
+
+	/**
+	 * Settle turn actions that were already dispatched into the agent run when
+	 * the abort arrived. The pump's deferred-error path only rolls back
+	 * undelivered work, so a delivered action stuck in `committing`/`running`
+	 * would never reach a terminal state: `unfinishedActionCount` stays nonzero
+	 * forever, which keeps `isSessionActive` true and makes `wait_for_idle` and
+	 * RLM quiescence hang. The delivered messages stay in the transcript; only
+	 * the action lifecycle ends. Undelivered dispatched work is left to the
+	 * pump's rollback so it can re-queue.
+	 */
+	private _settleAbortedDispatchedTurnActions(): void {
+		const transcript = this.agent.state.messages;
+		const error = new Error("Prompt aborted after delivery.");
+		const dispatched = this._actionStore
+			.unfinishedActions()
+			.filter(
+				(action): action is SessionAction<PreparedTurnPayload> =>
+					action.payload.kind === "turn" &&
+					(action.lifecycle.state === "committing" || action.lifecycle.state === "running") &&
+					(primaryDeliveryRecord(action).durable || transcript.includes(primaryDeliveryRecord(action).message)),
+			);
+		if (dispatched.length === 0) return;
+		for (const action of dispatched) {
+			primaryDeliveryRecord(action).durable = true;
+			transitionSessionAction(action, { state: "failed", error });
+			const ticket = this._actionStore.ticketFor(action);
+			ticket.rejectDelivered(error);
+			ticket.settleCompleted(error);
+			this._settleAgentMessage(action.agentMessageId, "delivery", error);
+			this._settleAgentMessage(action.agentMessageId, "completion", error);
+		}
+		// Leave the terminal actions in the store: the dispatching pump batch still
+		// references them and releases them in its finally once the abort error lands
+		// (a second release here would make that path look the ticket up twice).
+		this._notifySessionInputCheckpointChange();
+		this._emitQueueUpdate();
 	}
 
 	async abort(): Promise<void> {
