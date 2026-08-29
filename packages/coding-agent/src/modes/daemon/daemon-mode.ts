@@ -4347,6 +4347,10 @@ export class AgentDaemon {
 					"wait_for_headless_completion",
 					await waitForHeadlessCompletion(state.runtime.session, {
 						waitForRlmQuiescence: command.waitForRlmQuiescence,
+						// The wait is read-only; autonomous gate continuations are not.
+						// Stop prompting once an update-restart transaction is underway so
+						// the checkpoint never races a gate continuation turn.
+						shouldStopGateContinuations: () => this.updateRestart !== undefined,
 					}),
 				);
 			}
