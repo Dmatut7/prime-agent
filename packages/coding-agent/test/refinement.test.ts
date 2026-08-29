@@ -14,6 +14,7 @@ import {
 	getLocalHarnessStateDir,
 	getRefinementHistory,
 	getRefinementHistoryPath,
+	HARNESS_CONCURRENT_WRITE_ERROR,
 	type HarnessState,
 	inferRefinementResultScope,
 	isPersistentHarnessStorageSupported,
@@ -21,11 +22,13 @@ import {
 	loadHarnessState,
 	mergeHarnessStates,
 	mergeRefinementHistory,
+	persistAppliedRefinement,
 	planRefinement,
 	type RefinementAction,
 	type RefinementKind,
 	type RefinementProposal,
 	type RefinementResult,
+	readHarnessStateStamp,
 	refineHarness,
 	saveHarnessState,
 	WINDOWS_HARNESS_PERSISTENCE_UNSUPPORTED_ERROR,
@@ -1534,5 +1537,73 @@ describe("global refinement history", () => {
 		});
 
 		expect(plan.rollbackScope).toBe("global");
+	});
+});
+
+const describePosix = process.platform === "win32" ? describe.skip : describe;
+
+describePosix("persistAppliedRefinement order and mtime", () => {
+	it("writes session audit before harness so rollback survives an interrupted save", () => {
+		const dir = makeTempDir();
+		const expectedStamp = readHarnessStateStamp(dir);
+		const state = loadHarnessState(dir, "local");
+		const result = applyRefinementProposal(
+			state,
+			proposal("Add memory", [
+				{ action: "create", kind: "memory", id: "note", title: "Note", content: "from refine" },
+			]),
+			{ id: "refine_interrupted", scope: "local" },
+		);
+
+		const concurrent = loadHarnessState(dir, "local");
+		applyRefinementProposal(
+			concurrent,
+			proposal("Kernel write", [
+				{ action: "create", kind: "memory", id: "kernel", title: "Kernel", content: "from kernel" },
+			]),
+			{ id: "kernel_write", scope: "local" },
+		);
+		saveHarnessState(dir, concurrent);
+
+		const audit: RefinementResult[] = [];
+		expect(() =>
+			persistAppliedRefinement({
+				harnessStateDir: dir,
+				state,
+				result,
+				expectedStamp,
+				appendSessionAudit: (entry) => {
+					audit.push(structuredClone(entry));
+				},
+			}),
+		).toThrow(HARNESS_CONCURRENT_WRITE_ERROR);
+
+		expect(audit.map((entry) => entry.id)).toEqual(["refine_interrupted"]);
+		expect(loadHarnessState(dir, "local").entries.memory.kernel?.content).toBe("from kernel");
+		expect(loadHarnessState(dir, "local").entries.memory.note).toBeUndefined();
+		expect(mergeRefinementHistory([], audit).some((item) => item.id === "refine_interrupted")).toBe(true);
+	});
+
+	it("saves harness when the on-disk mtime still matches the load", () => {
+		const dir = makeTempDir();
+		const expectedStamp = readHarnessStateStamp(dir);
+		const state = loadHarnessState(dir, "local");
+		const result = applyRefinementProposal(
+			state,
+			proposal("Add memory", [{ action: "create", kind: "memory", id: "note", title: "Note", content: "applied" }]),
+			{ id: "refine_ok", scope: "local" },
+		);
+		const audit: string[] = [];
+		persistAppliedRefinement({
+			harnessStateDir: dir,
+			state,
+			result,
+			expectedStamp,
+			appendSessionAudit: (entry) => {
+				audit.push(entry.id);
+			},
+		});
+		expect(audit).toEqual(["refine_ok"]);
+		expect(loadHarnessState(dir, "local").entries.memory.note?.content).toBe("applied");
 	});
 });

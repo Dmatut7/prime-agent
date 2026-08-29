@@ -193,11 +193,11 @@ import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js
 import {
 	type AutoRefineReason,
 	type AutoRefineReview,
-	appendGlobalRefinement,
 	applyRefinementProposal,
 	assertHarnessStateWritable,
 	generateRefinementId,
 	getGlobalHarnessStateDir,
+	getHarnessStatePath,
 	getLocalHarnessStateDir,
 	getRefinementHistory,
 	type HarnessState,
@@ -208,12 +208,13 @@ import {
 	mergeHarnessStates,
 	mergeRefinementHistory,
 	normalizeRefinementProposal,
+	persistAppliedRefinement,
 	planRefinement,
 	REFINE_SKILL_NAME,
 	type RefinementPlan,
 	type RefinementResult,
+	readHarnessStateStamp,
 	reviewAutoRefine,
-	saveHarnessState,
 	WINDOWS_HARNESS_PERSISTENCE_UNSUPPORTED_ERROR,
 } from "./refinement/index.js";
 import { resolveConfigValue } from "./resolve-config-value.js";
@@ -8539,11 +8540,6 @@ export class AgentSession {
 			let targetScope = plan.rollbackScope ?? requestedScope;
 			let targetHarnessStateDir = targetScope === "global" ? globalHarnessStateDir : localHarnessStateDir;
 			if (targetScope === "local" && rollbackTarget?.harnessStatePath) {
-				if (!existsSync(rollbackTarget.harnessStatePath)) {
-					throw new Error(
-						`Local refinement ${rollbackTarget.id} state file not found: ${rollbackTarget.harnessStatePath}`,
-					);
-				}
 				targetHarnessStateDir = dirname(rollbackTarget.harnessStatePath);
 				// Legacy records predate scope fields and default to "local" but may point
 				// at the global store; honor the recorded path so its entries stay global.
@@ -8555,7 +8551,9 @@ export class AgentSession {
 				throw new Error("Local harness refinement requires a persisted session; use global refinement instead.");
 			}
 			// Re-read the target state immediately before applying so concurrent kernel
-			// (`rlm.harness`) writes during the LLM pass are not clobbered.
+			// (`rlm.harness`) writes during the LLM pass are not clobbered. Capture
+			// stamp so save refuses to overwrite a write that lands after this load.
+			const expectedStamp = readHarnessStateStamp(targetHarnessStateDir);
 			const state = loadHarnessState(targetHarnessStateDir, targetScope);
 			const proposal = {
 				...plan.proposal,
@@ -8581,22 +8579,28 @@ export class AgentSession {
 				scope: targetScope,
 				baselineState: plan.baselineState,
 			});
-			result.harnessStatePath = saveHarnessState(targetHarnessStateDir, state);
-			if (targetScope === "global") {
-				appendGlobalRefinement(globalHarnessStateDir, result);
-			}
-			let refinementAuditAppendError: { error: unknown } | undefined;
+			result.harnessStatePath = getHarnessStatePath(targetHarnessStateDir);
+			let refinementPersistError: { error: unknown } | undefined;
 			try {
-				this.sessionManager.appendCustomEntry("prime-agent.refinement", result);
+				persistAppliedRefinement({
+					harnessStateDir: targetHarnessStateDir,
+					state,
+					result,
+					expectedStamp,
+					appendSessionAudit: (entry) => {
+						this.sessionManager.appendCustomEntry("prime-agent.refinement", entry);
+					},
+					globalHarnessStateDir: targetScope === "global" ? globalHarnessStateDir : undefined,
+				});
 			} catch (error) {
-				refinementAuditAppendError = { error };
+				refinementPersistError = { error };
 			}
 			try {
 				this._recordRefinementOutcome(result);
 			} catch (error) {
-				if (!refinementAuditAppendError) throw error;
+				if (!refinementPersistError) throw error;
 			}
-			if (refinementAuditAppendError) throw refinementAuditAppendError.error;
+			if (refinementPersistError) throw refinementPersistError.error;
 			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 			this.agent.state.systemPrompt = this._baseSystemPrompt;
 			try {
