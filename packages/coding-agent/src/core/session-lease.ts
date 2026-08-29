@@ -33,6 +33,9 @@ export class SessionAlreadyActiveError extends Error {
 	}
 }
 
+/** Lease directories held by live SessionLease objects in this process. */
+const activeLeaseDirectories = new Set<string>();
+
 export class SessionLease {
 	private released = false;
 
@@ -40,13 +43,16 @@ export class SessionLease {
 		readonly sessionPath: string,
 		private readonly directory: string,
 		private readonly token: string,
-	) {}
+	) {
+		activeLeaseDirectories.add(directory);
+	}
 
 	release(): void {
 		if (this.released) {
 			return;
 		}
 		this.released = true;
+		activeLeaseDirectories.delete(this.directory);
 		try {
 			withLeaseGuard(this.directory, () => {
 				const owner = readLeaseOwner(this.directory);
@@ -190,16 +196,21 @@ function isLeaseOwnerAlive(owner: SessionLeaseOwner): boolean {
 }
 
 /**
- * The owner record names this very process under the same owner identity.
- * That happens when a prior acquire in this process leaked (release failed,
- * start-id detection unavailable, …). Reclaim instead of deadlocking against
- * ourselves: only this process can own a record carrying its live pid, and a
- * different process reusing the pid would have a different process start id
- * (caught by isLeaseOwnerAlive when present). Distinct logical owners inside
- * one process (different active-session ids) still conflict.
+ * The owner record names this very process under the same owner identity but
+ * no live SessionLease in this process holds it: a leaked lease (release
+ * failed, start-id detection unavailable, …). Reclaim instead of deadlocking
+ * against ourselves. A lease actively held in-process (an in-process RLM child
+ * runtime, a replaced session still disposing) stays in activeLeaseDirectories
+ * and therefore still conflicts — only truly orphaned records are reclaimed.
+ * A different process reusing the pid would have a different process start id
+ * (caught by isLeaseOwnerAlive when present).
  */
-function isOwnLeaseOwner(owner: SessionLeaseOwner, environment: NodeJS.ProcessEnv): boolean {
-	return owner.pid === process.pid && owner.activeSessionId === environment[SESSION_LEASE_OWNER_ID_ENV];
+function isReclaimableOwnLease(owner: SessionLeaseOwner, directory: string, environment: NodeJS.ProcessEnv): boolean {
+	return (
+		owner.pid === process.pid &&
+		owner.activeSessionId === environment[SESSION_LEASE_OWNER_ID_ENV] &&
+		!activeLeaseDirectories.has(directory)
+	);
 }
 
 function withLeaseGuard<T>(directory: string, action: () => T): T {
@@ -286,7 +297,11 @@ export function acquireSessionLease(
 					throw error;
 				}
 				const existingOwner = readLeaseOwner(directory);
-				if (existingOwner && isLeaseOwnerAlive(existingOwner) && !isOwnLeaseOwner(existingOwner, environment)) {
+				if (
+					existingOwner &&
+					isLeaseOwnerAlive(existingOwner) &&
+					!isReclaimableOwnLease(existingOwner, directory, environment)
+				) {
 					throw new SessionAlreadyActiveError(canonicalPath, existingOwner.activeSessionId);
 				}
 				reclaimStaleLease(directory);
@@ -294,7 +309,7 @@ export function acquireSessionLease(
 		}
 
 		const owner = existsSync(directory) ? readLeaseOwner(directory) : undefined;
-		if (owner && isLeaseOwnerAlive(owner) && !isOwnLeaseOwner(owner, environment)) {
+		if (owner && isLeaseOwnerAlive(owner) && !isReclaimableOwnLease(owner, directory, environment)) {
 			throw new SessionAlreadyActiveError(canonicalPath, owner.activeSessionId);
 		}
 		throw new Error(`Could not acquire session lease: ${canonicalPath}`);

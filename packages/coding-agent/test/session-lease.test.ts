@@ -141,6 +141,22 @@ describe("session leases", () => {
 		lease?.release();
 	});
 
+	it("keeps an actively held in-process lease conflicting", () => {
+		// A live SessionLease in this process (e.g. an in-process RLM child
+		// runtime) must still conflict even under the same pid and owner
+		// identity; only leaked leases are reclaimable.
+		const agentDir = createTempDir();
+		const sessionPath = join(agentDir, "held.jsonl");
+		const environment = enabledEnvironment("held-owner");
+		const first = acquireSessionLease(sessionPath, agentDir, environment);
+		expect(first).toBeDefined();
+		expect(() => acquireSessionLease(sessionPath, agentDir, environment)).toThrow(SessionAlreadyActiveError);
+		first?.release();
+		const second = acquireSessionLease(sessionPath, agentDir, environment);
+		expect(second?.sessionPath).toBe(canonicalSessionPath(sessionPath));
+		second?.release();
+	});
+
 	it("reclaims a lease owned by this process instead of deadlocking on itself", () => {
 		// A prior acquire in this process can leak its lease (failed release,
 		// unavailable start-id detection). Re-acquiring must take it over rather
