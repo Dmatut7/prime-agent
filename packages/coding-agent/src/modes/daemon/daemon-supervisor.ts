@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { Writable } from "node:stream";
@@ -148,6 +148,10 @@ const UPDATE_RESTART_WORKER_REQUEST_TIMEOUT_MS = 90_000;
 // caller's 120s prepare_update_restart request timeout, or roll back; otherwise
 // an abandoned prepare leaves the daemon permanently fenced with workers stopped.
 const UPDATE_RESTART_PREPARE_DEADLINE_MS = 100_000;
+// A prepared checkpoint older than this is treated as an abandoned handoff: the
+// supervisor does not re-enter the prepared phase for it, so ordinary recovery
+// wins the sessions back instead of serving a stale fence.
+const UPDATE_RESTART_PREPARED_RESTORE_WINDOW_MS = 30 * 60_000;
 const WORKER_RETRY_DELAYS_MS = [250, 1000, 5000] as const;
 const DEFERRED_RECOVERY_RECHECK_MS = 5000;
 const STOP_FINALIZATION_RECHECK_MS = 250;
@@ -717,6 +721,7 @@ export class DaemonSupervisor {
 			mkdirSync(this.snapshotCacheRoot, { recursive: true, mode: 0o700 });
 			this.commandJournal = new CommandRecoveryJournal(join(this.descriptorDir, "command-journal.jsonl"));
 			this.loadWorkerDescriptors();
+			this.restorePreparedUpdateRestartState();
 			const workersToAdopt = [...this.workers.values()];
 
 			this.server = createServer((socket) => this.handleConnection(socket));
@@ -4838,6 +4843,11 @@ export class DaemonSupervisor {
 				this.validateAndPersistUpdateManifest(prepared);
 				return prepared;
 			}
+			// Prepared phase with no checkpoint left to replay (both the in-memory
+			// copy and the persisted manifest are gone) is unrecoverable; drop the
+			// stale phase so a fresh prepare can proceed instead of throwing
+			// "already preparing" forever.
+			this.updateRestartPhase = undefined;
 		}
 		if (this.updateRestartPhase !== undefined) throw new Error("Daemon is already preparing an update restart");
 		this.updateRestartPhase = "draining";
@@ -4855,6 +4865,36 @@ export class DaemonSupervisor {
 			this.preparedUpdateRestartManifest = undefined;
 			throw error;
 		}
+	}
+
+	/**
+	 * Re-enter the prepared phase after a supervisor restart that interrupted a
+	 * handoff. The checkpoint is durable on disk; if it is fresh and no worker
+	 * descriptors survived (the commit removed them after stopping), restore the
+	 * phase so a retried prepare re-issues the checkpoint instead of re-preparing
+	 * from resident workers and overwriting it. An old checkpoint is treated as an
+	 * abandoned handoff and left to ordinary recovery.
+	 */
+	private restorePreparedUpdateRestartState(): void {
+		if (this.updateRestartPhase !== undefined) return;
+		if (this.workers.size > 0) return;
+		const agentDir = this.defaultSessionConfig.agentDir;
+		if (!agentDir) return;
+		const manifestPath = getDaemonUpdateRestartManifestPath(this.socketPath, agentDir);
+		let modifiedAtMs: number;
+		try {
+			modifiedAtMs = statSync(manifestPath).mtimeMs;
+		} catch {
+			return;
+		}
+		if (Date.now() - modifiedAtMs > UPDATE_RESTART_PREPARED_RESTORE_WINDOW_MS) return;
+		const manifest = this.readPreparedUpdateRestartManifest();
+		if (!manifest || manifest.sessions.length === 0) return;
+		this.updateRestartPhase = "prepared";
+		this.preparedUpdateRestartManifest = manifest;
+		this.log(
+			`Restored prepared update restart checkpoint (${manifest.sessions.length} session(s)) after supervisor restart`,
+		);
 	}
 
 	/** Read the persisted prepared checkpoint, if one exists and parses cleanly. */
@@ -4999,13 +5039,17 @@ export class DaemonSupervisor {
 		);
 		if (commitFailure) {
 			this.log(`Update restart commit response failed; forcing restart completion: ${String(commitFailure.reason)}`);
-			await Promise.allSettled(prepared.map((worker) => this.stopWorker(worker, false, true)));
+			await Promise.allSettled(prepared.map((worker) => this.stopWorker(worker, true, true)));
 			return manifest;
 		}
-		const stopResults = await Promise.allSettled(prepared.map((worker) => this.stopWorker(worker, false)));
+		// Remove the descriptors (persisting stop tombstones) so a supervisor that
+		// dies before the handoff completes cannot mistake the intentionally
+		// stopped workers for crashed ones and resurrect them. The manifest, not
+		// the descriptors, drives restoration on the other side of the restart.
+		const stopResults = await Promise.allSettled(prepared.map((worker) => this.stopWorker(worker, true)));
 		if (stopResults.some((result) => result.status === "rejected")) {
 			this.log("A committed update worker did not stop gracefully; forcing restart completion");
-			await Promise.allSettled(prepared.map((worker) => this.stopWorker(worker, false, true)));
+			await Promise.allSettled(prepared.map((worker) => this.stopWorker(worker, true, true)));
 		}
 		return manifest;
 	}
