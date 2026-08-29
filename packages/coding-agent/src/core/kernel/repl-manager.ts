@@ -1347,8 +1347,9 @@ export class ReplKernelManager {
 		const cfg = this.options.snapshot;
 		if (!cfg || !this.isRunning) return null;
 		// Hard guard behind every snapshot write (debounced, explicit, prune, dispose
-		// flush): a namespace revived incompletely is older than the on-disk snapshot.
-		if (this.restoreFailed) {
+		// flush): a namespace never (or incompletely) revived is older than the
+		// on-disk snapshot.
+		if (this.restoreFailed || this.pendingRestore) {
 			this.appendKernelDiagnostic(
 				"state snapshot skipped: the last restore failed, so the on-disk snapshot is preserved",
 			);
@@ -1450,8 +1451,9 @@ export class ReplKernelManager {
 
 	private scheduleSnapshot(): void {
 		const cfg = this.options.snapshot;
-		// A failed restore makes the namespace older than the on-disk snapshot; never overwrite it.
-		if (!cfg || this.restoreFailed) return;
+		// A namespace never (or incompletely) revived is older than the on-disk
+		// snapshot; never overwrite it.
+		if (!cfg || this.restoreFailed || this.pendingRestore) return;
 		if (this.snapshotTimer) clearTimeout(this.snapshotTimer);
 		this.snapshotTimer = globalThis.setTimeout(() => {
 			this.snapshotTimer = undefined;
@@ -1481,9 +1483,12 @@ export class ReplKernelManager {
 
 	private async runSnapshotFlushForDispose(): Promise<void> {
 		if (!this.options.snapshot || !this.isRunning) return;
-		// A kernel that never restored the saved namespace — or failed to — must not
-		// overwrite it: the on-disk snapshot is strictly fresher than this namespace.
-		if (this.pendingRestore || this.restoreFailed) return;
+		// A kernel that never restored the saved namespace must not overwrite it:
+		// the on-disk snapshot is strictly fresher than this namespace. A FAILED
+		// restore must not write either, but it still settles the queue here —
+		// skipping the wait would let the teardown race and kill in-flight work
+		// (e.g. the lazy re-bootstrap); captureSnapshot enforces the write ban.
+		if (this.pendingRestore) return;
 		// Block new external executions so none can splice ahead of the final snapshot and stall dispose.
 		this.flushingSnapshotForDispose = true;
 		try {
