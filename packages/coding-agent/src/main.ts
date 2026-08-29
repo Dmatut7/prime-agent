@@ -194,8 +194,14 @@ function toPrintOutputMode(appMode: AppMode): Exclude<Mode, "rpc" | "acp" | "dae
 	return appMode === "json" ? "json" : "text";
 }
 
-export function isClientOwnedDaemonSession(appMode: AppMode, noSession?: boolean): boolean {
-	return appMode !== "acp" || noSession === true;
+export function isClientOwnedDaemonSession(appMode: AppMode, noSession?: boolean, acpResident?: boolean): boolean {
+	if (appMode !== "acp" || noSession === true) {
+		return true;
+	}
+	// ACP defaults to a client-owned lifecycle: stdin EOF completes the session
+	// instead of leaving a detached worker behind.  Use --acp-resident to keep
+	// the resident lifecycle (detached worker lingers, editor can reconnect).
+	return !acpResident;
 }
 
 // `prime-agent agents` opens the agents view directly.
@@ -1542,7 +1548,7 @@ export async function main(args: string[], options?: MainOptions) {
 				config: defaultSessionConfig,
 				sessionPath: parsed.noSession ? undefined : sessionManager.getSessionFile(),
 				continueRecent: parsed.continue,
-				clientOwned: isClientOwnedDaemonSession(appMode, parsed.noSession),
+				clientOwned: isClientOwnedDaemonSession(appMode, parsed.noSession, parsed.acpResident),
 				noSession: parsed.noSession,
 				supportsExtensionUi: appMode === "rpc",
 			}));

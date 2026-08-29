@@ -347,7 +347,7 @@ describe("public command routing", () => {
 		const help = formatTopLevelHelp();
 		expect(help).toContain("Options:");
 		expect(help).toContain("Run options:");
-		expect(help).toContain("--mode <text|json|rpc|acp|daemon>");
+		expect(help).toContain("--mode <json|rpc|acp|daemon>");
 		expect(help).toContain("Autonomous options:");
 		for (const option of [
 			"--autonomous",

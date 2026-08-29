@@ -244,6 +244,13 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("--acp-resident flag", () => {
+		test("parses --acp-resident flag", () => {
+			const result = parseArgs(["--acp-resident"]);
+			expect(result.acpResident).toBe(true);
+		});
+	});
+
 	describe("--extension flag", () => {
 		test("parses single --extension", () => {
 			const result = parseArgs(["--extension", "./my-extension.ts"]);

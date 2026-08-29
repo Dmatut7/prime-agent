@@ -46,6 +46,7 @@ Headless and ephemeral clients use the same worker runtime as interactive client
 
 - print, piped stdin, and JSON mode remain one-shot;
 - RPC keeps LF-delimited JSONL framing and accepts prompts until EOF;
+- ACP completes the session on stdin EOF (use `--acp-resident` to keep the resident lifecycle for editor reconnect);
 - interactive `--no-session` uses an in-memory session;
 - normal completion explicitly removes the worker without archiving it;
 - unexpected client loss starts a bounded cleanup grace period;
@@ -73,7 +74,7 @@ Due ticks are claimed and advanced before prompt delivery. A crash therefore doe
 
 Resident workers keep scheduling across supervisor replacement. Worker recovery marks uncertain claims interrupted, keeps the advanced schedule, and resumes future ticks only. The supervisor routes schedule commands and merges worker summaries for global listing.
 
-## Public Daemon Protocol v4
+## Public Daemon Protocol v7
 
 The public local socket is JSONL-framed. The current protocol provides:
 
@@ -90,7 +91,7 @@ The public local socket is JSONL-framed. The current protocol provides:
 
 Protocol version and schema revision are independent. A compatible addition can be capability-gated or require a schema revision; an incompatible wire change requires a protocol bump.
 
-Protocol v1 is retained only for the one-release update handoff that prepares and stops an older daemon. A busy older daemon that cannot produce a recovery manifest is left running.
+The update handoff command `prepare_update_restart` drains mutations, fences resident workers, and collects a recovery manifest before the supervisor stops. A busy older daemon that cannot produce a recovery manifest is left running rather than force-stopped.
 
 JSON and RPC client modes do not expose daemon greetings, envelopes, snapshot records, lifecycle events, or connection metadata.
 
