@@ -32,6 +32,11 @@ __all__ = ["McpIntegration", "McpToolError", "NotEnabled"]
 # never dies mid-request. Mirrors the host's refresh buffer.
 _EXPIRY_SKEW_SECONDS = 30
 
+# Bound on a parsed tool result, in characters. Matches the host kernel's
+# DEFAULT_MAX_OUTPUT_CHARS so an oversized server payload cannot bloat the
+# kernel namespace (or its snapshot) before the display cap would cut it.
+_MAX_RESULT_CHARS = 65536
+
 
 class NotEnabled(RuntimeError):
     """Raised when an integration has no usable credentials.
@@ -308,7 +313,9 @@ def _parse_result(result: Any) -> Any:
     """Normalize a CallToolResult into plain Python (structured output preferred).
 
     Raises McpToolError when the server flags the result as an error, so a failed
-    tool call doesn't look like a successful one to the caller.
+    tool call doesn't look like a successful one to the caller. Payloads above
+    ``_MAX_RESULT_CHARS`` are truncated and marked, mirroring the host kernel's
+    output cap.
     """
     texts: list[str] = []
     for block in getattr(result, "content", None) or []:
@@ -317,17 +324,34 @@ def _parse_result(result: Any) -> Any:
             texts.append(text)
     is_error = getattr(result, "is_error", getattr(result, "isError", False))
     if is_error:
-        raise McpToolError("\n".join(texts) or "MCP tool returned an error")
+        raise McpToolError(_bounded_text("\n".join(texts)) or "MCP tool returned an error")
 
     structured = getattr(result, "structured_content", getattr(result, "structuredContent", None))
     if structured is not None:  # falsy-but-valid payloads ({} / []) are real results
-        return structured
+        return _bounded_value(structured)
     if texts:
-        return "\n".join(texts)
+        return _bounded_text("\n".join(texts))
 
     # Non-text content (images, embedded resources): return them as plain dicts
     # rather than the opaque SDK object so callers get usable data.
     blocks = getattr(result, "content", None) or []
     if blocks:
-        return [b.model_dump(mode="json") if hasattr(b, "model_dump") else b for b in blocks]
+        return _bounded_value([b.model_dump(mode="json") if hasattr(b, "model_dump") else b for b in blocks])
     return result
+
+
+def _bounded_text(value: str) -> str:
+    if len(value) <= _MAX_RESULT_CHARS:
+        return value
+    return value[:_MAX_RESULT_CHARS] + f"\n[... MCP result truncated at {_MAX_RESULT_CHARS} chars ...]"
+
+
+def _bounded_value(value: Any) -> Any:
+    """Return ``value`` unchanged when small enough, else a truncated JSON text."""
+    try:
+        encoded = json.dumps(value)
+    except (TypeError, ValueError):
+        return value  # not JSON-encodable: hand it back unbounded rather than lose it
+    if len(encoded) <= _MAX_RESULT_CHARS:
+        return value
+    return encoded[:_MAX_RESULT_CHARS] + f"\n[... MCP result truncated at {_MAX_RESULT_CHARS} chars ...]"

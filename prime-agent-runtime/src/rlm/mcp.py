@@ -291,6 +291,11 @@ class _Generation:
             try:
                 async with asyncio.timeout(self.call_timeout):
                     result = await self.session.call_tool(tool, arguments)
+            except TimeoutError:
+                # A wedged call leaves the session state unknown; retire it so the
+                # next call reconnects instead of reusing a possibly-dead session.
+                await self._retire()
+                raise
             except Exception as exc:
                 # A dead transport (server crashed or exited) must never be reused:
                 # retire this generation so the next call opens a fresh one. The

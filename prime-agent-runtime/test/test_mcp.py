@@ -712,6 +712,56 @@ class McpRegistryTest(unittest.TestCase):
         run(scenario())
 
 
+    def test_call_timeout_retires_generation(self):
+        class Slow(FakeSession):
+            async def call_tool(self, name, arguments):
+                await asyncio.sleep(10)
+
+        tool = SimpleNamespace(name="slow", description="", inputSchema={})
+        generation = self.generation({"type": "http", "callTimeoutMs": 10}, [tool])
+        generation.session = Slow([tool])
+        with self.assertRaises(TimeoutError):
+            run(generation.call("slow", {}))
+        # The wedged session must not be reused: the registry reopens on next use.
+        self.assertTrue(generation.closed)
+
+    def test_registry_reconnects_after_call_timeout(self):
+        config = {"type": "http", "url": "a", "callTimeoutMs": 10}
+        opened = []
+
+        async def config_loader(_server):
+            return config
+
+        async def open_generation(generation):
+            opened.append(generation)
+            generation.session = FakeSession(
+                [SimpleNamespace(name="t", description="", inputSchema={})],
+                result=CallToolResult(content=[TextContent(type="text", text="revived")]),
+            )
+            await generation.discover()
+
+        class Slow(FakeSession):
+            async def call_tool(self, name, arguments):
+                await asyncio.sleep(10)
+
+        tool = SimpleNamespace(name="t", description="", inputSchema={})
+        wedged = self.generation(config, [tool])
+        wedged.session = Slow([tool])
+        mcp._registry._generations["svc"] = wedged
+
+        async def scenario():
+            with mock.patch.object(mcp, "_config", config_loader), mock.patch.object(
+                mcp._Generation, "open", open_generation
+            ):
+                with self.assertRaises(TimeoutError):
+                    await mcp._registry.call("svc", "t", {})
+                return await mcp._registry.call("svc", "t", {})
+
+        result = run(scenario())
+        self.assertTrue(wedged.closed)
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(result, "revived")
+
     def test_connection_failure_classification(self):
         from mcp.shared import exceptions as mcp_exceptions
 
