@@ -252,7 +252,7 @@ export class InProcessAgentConnection implements AgentConnection {
 		return lease;
 	}
 	async resumeQueuedWork(): Promise<boolean> {
-		return this.session.resumeQueuedWork();
+		return this.session.resumeQueuedWorkFromConnection();
 	}
 
 	async listCronJobs(_options: { includeInactive?: boolean } = {}): Promise<AgentCronJob[]> {

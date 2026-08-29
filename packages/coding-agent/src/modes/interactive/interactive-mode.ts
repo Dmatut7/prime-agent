@@ -141,6 +141,7 @@ import { readClipboardImage } from "../../utils/clipboard-image.js";
 import { parseGitUrl } from "../../utils/git.js";
 import { resizeImage } from "../../utils/image-resize.js";
 import { getCwdRelativePath } from "../../utils/paths.js";
+import { createPrivateTempFile, readPrivateFile, writePrivateFileAtomic } from "../../utils/private-files.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import { ensureTool, ensureToolWithStatus, formatMissingRipgrepMessage } from "../../utils/tools-manager.js";
 import { checkForNewPiVersion } from "../../utils/version-check.js";
@@ -2782,6 +2783,20 @@ export class InteractiveMode {
 		return this.connectionState?.sessionActions.queuedCount ?? 0;
 	}
 
+	/**
+	 * Enter on an empty editor while messages wait in a queue that an interrupt
+	 * suspended: send the parked queue instead of doing nothing.
+	 */
+	private async resumeParkedQueueIfIdle(): Promise<boolean> {
+		if (this.isAgentStreaming() || this.getQueuedActionCount() === 0) return false;
+		try {
+			return await this.agentConnection.resumeQueuedWork();
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+			return false;
+		}
+	}
+
 	private getGoalState(): GoalState {
 		return this.connectionState?.goal ?? emptyGoalState();
 	}
@@ -4642,7 +4657,10 @@ export class InteractiveMode {
 				}
 			}
 			text = text.trim();
-			if (!text) return;
+			if (!text) {
+				await this.resumeParkedQueueIfIdle();
+				return;
+			}
 			const submissionGeneration = ++this.inputSubmissionGeneration;
 			this.inputSubmissionsPending++;
 			this.clearShortcutGuide();
@@ -5369,6 +5387,9 @@ export class InteractiveMode {
 				this.featureHintRunPending = this.getRetryAttempt() === 0;
 				this.resetPendingToolState();
 				this.renderRecap();
+				// The queued-messages footer offers Enter-to-send only while idle, so
+				// refresh it on the idle -> streaming transition too.
+				this.updatePendingMessagesDisplay();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -5655,6 +5676,9 @@ export class InteractiveMode {
 				this.flushPendingBashComponents();
 				this.resetPendingToolState();
 				this.renderRecap();
+				// The queued-messages footer offers Enter-to-send only while idle, so
+				// refresh it on the streaming -> idle transition.
+				this.updatePendingMessagesDisplay();
 
 				this.applyOptimisticContextUsage();
 				// Auto-compaction can start server-side while this event is being handled.
@@ -7444,12 +7468,10 @@ export class InteractiveMode {
 		}
 
 		const currentText = this.editor.getExpandedText?.() ?? this.editor.getText();
-		const tmpFile = path.join(os.tmpdir(), `pi-editor-${Date.now()}.pi.md`);
+		const temp = createPrivateTempFile("pi-editor-", ".pi.md", currentText);
+		const tmpFile = temp.path;
 
 		try {
-			// Write current content to temp file
-			fs.writeFileSync(tmpFile, currentText, "utf-8");
-
 			// Stop TUI to release terminal
 			this.ui.stop();
 
@@ -7464,26 +7486,24 @@ export class InteractiveMode {
 
 			// On successful exit (status 0), replace editor content
 			if (result.status === 0) {
-				const newContent = fs.readFileSync(tmpFile, "utf-8").replace(/\n$/, "");
+				const newContent = readPrivateFile(tmpFile, "utf-8").replace(/\n$/, "");
 				this.editor.setText(newContent);
 			}
 			// On non-zero exit, keep original text (no action needed)
 		} finally {
-			// Clean up temp file
 			try {
-				fs.unlinkSync(tmpFile);
-			} catch {
-				// Ignore cleanup errors
+				// Cleanup failures must not leave the terminal UI stopped.
+				fs.rmSync(temp.directory, { recursive: true, force: true });
+			} finally {
+				// Restart TUI
+				this.ui.start();
+				// ui.stop() left fullscreen so the editor got a clean terminal
+				if (this.fullscreenEnabled) {
+					this.applyFullscreen(true);
+				}
+				// Force full re-render since external editor uses alternate screen
+				this.ui.requestRender(true);
 			}
-
-			// Restart TUI
-			this.ui.start();
-			// ui.stop() left fullscreen so the editor got a clean terminal
-			if (this.fullscreenEnabled) {
-				this.applyFullscreen(true);
-			}
-			// Force full re-render since external editor uses alternate screen
-			this.ui.requestRender(true);
 		}
 	}
 
@@ -7549,7 +7569,9 @@ export class InteractiveMode {
 				this.queuedMessagesContainer.addChild(new TruncatedText(text, 1, 0));
 			}
 			const dequeueHint = this.getAppKeyDisplay("app.message.navigateOlder");
-			const hintText = theme.fg("dim", `╰─ ${dequeueHint} to browse and edit queued messages`);
+			// While idle the queue is parked (an interrupt suspended it); tell the user Enter sends it.
+			const sendHint = this.isAgentStreaming() ? "" : "enter to send · ";
+			const hintText = theme.fg("dim", `╰─ ${sendHint}${dequeueHint} to browse and edit queued messages`);
 			this.queuedMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}
 		if (hasQueuedMessages && !this.featureHintSuppressedByQueue) {
@@ -10076,8 +10098,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 				"",
 			].join("\n");
 
-			fs.mkdirSync(path.dirname(debugLogPath), { recursive: true });
-			fs.writeFileSync(debugLogPath, debugData);
+			writePrivateFileAtomic(debugLogPath, debugData);
 
 			this.chatContainer.addChild(new Spacer(1));
 			this.chatContainer.addChild(

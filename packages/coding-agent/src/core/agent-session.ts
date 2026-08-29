@@ -317,26 +317,9 @@ export type CompactionReason = "manual" | "threshold" | "overflow" | "requested"
 
 const sessionLog = getLogger("coding-agent.agent-session");
 
-/**
- * Forensic snapshot taken when the stall watchdog fires. All timestamps are
- * epoch milliseconds; elapsed fields are derived against `Date.now()` at
- * collection time.
- */
-export interface StallDiagnostics {
-	/** Milliseconds without any observed session activity. */
-	silentMs: number;
-	busy: {
-		streaming: boolean;
-		compacting: boolean;
-		retrying: boolean;
-		bashRunning: boolean;
-	};
-	lastEvent: { type: string; at: number; ageMs: number } | undefined;
-	inFlightToolCalls: Array<{ toolCallId: string; toolName: string; startedAt: number; elapsedMs: number }>;
-	pump: { suspended: boolean; requested: boolean; epoch: number };
-	/** Unfinished session actions (queued/in-flight turns, commands, dispatches). */
-	unfinishedActions: number;
-}
+import type { StallDiagnostics } from "./stall-diagnostics.js";
+
+export type { StallDiagnostics };
 
 export type AgentSessionEvent =
 	| AgentEvent
@@ -7089,6 +7072,19 @@ export class AgentSession {
 		this._maybeResumeGoalContinuationAfterRlmWork();
 		this._scheduleSessionInputPump();
 		return this._hasSelectableSessionInput();
+	}
+
+	/**
+	 * Resume requested by a live connection (TUI Enter on an empty editor, the
+	 * daemon resume_queue command). Never lifts the update-restart fence: queued
+	 * work must survive into the restart manifest instead of starting a new turn
+	 * during teardown (mirrors the triggerTurn and agent-message wake guards).
+	 * Recovery flows (post-restart restore, in-process unwedge) call
+	 * resumeQueuedWork() directly.
+	 */
+	resumeQueuedWorkFromConnection(): boolean {
+		if (this._sessionInputPumpSuspended && this._sessionInputSuspendedForUpdateRestart) return false;
+		return this.resumeQueuedWork();
 	}
 
 	async waitForSessionInputIdle(): Promise<void> {
