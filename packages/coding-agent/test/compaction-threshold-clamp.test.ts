@@ -1,7 +1,12 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import { beforeEach, describe, expect, it } from "vitest";
-import { capKeepRecentTokens, type CompactionSettings, prepareCompaction, shouldCompact } from "../src/core/compaction/index.js";
+import {
+	type CompactionSettings,
+	capKeepRecentTokens,
+	prepareCompaction,
+	shouldCompact,
+} from "../src/core/compaction/index.js";
 import type { SessionEntry, SessionMessageEntry } from "../src/core/session-manager.js";
 
 function createMockUsage(input: number, output: number, cacheRead = 0, cacheWrite = 0): Usage {
