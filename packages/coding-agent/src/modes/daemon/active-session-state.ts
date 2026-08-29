@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import type { Socket } from "node:net";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type { AgentStatus } from "../../core/session-manager.js";
-import type { DaemonClientCapability, DaemonEventSequence, DaemonExtensionUIResponse } from "./daemon-protocol.js";
+import type {
+	DaemonClientCapability,
+	DaemonDeclaredCapability,
+	DaemonEventSequence,
+	DaemonExtensionUIResponse,
+} from "./daemon-protocol.js";
 import { formatSessionDisplayId, matchesSessionIdSuffix } from "./daemon-session-id.js";
 
 export interface DaemonSocketClient {
@@ -28,6 +33,14 @@ export interface DaemonSocketClient {
 	detachInput: () => void;
 	supportsExtensionUi: boolean;
 	capabilities: Set<DaemonClientCapability>;
+	/**
+	 * True once the connection sent declare_client_capabilities. Undeclared
+	 * connections keep the legacy compatibility path for capability-gated and
+	 * control-plane commands.
+	 */
+	declaredCapabilities?: boolean;
+	/** Command-gating set from declare_client_capabilities. Distinct from event-delivery capabilities. */
+	declaredCommandCapabilities?: Set<DaemonDeclaredCapability>;
 	capabilitiesByActiveSessionId?: Map<string, Set<DaemonClientCapability>>;
 }
 
