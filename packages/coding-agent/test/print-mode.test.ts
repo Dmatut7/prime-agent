@@ -33,6 +33,7 @@ type FakeSession = {
 	agent: { waitForIdle: ReturnType<typeof vi.fn<() => Promise<void>>> };
 	waitForIdle: ReturnType<typeof vi.fn<() => Promise<void>>>;
 	waitForHeadlessIdle: ReturnType<typeof vi.fn<() => Promise<void>>>;
+	waitForRlmQuiescence: ReturnType<typeof vi.fn<() => Promise<void>>>;
 	state: { messages: AgentMessage[] };
 	messages: AgentMessage[];
 	extensionRunner: FakeExtensionRunner;
@@ -105,6 +106,7 @@ function createRuntimeHost(
 		agent: { waitForIdle: vi.fn(async () => {}) },
 		waitForIdle,
 		waitForHeadlessIdle: waitForIdle,
+		waitForRlmQuiescence: waitForIdle,
 		state,
 		messages: state.messages,
 		extensionRunner,

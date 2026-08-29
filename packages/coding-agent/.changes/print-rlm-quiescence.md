@@ -1,0 +1,1 @@
+- Fixed print and json mode completing the owned session as soon as the root turn went idle, which aborted RLM subagents that were still running before the root could consume their results.

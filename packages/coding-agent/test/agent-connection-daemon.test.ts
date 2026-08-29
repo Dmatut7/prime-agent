@@ -2484,6 +2484,7 @@ describe("DaemonAgentConnection", () => {
 		const oldDaemonClient = new FakeDaemonClient();
 		const oldConnection = new DaemonAgentConnection(asDaemonClient(oldDaemonClient), "active-old");
 		await oldConnection.attach();
+		expect(oldConnection.supportsRlmQuiescenceBarrier()).toBe(false);
 		await oldConnection.waitForHeadlessCompletion();
 		expect(oldDaemonClient.requests.at(-1)).toEqual({
 			type: "wait_for_headless_completion",
@@ -2501,6 +2502,7 @@ describe("DaemonAgentConnection", () => {
 		newDaemonClient.serverCapabilities.add("rlm_quiescence_barrier");
 		const newConnection = new DaemonAgentConnection(asDaemonClient(newDaemonClient), "active-new");
 		await newConnection.attach();
+		expect(newConnection.supportsRlmQuiescenceBarrier()).toBe(true);
 		await newConnection.waitForHeadlessCompletion({ waitForRlmQuiescence: true });
 		expect(newDaemonClient.requests.at(-1)).toMatchObject({
 			type: "wait_for_headless_completion",
