@@ -7483,7 +7483,7 @@ export class InteractiveMode {
 		this.clearCtrlCExitHint({ render: false });
 		// Leaving browse mode restores the stashed draft instead of arming an
 		// accidental empty-submit delete of the selected queued message.
-		this.editor.setText(this.queueSelection.hasDraft ? this.queueSelection.reset() : "");
+		this.editor.setText(this.queueSelection.hasDraft ? this.queueSelection.reset() : "", { clearUndo: false });
 		this.ui.requestRender();
 	}
 
