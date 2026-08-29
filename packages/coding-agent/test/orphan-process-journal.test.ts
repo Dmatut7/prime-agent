@@ -1,10 +1,22 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+	appendFileSync,
+	chmodSync,
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	type ActiveOrphanProcess,
 	clearOrphanProcessJournal,
+	isOrphanPidReused,
 	isOrphanProcessIdentityCurrent,
 	ORPHAN_PROCESS_JOURNAL_ENV,
 	readActiveOrphanProcesses,
@@ -216,5 +228,59 @@ describe("orphan process journal", () => {
 		expect(child.exitCode).toBeNull();
 		expect(child.signalCode).toBeNull();
 		process.kill(childPid!, "SIGKILL");
+	});
+});
+
+describe("orphan journal concurrency and pid reuse", () => {
+	it("still journals records through the append lock", () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-orphan-journal-lock-"));
+		tempDirs.push(directory);
+		const path = join(directory, "orphans.jsonl");
+		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = path;
+
+		recordOrphanProcessState(process.pid, true);
+		recordOrphanProcessState(process.pid, false);
+
+		const lines = readFileSync(path, "utf8").trim().split("\n");
+		expect(lines).toHaveLength(2);
+		for (const line of lines) {
+			expect(() => JSON.parse(line)).not.toThrow();
+		}
+	});
+
+	it("refuses a symlinked journal path without touching its target", () => {
+		if (process.platform === "win32") {
+			return;
+		}
+		const directory = mkdtempSync(join(tmpdir(), "prime-orphan-journal-symlink-"));
+		tempDirs.push(directory);
+		const target = join(directory, "target.jsonl");
+		writeFileSync(target, "sentinel\n");
+		const alias = join(directory, "orphans.jsonl");
+		symlinkSync(target, alias);
+		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = alias;
+
+		recordOrphanProcessState(process.pid, true);
+
+		expect(readFileSync(target, "utf8")).toBe("sentinel\n");
+	});
+
+	it("treats a pid younger than the record as reused", () => {
+		const orphan: ActiveOrphanProcess = { pid: 4242, recordedAt: "2026-01-01T00:00:00.000Z" };
+		const psQuery = (start: string) => () => `ps:${start}`;
+
+		// Started a day after the record: a reused pid, never reap it.
+		expect(isOrphanPidReused(orphan, psQuery("Fri Jan  2 00:00:00 2026"))).toBe(true);
+		expect(shouldReapOrphanProcess(orphan, psQuery("Fri Jan  2 00:00:00 2026"))).toBe(false);
+
+		// Started before the record: plausibly the journaled process.
+		expect(isOrphanPidReused(orphan, psQuery("Wed Dec 31 23:59:00 2025"))).toBe(false);
+		if (process.platform !== "win32") {
+			expect(shouldReapOrphanProcess(orphan, psQuery("Wed Dec 31 23:59:00 2025"))).toBe(true);
+		}
+
+		// Unparseable or missing data keeps the historical best-effort behavior.
+		expect(isOrphanPidReused(orphan, () => "proc:12345")).toBe(false);
+		expect(isOrphanPidReused({ pid: 4242 }, psQuery("Fri Jan  2 00:00:00 2026"))).toBe(false);
 	});
 });
