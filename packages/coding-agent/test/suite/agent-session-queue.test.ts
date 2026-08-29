@@ -1269,6 +1269,47 @@ describe("AgentSession queue characterization", () => {
 		}
 	});
 
+	it("finds a refinement for rollback when only the session audit was written", async () => {
+		const harness = await createAutoRefineHarness();
+		harnesses.push(harness);
+		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
+		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+		try {
+			const localDir = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir())!;
+			const interrupted = applyRefinementProposal(
+				loadHarnessState(localDir, "local"),
+				{
+					summary: "Interrupted create",
+					rationale: "crash after jsonl",
+					expectedOutcome: "audited",
+					edits: [
+						{
+							action: "create",
+							kind: "memory",
+							id: "ghost",
+							title: "Ghost",
+							content: "Never reached harness save",
+						},
+					],
+				},
+				{ id: "refine_interrupted", scope: "local" },
+			);
+			interrupted.harnessStatePath = getHarnessStatePath(localDir);
+			harness.sessionManager.appendCustomEntry("prime-agent.refinement", interrupted);
+
+			const result = await harness.session.refine({ rollbackId: "refine_interrupted" });
+
+			expect(result.rollbackOf).toBe("refine_interrupted");
+			expect(loadHarnessState(localDir, "local").entries.memory.ghost).toBeUndefined();
+		} finally {
+			if (previousAgentDir === undefined) {
+				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+			} else {
+				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+			}
+		}
+	});
+
 	it("keeps a legacy scope-less rollback in the global store with global scope", async () => {
 		const harness = await createAutoRefineHarness();
 		harnesses.push(harness);

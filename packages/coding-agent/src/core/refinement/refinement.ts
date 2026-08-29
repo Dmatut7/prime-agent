@@ -11,6 +11,8 @@ import type { CustomEntry } from "../session-manager.js";
 
 export const REFINEMENT_CUSTOM_TYPE = "prime-agent.refinement";
 
+export const HARNESS_CONCURRENT_WRITE_ERROR = "Harness state changed on disk during apply; refusing to overwrite";
+
 export const REFINE_SKILL_NAME = "refine";
 
 export const WINDOWS_HARNESS_PERSISTENCE_UNSUPPORTED_ERROR = "Persistent harness storage is unsupported on Windows";
@@ -390,9 +392,43 @@ export function mergeHarnessStates(globalState: HarnessState, localState?: Harne
 	return merged;
 }
 
-export function saveHarnessState(harnessStateDir: string, state: HarnessState): string {
+export interface HarnessStateStamp {
+	mtimeMs: number;
+	size: number;
+	ino: number;
+}
+
+export function readHarnessStateStamp(harnessStateDir: string): HarnessStateStamp | null {
+	if (!isPersistentHarnessStorageSupported()) return null;
+	const statePath = getHarnessStatePath(harnessStateDir);
+	try {
+		const info = lstatSync(statePath);
+		if (info.isSymbolicLink() || !info.isFile()) return null;
+		return { mtimeMs: info.mtimeMs, size: info.size, ino: info.ino };
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
+		throw error;
+	}
+}
+
+function harnessStateStampsEqual(left: HarnessStateStamp | null, right: HarnessStateStamp | null): boolean {
+	if (left === null || right === null) return left === right;
+	return left.mtimeMs === right.mtimeMs && left.size === right.size && left.ino === right.ino;
+}
+
+export function saveHarnessState(
+	harnessStateDir: string,
+	state: HarnessState,
+	options?: { expectedStamp?: HarnessStateStamp | null },
+): string {
 	assertPersistentHarnessStorageSupported();
 	assertHarnessStateWritable(state);
+	if (options && "expectedStamp" in options) {
+		const current = readHarnessStateStamp(harnessStateDir);
+		if (!harnessStateStampsEqual(current, options.expectedStamp ?? null)) {
+			throw new Error(HARNESS_CONCURRENT_WRITE_ERROR);
+		}
+	}
 	const statePath = getHarnessStatePath(harnessStateDir);
 	writePrivateFileAtomic(statePath, `${JSON.stringify(state, null, 2)}\n`);
 	return statePath;
@@ -416,6 +452,30 @@ export function appendGlobalRefinement(harnessStateDir: string, result: Refineme
 	const historyPath = getRefinementHistoryPath(harnessStateDir);
 	appendPrivateFile(historyPath, `${JSON.stringify(result)}\n`);
 	return historyPath;
+}
+
+/**
+ * Persist a refinement that has already been applied in memory.
+ * Writes the rollback audit (session jsonl, then global history) before the
+ * harness file so a crash after the audit still lets `/refine rollback` find
+ * the id. `expectedStamp` refuses to clobber a concurrent kernel write.
+ */
+export function persistAppliedRefinement(options: {
+	harnessStateDir: string;
+	state: HarnessState;
+	result: RefinementResult;
+	expectedStamp: HarnessStateStamp | null;
+	appendSessionAudit: (result: RefinementResult) => void;
+	globalHarnessStateDir?: string;
+}): string {
+	options.result.harnessStatePath = getHarnessStatePath(options.harnessStateDir);
+	options.appendSessionAudit(options.result);
+	if (options.globalHarnessStateDir) {
+		appendGlobalRefinement(options.globalHarnessStateDir, options.result);
+	}
+	return saveHarnessState(options.harnessStateDir, options.state, {
+		expectedStamp: options.expectedStamp,
+	});
 }
 
 export function loadGlobalRefinementHistory(harnessStateDir: string = getGlobalHarnessStateDir()): RefinementResult[] {
