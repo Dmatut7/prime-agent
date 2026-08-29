@@ -26,6 +26,7 @@ type MessageStartMode = {
 	updateWorkingLoaderMessage: () => void;
 	addMessageToChat: (message: AgentMessage) => void;
 	ui: { requestRender: () => void };
+	chatContainer: Container;
 	sessionRecap?: string;
 	agentRunFileChanges: Map<string, never>;
 	renderRecap: () => void;
@@ -60,6 +61,7 @@ function createMessageStartMode(): MessageStartMode {
 		updateWorkingLoaderMessage: vi.fn(),
 		addMessageToChat: vi.fn(),
 		ui: { requestRender: vi.fn() },
+		chatContainer: new Container(),
 		sessionRecap: "previous recap",
 		agentRunFileChanges: new Map(),
 		renderRecap: vi.fn(),
