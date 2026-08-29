@@ -1782,10 +1782,10 @@ describe("daemon worker supervisor monitoring", () => {
 			intentionalStop: false,
 		};
 		const supervisor = Object.create(DaemonSupervisor.prototype) as {
-			refreshWorkerSummaries(target: typeof worker, recovery: boolean): Promise<void>;
+			refreshWorkerSummaries(target: typeof worker, options: { recovery?: boolean }): Promise<void>;
 		};
 
-		await expect(supervisor.refreshWorkerSummaries(worker, true)).rejects.toThrow(
+		await expect(supervisor.refreshWorkerSummaries(worker, { recovery: true })).rejects.toThrow(
 			"Session worker omitted its root session during recovery",
 		);
 		expect(worker.summaries.get(root.activeSessionId)).toBe(root);
