@@ -12,6 +12,7 @@ import {
 import { getProcessStartId } from "../core/session-lease.js";
 import { DaemonClient } from "../modes/daemon/daemon-client.js";
 import {
+	DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES,
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SCHEMA_ID,
 	type DaemonRuntimeIdentity,
@@ -250,7 +251,7 @@ interface ProbeResult {
 }
 
 async function probeDaemon(socketPath: string): Promise<ProbeResult> {
-	const client = new DaemonClient(socketPath);
+	const client = new DaemonClient(socketPath, { declaredCapabilities: DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES });
 	try {
 		await client.connect(300);
 	} catch {
@@ -1234,7 +1235,7 @@ function delay(ms: number): Promise<void> {
 }
 
 async function canConnectToSocket(socketPath: string, timeoutMs: number): Promise<boolean> {
-	const client = new DaemonClient(socketPath);
+	const client = new DaemonClient(socketPath, { declaredCapabilities: DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES });
 	try {
 		await client.connect(timeoutMs);
 		return true;
@@ -1251,7 +1252,7 @@ async function canConnectToSocket(socketPath: string, timeoutMs: number): Promis
  * stops accepting connections.
  */
 async function shutdownDaemon(socketPath: string, force: boolean): Promise<boolean> {
-	const client = new DaemonClient(socketPath);
+	const client = new DaemonClient(socketPath, { declaredCapabilities: DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES });
 	try {
 		await client.connect(1000);
 	} catch {

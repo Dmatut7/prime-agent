@@ -31,6 +31,7 @@ import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "
 import { DaemonClient, getDaemonSocketCloseReason } from "../daemon/daemon-client.js";
 import {
 	collectDaemonClientEnv,
+	DAEMON_FIRST_PARTY_SESSION_CAPABILITIES,
 	type DaemonClosingReason,
 	type DaemonCommand,
 	type DaemonResponse,
@@ -403,7 +404,7 @@ async function resumeSavedAgentsViewSession(
 }
 
 async function connectAgentsViewDaemonClient(socketPath: string): Promise<DaemonClient> {
-	const client = new DaemonClient(socketPath);
+	const client = new DaemonClient(socketPath, { declaredCapabilities: DAEMON_FIRST_PARTY_SESSION_CAPABILITIES });
 	try {
 		await client.connect();
 		return client;
@@ -839,7 +840,9 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	async run(): Promise<AgentsViewRunResult> {
-		this.client = new DaemonClient(this.requireSocketPath());
+		this.client = new DaemonClient(this.requireSocketPath(), {
+			declaredCapabilities: DAEMON_FIRST_PARTY_SESSION_CAPABILITIES,
+		});
 		await this.client.connect();
 		this.subscribeToClientClose(this.client);
 		this.unsubscribeClientMessage = this.client.onMessage((message) => {

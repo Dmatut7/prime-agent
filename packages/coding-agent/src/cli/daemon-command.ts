@@ -11,6 +11,7 @@ import { type AgentCronJob, formatAgentCronJob } from "../core/cron-jobs.js";
 import { looksLikeSessionPath } from "../core/session-resolver.js";
 import { DaemonClient, type DaemonClientMessageListener } from "../modes/daemon/daemon-client.js";
 import type { DaemonOutbound, DaemonResponse } from "../modes/daemon/daemon-protocol.js";
+import { DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES } from "../modes/daemon/daemon-protocol.js";
 import { matchesSessionIdSuffix } from "../modes/daemon/daemon-session-id.js";
 import type { SessionSummary } from "../modes/daemon/daemon-session-list.js";
 import { defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
@@ -146,7 +147,9 @@ async function runDaemonClientCommand(parsed: ParsedDaemonClientCommand): Promis
 		return;
 	}
 
-	const client = new DaemonClient(parsed.socketPath);
+	const client = new DaemonClient(parsed.socketPath, {
+		declaredCapabilities: DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES,
+	});
 	await client.connect();
 
 	try {
@@ -270,7 +273,9 @@ async function runOpen(parsed: ParsedDaemonClientCommand): Promise<void> {
 		await runStart({ ...parsed, command: "start", positionals: sessionArgs.daemonArgs });
 	}
 
-	const client = new DaemonClient(parsed.socketPath);
+	const client = new DaemonClient(parsed.socketPath, {
+		declaredCapabilities: DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES,
+	});
 	await client.connect();
 	try {
 		const autoName = sessionArgs.name === undefined;
@@ -728,7 +733,7 @@ async function runPsCommand(parsed: ParsedDaemonClientCommand): Promise<void> {
 }
 
 async function canConnectToDaemon(socketPath: string, timeoutMs: number): Promise<boolean> {
-	const client = new DaemonClient(socketPath);
+	const client = new DaemonClient(socketPath, { declaredCapabilities: DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES });
 	try {
 		await client.connect(timeoutMs);
 		return true;
