@@ -46,6 +46,7 @@ Headless and ephemeral clients use the same worker runtime as interactive client
 
 - print, piped stdin, and JSON mode remain one-shot;
 - RPC keeps LF-delimited JSONL framing and accepts prompts until EOF;
+- ACP completes the session on stdin EOF (use `--acp-resident` to keep the resident lifecycle for editor reconnect);
 - interactive `--no-session` uses an in-memory session;
 - normal completion explicitly removes the worker without archiving it;
 - unexpected client loss starts a bounded cleanup grace period;

@@ -28,12 +28,14 @@ import type { SessionSummary } from "../src/modes/index.js";
 
 describe("interactive startup routing", () => {
 	test.each([
-		["acp", false, false],
-		["acp", true, true],
-		["rpc", false, true],
-		["print", false, true],
-	] as const)("classifies %s noSession=%s ownership", (appMode, noSession, expected) => {
-		expect(isClientOwnedDaemonSession(appMode, noSession)).toBe(expected);
+		["acp", false, undefined, true],
+		["acp", true, undefined, true],
+		["acp", false, true, false],
+		["acp", true, true, true],
+		["rpc", false, undefined, true],
+		["print", false, undefined, true],
+	] as const)("classifies %s noSession=%s acpResident=%s ownership", (appMode, noSession, acpResident, expected) => {
+		expect(isClientOwnedDaemonSession(appMode, noSession, acpResident)).toBe(expected);
 	});
 
 	test.each(["interactive", "print", "json", "rpc"] as const)(
