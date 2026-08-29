@@ -792,6 +792,45 @@ describe("self-update daemon restart", () => {
 		expect(existsSync(mockState.preparedManifestPath)).toBe(false);
 	});
 
+	it("keeps the prepared manifest when fallback restoration is fully rejected", async () => {
+		// The predecessor failed to stop and stays reachable, but it sits in the
+		// prepared phase and rejects the fallback creates. Nothing is restored, so
+		// the checkpoint must survive for the next handoff attempt instead of being
+		// dropped together with the swallowed per-session failures.
+		mockState.shutdownResult = false;
+		const sessionFile = join(tempDir, "session.jsonl");
+		mockState.prepareManifest = {
+			formatVersion: 1,
+			createdAt: "2026-07-07T00:00:00.000Z",
+			sessions: [
+				{
+					activeSessionId: "old-active",
+					sessionId: "session-id",
+					sessionFile,
+					cwd: tempDir,
+					config: {},
+					queue: { actions: { formatVersion: 1, actions: [] }, nextTurn: [] },
+					shouldResume: false,
+					wasStreaming: false,
+					wasCompacting: false,
+					wasBashRunning: false,
+					hadRunningRlmChildren: false,
+					wasRetrying: false,
+					hadAcceptedPromptInFlight: false,
+				},
+			],
+		};
+		mockState.createThrowSessionPaths = [sessionFile];
+
+		await performUpdateAndRunCoordinator();
+
+		expect(mockState.lastCoordinatorStatus).toMatchObject({
+			phase: "failed",
+			counts: { total: 1, restored: 0, resumed: 0, failed: 1 },
+		});
+		expect(existsSync(mockState.preparedManifestPath)).toBe(true);
+	});
+
 	it("starts a successor when shutdown identity confirmation times out after the socket is gone", async () => {
 		mockState.shutdownResult = false;
 		mockState.daemonProbeAfterShutdown = { reachable: false };

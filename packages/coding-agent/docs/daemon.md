@@ -91,7 +91,7 @@ The public local socket is JSONL-framed. The current protocol provides:
 
 Protocol version and schema revision are independent. A compatible addition can be capability-gated or require a schema revision; an incompatible wire change requires a protocol bump.
 
-The update handoff command `prepare_update_restart` drains mutations, fences resident workers, and collects a recovery manifest before the supervisor stops. A busy older daemon that cannot produce a recovery manifest is left running rather than force-stopped.
+The update handoff command `prepare_update_restart` drains mutations, fences resident workers, and collects a recovery manifest before the supervisor stops. A busy older daemon that cannot produce a recovery manifest is left running rather than force-stopped. Pure waits such as `wait_for_headless_completion` are not mutations, so a long headless completion barrier cannot stall the handoff; if the handoff stops the worker while such a wait is in flight, the wait fails and the print/json run exits with an error instead of printing its final result.
 
 JSON and RPC client modes do not expose daemon greetings, envelopes, snapshot records, lifecycle events, or connection metadata.
 

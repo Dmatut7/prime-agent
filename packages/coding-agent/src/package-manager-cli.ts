@@ -1314,7 +1314,13 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 								reportRestoreProgress,
 							);
 							const { failures: restoreFailures, ...counts } = restoreResult;
-							clearPreparedDaemonUpdateRestartManifest(options.socketPath, options.agentDir);
+							// Clear the checkpoint only when every session was restored into the
+							// predecessor. A fallback whose creates were all rejected (e.g. the
+							// predecessor sits in the prepared phase and fences mutations) must
+							// keep the manifest so the next handoff attempt can still recover.
+							if (restoreFailures.length === 0) {
+								clearPreparedDaemonUpdateRestartManifest(options.socketPath, options.agentDir);
+							}
 							statusWriter.update({
 								counts,
 								...(restoreFailures.length > 0 ? { failures: restoreFailures } : {}),

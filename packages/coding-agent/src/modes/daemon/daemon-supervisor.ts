@@ -638,6 +638,8 @@ export class DaemonSupervisor {
 	private cleanupPromise?: Promise<void>;
 	private shuttingDown = false;
 	private updateRestartPhase?: "draining" | "fencing" | "prepared";
+	/** Checkpoint held while the phase is `prepared`, so a re-issued prepare can replay it. */
+	private preparedUpdateRestartManifest?: DaemonUpdateRestartManifest;
 	private readonly mutationDrain = new MutationDrainLatch();
 	private readonly clients = new Set<DaemonSocketClient>();
 	private readonly connectionIds = new WeakMap<DaemonSocketClient, string>();
@@ -1449,10 +1451,14 @@ export class DaemonSupervisor {
 		}
 
 		const phase = this.updateRestartPhase;
+		// A prepared checkpoint only admits shutdown and a re-issued prepare: the
+		// latter lets a coordinator whose handoff stalled (e.g. a failed shutdown)
+		// replay the persisted checkpoint instead of being rejected forever.
 		const restartRejected =
 			phase === "draining"
 				? !UPDATE_RESTART_DRAIN_COMMANDS.has(command.type)
-				: phase !== undefined && !(phase === "prepared" && command.type === "shutdown");
+				: phase !== undefined &&
+					!(phase === "prepared" && (command.type === "shutdown" || command.type === "prepare_update_restart"));
 		if (restartRejected && mutation) {
 			if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
 			this.write(client, failure(command.id, command.type, "Daemon is preparing an update restart"));
@@ -4844,6 +4850,18 @@ export class DaemonSupervisor {
 	}
 
 	private async prepareUpdateRestart(): Promise<DaemonUpdateRestartManifest> {
+		if (this.updateRestartPhase === "prepared") {
+			// An earlier prepare finished (checkpoint persisted, workers stopped) but
+			// the handoff never completed, e.g. the coordinator failed to stop this
+			// daemon. Re-issue the checkpoint instead of failing every later attempt
+			// with "already preparing": that would wedge self-updates until someone
+			// manually shuts this prepared daemon down.
+			const prepared = this.preparedUpdateRestartManifest ?? this.readPreparedUpdateRestartManifest();
+			if (prepared) {
+				this.validateAndPersistUpdateManifest(prepared);
+				return prepared;
+			}
+		}
 		if (this.updateRestartPhase !== undefined) throw new Error("Daemon is already preparing an update restart");
 		this.updateRestartPhase = "draining";
 		try {
@@ -4857,7 +4875,25 @@ export class DaemonSupervisor {
 			return manifest;
 		} catch (error) {
 			this.updateRestartPhase = undefined;
+			this.preparedUpdateRestartManifest = undefined;
 			throw error;
+		}
+	}
+
+	/** Read the persisted prepared checkpoint, if one exists and parses cleanly. */
+	private readPreparedUpdateRestartManifest(): DaemonUpdateRestartManifest | undefined {
+		const agentDir = this.defaultSessionConfig.agentDir;
+		if (!agentDir) return undefined;
+		try {
+			const parsed = JSON.parse(
+				readFileSync(getDaemonUpdateRestartManifestPath(this.socketPath, agentDir), "utf8"),
+			) as DaemonUpdateRestartManifest;
+			if (parsed.formatVersion !== DAEMON_UPDATE_RESTART_FORMAT_VERSION || !Array.isArray(parsed.sessions)) {
+				return undefined;
+			}
+			return parsed;
+		} catch {
+			return undefined;
 		}
 	}
 
@@ -4959,7 +4995,9 @@ export class DaemonSupervisor {
 		}
 		try {
 			this.validateAndPersistUpdateManifest(manifest);
+			this.preparedUpdateRestartManifest = manifest;
 		} catch (error) {
+			this.preparedUpdateRestartManifest = undefined;
 			await cancelAcknowledged();
 			throw error;
 		}
