@@ -7315,10 +7315,15 @@ export class AgentSession {
 	 * Undelivered dispatched work is left to the pump's rollback so it can
 	 * re-queue.
 	 *
-	 * Only queue-visible turns are settled here: a direct (non-queued) prompt is
-	 * awaited by its caller and driven through the ordinary abort flow, and
-	 * settling it with an error would reject a `prompt()` that previously
-	 * resolved normally on abort.
+	 * Queue-visible turns and RLM child terminal notices are settled here: a
+	 * direct (non-queued) prompt is awaited by its caller and driven through the
+	 * ordinary abort flow, and settling it with an error would reject a
+	 * `prompt()` that previously resolved normally on abort. Terminal notices
+	 * are `queueVisible: false` but have no awaiting caller, and the abort
+	 * cancellation predicate spares them as durable work — without settling, a
+	 * notice dispatched when the abort arrived would stay committing/running
+	 * forever (the pump's deferred-error path does not roll delivered work
+	 * back), pinning `unfinishedActionCount` above zero.
 	 */
 	private _settleAbortedDispatchedTurnActions(): void {
 		const transcript = this.agent.state.messages;
@@ -7328,7 +7333,7 @@ export class AgentSession {
 			.filter(
 				(action): action is SessionAction<PreparedTurnPayload> =>
 					action.payload.kind === "turn" &&
-					action.payload.queueVisible === true &&
+					(action.payload.queueVisible === true || this._durableRlmTerminalNoticeActionIds.has(action.id)) &&
 					(action.lifecycle.state === "committing" || action.lifecycle.state === "running") &&
 					(primaryDeliveryRecord(action).durable || transcript.includes(primaryDeliveryRecord(action).message)),
 			);
