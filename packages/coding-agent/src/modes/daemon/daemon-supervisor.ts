@@ -152,6 +152,13 @@ const UPDATE_RESTART_PREPARE_DEADLINE_MS = 100_000;
 // supervisor does not re-enter the prepared phase for it, so ordinary recovery
 // wins the sessions back instead of serving a stale fence.
 const UPDATE_RESTART_PREPARED_RESTORE_WINDOW_MS = 30 * 60_000;
+// A checkpoint NEWER than this belongs to a handoff the coordinator is still
+// driving: it stops the predecessor, starts the successor, and restores into it,
+// clearing the manifest at the end. Re-entering the prepared phase for such a
+// fresh checkpoint would fence the successor and reject the coordinator's
+// restore creates. Only re-enter the prepared phase once the checkpoint is old
+// enough that the driving coordinator is gone (abandoned handoff).
+const UPDATE_RESTART_PREPARED_RESTORE_MIN_AGE_MS = 5 * 60_000;
 const WORKER_RETRY_DELAYS_MS = [250, 1000, 5000] as const;
 const DEFERRED_RECOVERY_RECHECK_MS = 5000;
 const STOP_FINALIZATION_RECHECK_MS = 250;
@@ -4927,7 +4934,9 @@ export class DaemonSupervisor {
 		} catch {
 			return;
 		}
-		if (Date.now() - modifiedAtMs > UPDATE_RESTART_PREPARED_RESTORE_WINDOW_MS) return;
+		const ageMs = Date.now() - modifiedAtMs;
+		if (ageMs > UPDATE_RESTART_PREPARED_RESTORE_WINDOW_MS) return;
+		if (ageMs < UPDATE_RESTART_PREPARED_RESTORE_MIN_AGE_MS) return;
 		const manifest = this.readPreparedUpdateRestartManifest();
 		if (!manifest || manifest.sessions.length === 0) return;
 		this.updateRestartPhase = "prepared";
