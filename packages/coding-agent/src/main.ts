@@ -73,7 +73,7 @@ import {
 	SESSION_LEASES_ENABLED_ENV,
 	SessionAlreadyActiveError,
 } from "./core/session-lease.js";
-import { SessionManager } from "./core/session-manager.js";
+import { repairOwnedSessionFile, SessionManager } from "./core/session-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import { isTelemetryEnabled } from "./core/telemetry.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
@@ -1603,6 +1603,11 @@ export async function main(args: string[], options?: MainOptions) {
 						[SESSION_LEASES_ENABLED_ENV]: "1",
 					})
 				: undefined;
+		// Repair only under the lease: without it another process may own the
+		// writes, and truncating its in-flight append would corrupt the session.
+		if (directSessionLease) {
+			repairOwnedSessionFile(sessionManager.getSessionFile());
+		}
 		runtime = await createAgentSessionRuntime(createRuntime, {
 			cwd: sessionManager.getCwd(),
 			agentDir,

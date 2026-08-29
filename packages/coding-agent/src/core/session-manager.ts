@@ -664,6 +664,20 @@ export async function loadEntriesFromFileAsync(
 	return finalizeLoadedEntries(entries);
 }
 
+/**
+ * Drop a crash-torn trailing line from a session file the caller owns the
+ * write side of (holds the lease / is the sole writer). Read-only opens —
+ * agents-view attach, summaries, pre-lease opens — must never call this:
+ * repairing a file another process is writing can truncate its in-flight
+ * append. Validates the path first so a swapped-in symlink is rejected before
+ * any truncation.
+ */
+export function repairOwnedSessionFile(sessionFile: string | undefined): void {
+	if (!sessionFile || !existsSync(sessionFile)) return;
+	assertRegularFileNoSymlink(sessionFile);
+	repairTruncatedTrailingLine(sessionFile);
+}
+
 function readSessionHeader(filePath: string): Partial<SessionHeader> | undefined {
 	assertRegularFileNoSymlink(filePath);
 	const firstLine = readFirstLineSync(filePath);
@@ -1265,9 +1279,6 @@ export class SessionManager {
 	setSessionFile(sessionFile: string, preloadedEntries?: FileEntry[]): void {
 		this.sessionFile = resolve(sessionFile);
 		if (existsSync(this.sessionFile)) {
-			// A crash can leave a torn final line; every reader skips it, so drop it
-			// before loading — the next append must not glue onto the torn bytes.
-			repairTruncatedTrailingLine(this.sessionFile);
 			try {
 				const firstHeader = readSessionHeader(this.sessionFile);
 				if (firstHeader?.type === "session" && typeof firstHeader.id === "string") {
@@ -2126,8 +2137,6 @@ export class SessionManager {
 		if (!existsSync(path)) {
 			return SessionManager.open(path, sessionDir, cwdOverride);
 		}
-		// Repair before the preload so the entries match the post-repair bytes.
-		repairTruncatedTrailingLine(path);
 		const entries = await loadEntriesFromFileAsync(path);
 		if (entries.length === 0) {
 			return SessionManager.open(path, sessionDir, cwdOverride);

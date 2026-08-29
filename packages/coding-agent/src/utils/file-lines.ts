@@ -5,6 +5,7 @@ import {
 	fstatSync,
 	fsyncSync,
 	ftruncateSync,
+	lstatSync,
 	openSync,
 	readSync,
 } from "node:fs";
@@ -113,9 +114,21 @@ export async function* readLinesAsBuffers(filePath: string): AsyncGenerator<Buff
  * next write.
  */
 export function repairTruncatedTrailingLine(filePath: string): void {
+	// Never repair through a symlink: a swapped-in link would otherwise have its
+	// target truncated before any O_NOFOLLOW check sees it. Callers that reject
+	// symlinked files still perform their own validation; this keeps the helper
+	// itself harmless regardless of call order.
+	let lexical: ReturnType<typeof lstatSync>;
+	try {
+		lexical = lstatSync(filePath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	if (lexical.isSymbolicLink() || !lexical.isFile()) return;
 	let fd: number;
 	try {
-		fd = openSync(filePath, constants.O_RDWR);
+		fd = openSync(filePath, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0));
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
 		throw error;
