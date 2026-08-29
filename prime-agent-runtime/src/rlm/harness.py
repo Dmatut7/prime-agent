@@ -110,18 +110,24 @@ def _chmod_open_file(fd: int, path: Path, mode: int) -> None:
 
 def _ensure_private_directory(path: Path) -> None:
     target = Path(os.path.abspath(path))
+    components = target.parts[1:]
     current = Path(target.anchor)
-    for index, component in enumerate(target.parts[1:]):
+    for index, component in enumerate(components):
         current /= component
         try:
             info = current.lstat()
         except FileNotFoundError:
             current.mkdir(mode=0o700)
             info = current.lstat()
-        if index == 0 and stat.S_ISLNK(info.st_mode):
+        if stat.S_ISLNK(info.st_mode):
+            # Intermediate symlinks (e.g. a relocated ~/.prime) are legitimate
+            # layouts and are followed after resolution; only the final target
+            # keeps the O_NOFOLLOW refusal.
+            if index == len(components) - 1:
+                raise OSError(f"Refusing to use non-directory private path: {current}")
             current = current.resolve()
             continue
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        if not stat.S_ISDIR(info.st_mode):
             raise OSError(f"Refusing to use non-directory private path: {current}")
     info = path.lstat()
     if os.name == "nt":
@@ -139,16 +145,18 @@ def _ensure_private_directory(path: Path) -> None:
 def _assert_no_symlinked_ancestors(path: Path) -> None:
     target = Path(os.path.abspath(path))
     current = Path(target.anchor)
-    for index, component in enumerate(target.parts[1:-1]):
+    for component in target.parts[1:-1]:
         current /= component
         try:
             info = current.lstat()
         except FileNotFoundError:
             return
-        if index == 0 and stat.S_ISLNK(info.st_mode):
+        if stat.S_ISLNK(info.st_mode):
+            # Ancestor symlinks (e.g. a relocated ~/.prime) are followed after
+            # resolution; only a symlinked state file itself is refused later.
             current = current.resolve()
             continue
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        if not stat.S_ISDIR(info.st_mode):
             raise OSError(f"Refusing to use non-directory private path: {current}")
 
 

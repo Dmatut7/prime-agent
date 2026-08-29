@@ -187,7 +187,10 @@ class HarnessStateTest(unittest.TestCase):
             self.assertEqual(outside.read_text(encoding="utf-8"), '{"sentinel": true}')
 
     @unittest.skipIf(os.name == "nt", "POSIX symlink semantics")
-    def test_existing_harness_directory_below_symlinked_ancestor_is_rejected(self) -> None:
+    def test_existing_harness_directory_below_symlinked_ancestor_is_resolved(self) -> None:
+        # Intermediate ancestor symlinks are legitimate layouts (e.g. a
+        # relocated ~/.prime); they are followed after resolution. Only a
+        # symlinked state file itself is refused.
         with tempfile.TemporaryDirectory() as temp_dir:
             outside = Path(temp_dir) / "outside"
             existing = outside / "existing"
@@ -196,9 +199,29 @@ class HarnessStateTest(unittest.TestCase):
             link.symlink_to(outside, target_is_directory=True)
             state = HarnessState(link / "existing" / "harness_state.json")
 
-            with self.assertRaisesRegex(RuntimeError, "non-directory private path"):
-                state.save()
-            self.assertEqual(stat.S_IMODE(existing.stat().st_mode), 0o755)
+            state.create_memory("Relocated", "works through the link", id="relocated")
+            self.assertEqual(stat.S_IMODE(existing.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE((existing / "harness_state.json").stat().st_mode), 0o600)
+            self.assertIsNotNone(state.get("memory", "relocated"))
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink semantics")
+    def test_relocated_home_layout_reads_and_writes_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            real_store = Path(temp_dir) / "real-store"
+            home = Path(temp_dir) / "home"
+            real_store.mkdir(mode=0o700)
+            home.mkdir(mode=0o755)
+            (home / ".prime").symlink_to(real_store, target_is_directory=True)
+            state_path = home / ".prime" / "agent" / "harness" / "harness_state.json"
+
+            state = HarnessState(state_path, scope="global")
+            state.create_memory("Symlinked home", "memory survives relocation", id="home_memory")
+
+            landed = real_store / "agent" / "harness" / "harness_state.json"
+            self.assertTrue(landed.is_file())
+            self.assertEqual(stat.S_IMODE(landed.stat().st_mode), 0o600)
+            reloaded = HarnessState(state_path, scope="global")
+            self.assertIsNotNone(reloaded.get("memory", "home_memory"))
 
     @unittest.skipIf(os.name == "nt", "POSIX symlink semantics")
     def test_cached_missing_state_rejects_unsafe_replacement_before_mutation(self) -> None:

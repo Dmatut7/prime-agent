@@ -291,16 +291,21 @@ function unsafeHarnessDirectoryError(path: string): string {
 function validateHarnessDirectory(path: string): string | undefined {
 	const target = resolve(path);
 	const root = parse(target).root;
+	const components = target.slice(root.length).split(/[/\\]/).filter(Boolean);
 	let current = root;
-	for (const [index, component] of target.slice(root.length).split(/[/\\]/).filter(Boolean).entries()) {
+	for (const [index, component] of components.entries()) {
 		current = join(current, component);
 		try {
 			const info = lstatSync(current);
-			if (index === 0 && info.isSymbolicLink()) {
+			if (info.isSymbolicLink()) {
+				// Intermediate symlinks (e.g. a relocated ~/.prime) are legitimate
+				// layouts and are followed after resolution; only the harness
+				// directory itself keeps the O_NOFOLLOW refusal.
+				if (index === components.length - 1) return unsafeHarnessDirectoryError(current);
 				current = realpathSync(current);
 				continue;
 			}
-			if (info.isSymbolicLink() || !info.isDirectory()) return unsafeHarnessDirectoryError(current);
+			if (!info.isDirectory()) return unsafeHarnessDirectoryError(current);
 		} catch (error) {
 			if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
 			return unsafeHarnessDirectoryError(current);
