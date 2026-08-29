@@ -214,6 +214,64 @@ describe("createAgentSessionFromServices", () => {
 		}
 	});
 
+	it("retires removed user MCP kernel transports when reload is deferred", async () => {
+		const tempDir = join(tmpdir(), `pi-session-mcp-remove-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const projectDir = join(tempDir, "project");
+		const agentDir = join(tempDir, "agent");
+		mkdirSync(join(projectDir, ".prime", "agent"), { recursive: true });
+		mkdirSync(agentDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({
+				mcpServers: {
+					zebra: { type: "http", url: "https://secret.example/mcp", headers: { Authorization: "secret" } },
+					filesystem: { type: "stdio", command: "/secret/bin/filesystem" },
+				},
+			}),
+		);
+
+		const settingsManager = SettingsManager.create(projectDir, agentDir);
+		const services = await createAgentSessionServices({
+			cwd: projectDir,
+			agentDir,
+			settingsManager,
+			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+		});
+		const { session } = await createAgentSessionFromServices({
+			services,
+			sessionManager: SessionManager.create(projectDir, join(tempDir, "sessions")),
+		});
+
+		try {
+			const execute = vi.fn(async (_code: string) => ({ status: "ok" }));
+			const originalProvisioner = Reflect.get(session, "_ipythonKernelProvisioner");
+			Reflect.set(session, "_ipythonKernelProvisioner", { manager: { isRunning: true, execute } });
+			const streaming = vi.spyOn(session, "isStreaming", "get").mockReturnValue(true);
+
+			// Deferred-reload case (agent busy): the removed server's kernel-side
+			// transport must be retired explicitly or its stdio child leaks.
+			settingsManager.removeGlobalMcpServer("zebra");
+			session.refreshMcpProviders();
+			await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+			expect(execute.mock.calls[0]?.[0]).toContain("await _prime_mcp.reload(_prime_mcp_name)");
+			expect(execute.mock.calls[0]?.[0]).toContain('["zebra"]');
+
+			// Idle case: /reload disposes the kernel and reaps every transport, so
+			// no extra kernel round-trip is scheduled.
+			streaming.mockReturnValue(false);
+			settingsManager.removeGlobalMcpServer("filesystem");
+			session.refreshMcpProviders();
+			await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+			expect(execute).toHaveBeenCalledTimes(1);
+
+			Reflect.set(session, "_ipythonKernelProvisioner", originalProvisioner);
+		} finally {
+			session.dispose();
+		}
+	});
+
 	it("forwards daemon-backed agent message controllers into AgentSession", async () => {
 		const tempDir = join(tmpdir(), `pi-session-services-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });

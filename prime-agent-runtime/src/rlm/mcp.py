@@ -288,9 +288,33 @@ class _Generation:
         if tool not in self.tools:
             raise KeyError(f"MCP server '{self.server}' has no tool '{tool}'")
         async with self._call_lock:
-            async with asyncio.timeout(self.call_timeout):
-                result = await self.session.call_tool(tool, arguments)
+            try:
+                async with asyncio.timeout(self.call_timeout):
+                    result = await self.session.call_tool(tool, arguments)
+            except TimeoutError:
+                # A wedged call leaves the session state unknown; retire it so the
+                # next call reconnects instead of reusing a possibly-dead session.
+                await self._retire()
+                raise
+            except Exception as exc:
+                # A dead transport (server crashed or exited) must never be reused:
+                # retire this generation so the next call opens a fresh one. The
+                # per-server registry lock serializes callers, so the reconnect is
+                # single-flight. Do not retry the failed call itself: a tool call
+                # may have side effects, so it is reported and left to the caller.
+                if _is_connection_failure(exc):
+                    await self._retire()
+                raise
         return _parse_result(result)
+
+    async def _retire(self) -> None:
+        """Close a generation whose connection failed; the registry reopens on next use."""
+        try:
+            await self.close()
+        except Exception:
+            # The registry still sees a non-closed generation and retries the
+            # close on its next access; never mask the caller's original error.
+            pass
 
     async def close(self) -> None:
         lifecycle = self._lifecycle
@@ -357,7 +381,18 @@ class _Registry:
     async def _get_locked(self, server: str) -> _Generation:
         self._accepting_work()
         current = self._generations.get(server)
-        config = await _config(server)
+        try:
+            config = await _config(server)
+        except KeyError:
+            # The server is no longer declared in user settings: retire any live
+            # generation (a stdio child would otherwise leak until kernel exit).
+            # Transient config-read failures (RuntimeError) keep the cached
+            # generation alive on purpose.
+            if current:
+                await current.close()
+                if self._generations.get(server) is current:
+                    self._generations.pop(server, None)
+            raise
         self._accepting_work()
         if current and current.config == config and not current.closed:
             return current
@@ -591,6 +626,39 @@ def _is_exception_group(exc: BaseException) -> bool:
         return isinstance(exc, BaseExceptionGroup)
     except NameError:  # pragma: no cover - Python 3.10
         return False
+
+
+def _is_connection_failure(exc: BaseException) -> bool:
+    """Whether a call failure means the transport itself is dead (crash, exit,
+    broken pipe) rather than a tool-level error, so the generation must be
+    retired instead of reused."""
+    if isinstance(exc, (TimeoutError, asyncio.CancelledError)):
+        return False
+    if isinstance(exc, (BrokenPipeError, ConnectionError, EOFError)):
+        return True
+    if _is_exception_group(exc):
+        return any(_is_connection_failure(sub) for sub in exc.exceptions)
+    try:
+        import anyio
+
+        if isinstance(exc, (anyio.ClosedResourceError, anyio.EndOfStream, anyio.BrokenResourceError)):
+            return True
+    except ImportError:  # pragma: no cover - anyio ships with the mcp SDK
+        pass
+    # The SDK reports a closed transport as a JSON-RPC error, e.g.
+    # MCPError(-32000, "Connection closed"). SDK class name varies by version.
+    try:
+        from mcp.shared import exceptions as _mcp_exceptions
+    except ImportError:  # pragma: no cover
+        return False
+    mcp_error_types = tuple(
+        cls for cls in (getattr(_mcp_exceptions, name, None) for name in ("MCPError", "McpError")) if cls is not None
+    )
+    if mcp_error_types and isinstance(exc, mcp_error_types):
+        error = getattr(exc, "error", None)
+        message = str(getattr(error, "message", "") or getattr(exc, "message", "") or "")
+        return "connection closed" in message.lower()
+    return False
 
 
 def _configured_stdio_values(config: dict[str, Any], env: dict[str, str]) -> tuple[str, ...]:

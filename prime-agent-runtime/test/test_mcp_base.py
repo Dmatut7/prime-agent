@@ -180,6 +180,35 @@ class McpIntegrationTest(unittest.TestCase):
                 _run(integration.nonexistent_tool())
         self.assertIn("list_issues", str(ctx.exception))
 
+    def test_oversized_text_result_is_truncated_and_marked(self):
+        block = type("B", (), {"text": "x" * (mcp_base._MAX_RESULT_CHARS + 100)})()
+        result = type("R", (), {"content": [block], "structuredContent": None})()
+        out = mcp_base._parse_result(result)
+        self.assertTrue(out.startswith("xxx"))
+        self.assertIn(f"truncated at {mcp_base._MAX_RESULT_CHARS} chars", out)
+        self.assertLessEqual(len(out), mcp_base._MAX_RESULT_CHARS + 100)
+
+    def test_modest_structured_result_stays_structured(self):
+        payload = {"items": list(range(50))}
+        result = type("R", (), {"content": [], "structuredContent": payload})()
+        self.assertEqual(mcp_base._parse_result(result), payload)
+
+    def test_oversized_structured_result_degrades_to_marked_text(self):
+        payload = {"blob": "y" * (mcp_base._MAX_RESULT_CHARS + 100)}
+        result = type("R", (), {"content": [], "structuredContent": payload})()
+        out = mcp_base._parse_result(result)
+        self.assertIsInstance(out, str)
+        self.assertIn(f"truncated at {mcp_base._MAX_RESULT_CHARS} chars", out)
+        self.assertLessEqual(len(out), mcp_base._MAX_RESULT_CHARS + 100)
+
+    def test_oversized_error_result_is_bounded(self):
+        block = type("B", (), {"text": "e" * (mcp_base._MAX_RESULT_CHARS + 100)})()
+        result = type("R", (), {"isError": True, "content": [block], "structuredContent": None})()
+        with self.assertRaises(McpToolError) as ctx:
+            mcp_base._parse_result(result)
+        self.assertIn(f"truncated at {mcp_base._MAX_RESULT_CHARS} chars", str(ctx.exception))
+        self.assertLessEqual(len(str(ctx.exception)), mcp_base._MAX_RESULT_CHARS + 100)
+
     def test_text_result_parsing(self):
         block = type("B", (), {"text": "hello"})()
         result = type("R", (), {"content": [block], "structuredContent": None})()

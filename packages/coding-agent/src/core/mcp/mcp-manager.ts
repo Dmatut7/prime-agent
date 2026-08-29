@@ -50,10 +50,25 @@ export class McpManager {
 		this.registerProviders();
 	}
 
-	/** Re-read settings and re-register providers; call after a session reload. */
-	refresh(): void {
+	/**
+	 * Re-read settings and re-register providers; call after a session reload.
+	 * Returns user-declared servers that disappeared or were force-disabled since
+	 * the previous refresh, so the caller can retire their kernel-side transports
+	 * (a removed stdio server's child process otherwise leaks until kernel exit).
+	 */
+	refresh(): string[] {
+		const aliveUserServers = (): Set<string> => {
+			const alive = new Set<string>();
+			for (const integration of this.integrations.values()) {
+				if (integration.userDeclared && integration.config.enabled !== false) alive.add(integration.server);
+			}
+			return alive;
+		};
+		const previousAlive = aliveUserServers();
 		this.resolveIntegrations();
 		this.registerProviders();
+		const currentAlive = aliveUserServers();
+		return [...previousAlive].filter((server) => !currentAlive.has(server)).sort();
 	}
 
 	canReleaseAcpServers(ownerId: string): boolean {

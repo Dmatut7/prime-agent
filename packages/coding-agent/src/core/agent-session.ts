@@ -1366,7 +1366,15 @@ export class AgentSession {
 
 	/** Refreshes MCP provider registrations without rebuilding the session runtime. */
 	refreshMcpProviders(): void {
-		this._mcpManager?.refresh();
+		const removedServers = this._mcpManager?.refresh() ?? [];
+		// When the agent is busy, /reload (which disposes the kernel and reaps every
+		// MCP child) is deferred, so a removed or force-disabled user server's live
+		// kernel transport would otherwise leak until kernel exit. Retire those
+		// generations once the agent goes idle. Best-effort: a kernel failure here
+		// must not break the credential refresh that triggered it.
+		if (removedServers.length > 0 && (this.isStreaming || this.isCompacting)) {
+			void this._closeKernelMcpTransports(removedServers, "MCP").catch(() => {});
+		}
 	}
 
 	/**
@@ -1407,11 +1415,17 @@ export class AgentSession {
 		}
 		const names = [...new Set(serverNames)];
 		if (names.length === 0) return;
+		await this._closeKernelMcpTransports(names, "ACP MCP");
+	}
 
+	/**
+	 * Close kernel-owned MCP transports by name without rebuilding or killing the
+	 * notebook. Waits for the current turn, then asks the kernel-side registry to
+	 * drop only these cached generations (reaping any stdio child processes).
+	 */
+	private async _closeKernelMcpTransports(names: readonly string[], label: string): Promise<void> {
 		const inputPause = this.acquireSessionInputPause();
 		try {
-			// Do not rebuild or kill the notebook. Wait for the current turn, then ask
-			// the kernel-owned MCP registry to close only these cached transports.
 			await this.agent.waitForIdle();
 			await this._agentEventQueue;
 			const manager = this._ipythonKernelProvisioner?.manager;
@@ -1432,7 +1446,7 @@ export class AgentSession {
 			].join("\n");
 			const result = await manager.execute(code);
 			if (result.status !== "ok") {
-				throw new Error(`Failed to close ACP MCP kernel transports: ${result.stderr || "kernel error"}`);
+				throw new Error(`Failed to close ${label} kernel transports: ${result.stderr || "kernel error"}`);
 			}
 		} finally {
 			inputPause.release();

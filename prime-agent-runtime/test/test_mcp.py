@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import os
+import signal
 import sys
 import socket
 import subprocess
@@ -709,6 +710,184 @@ class McpRegistryTest(unittest.TestCase):
                 self.assertEqual(mcp._registry._generations, {})
 
         run(scenario())
+
+
+    def test_removed_server_generation_is_closed_on_next_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "stdio_server.py"
+            pid_file = Path(tmp) / "stdio.pid"
+            fixture.write_text(_STDIO_FIXTURE)
+            config = {
+                "type": "stdio",
+                "command": sys.executable,
+                "args": [str(fixture)],
+                "cwd": str(fixture.parent),
+                "env": {"FIXTURE_PID_FILE": str(pid_file)},
+                "credentialSource": "acp",
+            }
+
+            async def scenario():
+                with mock.patch.object(mcp, "_config", new=mock.AsyncMock(return_value=config)):
+                    await mcp._registry.tools("svc")
+                pid = int(pid_file.read_text())
+                os.kill(pid, 0)
+
+                async def removed_config(_server):
+                    raise KeyError("MCP server 'svc' is not declared in user settings")
+
+                with mock.patch.object(mcp, "_config", new=removed_config):
+                    with self.assertRaises(KeyError):
+                        await mcp._registry.get("svc")
+                return pid
+
+            pid = run(scenario())
+        # The retired generation is dropped and its stdio child reaped, not
+        # leaked until kernel shutdown.
+        self.assertNotIn("svc", mcp._registry._generations)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_call_timeout_retires_generation(self):
+        class Slow(FakeSession):
+            async def call_tool(self, name, arguments):
+                await asyncio.sleep(10)
+
+        tool = SimpleNamespace(name="slow", description="", inputSchema={})
+        generation = self.generation({"type": "http", "callTimeoutMs": 10}, [tool])
+        generation.session = Slow([tool])
+        with self.assertRaises(TimeoutError):
+            run(generation.call("slow", {}))
+        # The wedged session must not be reused: the registry reopens on next use.
+        self.assertTrue(generation.closed)
+
+    def test_registry_reconnects_after_call_timeout(self):
+        config = {"type": "http", "url": "a", "callTimeoutMs": 10}
+        opened = []
+
+        async def config_loader(_server):
+            return config
+
+        async def open_generation(generation):
+            opened.append(generation)
+            generation.session = FakeSession(
+                [SimpleNamespace(name="t", description="", inputSchema={})],
+                result=CallToolResult(content=[TextContent(type="text", text="revived")]),
+            )
+            await generation.discover()
+
+        class Slow(FakeSession):
+            async def call_tool(self, name, arguments):
+                await asyncio.sleep(10)
+
+        tool = SimpleNamespace(name="t", description="", inputSchema={})
+        wedged = self.generation(config, [tool])
+        wedged.session = Slow([tool])
+        mcp._registry._generations["svc"] = wedged
+
+        async def scenario():
+            with mock.patch.object(mcp, "_config", config_loader), mock.patch.object(
+                mcp._Generation, "open", open_generation
+            ):
+                with self.assertRaises(TimeoutError):
+                    await mcp._registry.call("svc", "t", {})
+                return await mcp._registry.call("svc", "t", {})
+
+        result = run(scenario())
+        self.assertTrue(wedged.closed)
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(result, "revived")
+
+    def test_connection_failure_classification(self):
+        from mcp.shared import exceptions as mcp_exceptions
+
+        mcp_error = getattr(mcp_exceptions, "MCPError", None) or getattr(mcp_exceptions, "McpError")
+        self.assertTrue(mcp._is_connection_failure(BrokenPipeError()))
+        self.assertTrue(mcp._is_connection_failure(ConnectionResetError()))
+        self.assertTrue(mcp._is_connection_failure(EOFError()))
+        self.assertTrue(mcp._is_connection_failure(mcp_error(-32000, "Connection closed")))
+        self.assertTrue(mcp._is_connection_failure(ExceptionGroup("wrapped", [BrokenPipeError()])))
+        self.assertFalse(mcp._is_connection_failure(mcp_error(-32602, "Invalid params")))
+        self.assertFalse(mcp._is_connection_failure(ValueError("tool blew up")))
+        self.assertFalse(mcp._is_connection_failure(TimeoutError()))
+        self.assertFalse(mcp._is_connection_failure(asyncio.CancelledError()))
+        self.assertFalse(mcp._is_connection_failure(ExceptionGroup("wrapped", [ValueError()])))
+
+    def test_dead_generation_is_retired_and_reconnected_single_flight(self):
+        config = {"type": "http", "url": "a"}
+        opened = []
+
+        async def config_loader(_server):
+            return config
+
+        async def open_generation(generation):
+            opened.append(generation)
+            generation.session = FakeSession(
+                [SimpleNamespace(name="t", description="", inputSchema={})],
+                result=CallToolResult(content=[TextContent(type="text", text="revived")]),
+            )
+            await generation.discover()
+
+        class Dead(FakeSession):
+            async def call_tool(self, name, arguments):
+                raise ConnectionResetError("server went away")
+
+        tool = SimpleNamespace(name="t", description="", inputSchema={})
+        dead_generation = self.generation(config, [tool])
+        dead_generation.session = Dead([tool])
+        mcp._registry._generations["svc"] = dead_generation
+
+        async def scenario():
+            with mock.patch.object(mcp, "_config", config_loader), mock.patch.object(
+                mcp._Generation, "open", open_generation
+            ):
+                calls = [asyncio.create_task(mcp._registry.call("svc", "t", {})) for _ in range(5)]
+                return await asyncio.gather(*calls, return_exceptions=True)
+
+        results = run(scenario())
+        self.assertIsInstance(results[0], ConnectionResetError)
+        self.assertTrue(dead_generation.closed)
+        # The per-server lock serializes the callers, so exactly one reconnect
+        # serves every later call instead of a thundering herd of opens.
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(results[1:], ["revived"] * 4)
+
+    def test_crashed_stdio_server_reconnects_on_next_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "stdio_server.py"
+            pid_file = Path(tmp) / "stdio.pid"
+            fixture.write_text(_STDIO_FIXTURE)
+            config = {
+                "type": "stdio",
+                "command": sys.executable,
+                "args": [str(fixture)],
+                "cwd": str(fixture.parent),
+                "env": {"FIXTURE_PID_FILE": str(pid_file)},
+                "credentialSource": "acp",
+            }
+
+            async def scenario():
+                with mock.patch.object(mcp, "_config", new=mock.AsyncMock(return_value=config)):
+                    try:
+                        await mcp.call_tool("svc", "fixture/raw.tool", {"x": 1})
+                        first_generation = mcp._registry._generations["svc"]
+                        first_pid = int(pid_file.read_text())
+                        os.kill(first_pid, signal.SIGKILL)
+                        with self.assertRaises(Exception):
+                            await mcp.call_tool("svc", "fixture/raw.tool", {"x": 2})
+                        self.assertTrue(first_generation.closed)
+                        second = json.loads(await mcp.call_tool("svc", "fixture/raw.tool", {"x": 3}))
+                        second_generation = mcp._registry._generations["svc"]
+                        second_pid = int(pid_file.read_text())
+                    finally:
+                        await mcp._registry.shutdown()
+                return first_generation, first_pid, second, second_generation, second_pid
+
+            first_generation, first_pid, second, second_generation, second_pid = run(scenario())
+        self.assertIsNot(second_generation, first_generation)
+        self.assertNotEqual(second_pid, first_pid)
+        self.assertEqual(second["arguments"], {"x": 3})
+        with self.assertRaises(ProcessLookupError):
+            os.kill(second_pid, 0)
 
 
 if __name__ == "__main__":
