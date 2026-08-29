@@ -59,6 +59,11 @@ export interface PrimeAgentRefinementMeta {
 	error?: string;
 }
 
+export interface PrimeAgentSessionPersistMeta {
+	status: "failed";
+	error: string;
+}
+
 export interface PrimeAgentQuiescenceMeta {
 	/** Subagents that have not reached a terminal state at the observation point. */
 	outstandingSubagents: number;
@@ -114,6 +119,7 @@ export interface PrimeAgentSessionMeta {
 	heartbeatsChanged?: boolean;
 	goal?: PrimeAgentGoalMeta;
 	refinement?: PrimeAgentRefinementMeta;
+	sessionPersistence?: PrimeAgentSessionPersistMeta;
 	agentMessage?: PrimeAgentAgentMessageMeta;
 	sessionId?: string;
 	rlmDepth?: number;

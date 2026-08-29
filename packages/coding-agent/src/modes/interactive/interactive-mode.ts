@@ -5755,6 +5755,10 @@ export class InteractiveMode {
 				this.showError(`Refinement failed: ${event.error}`);
 				break;
 
+			case "session_persist_failed":
+				this.showError(`Session persistence failed: ${event.error}`);
+				break;
+
 			case "refine_complete":
 				break;
 		}

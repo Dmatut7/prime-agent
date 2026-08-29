@@ -1610,7 +1610,11 @@ export class DaemonAgentConnection implements AgentConnection {
 		this.observeDaemonEventSequence(message);
 
 		if (message.type === "session_event") {
-			if (message.event.type !== "refine_complete" && message.event.type !== "refine_failed") {
+			if (
+				message.event.type !== "refine_complete" &&
+				message.event.type !== "refine_failed" &&
+				message.event.type !== "session_persist_failed"
+			) {
 				this.observeStreamingMessage(message.event);
 			}
 			if (message.event.type === "rlm_child_update") {

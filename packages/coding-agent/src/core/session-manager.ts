@@ -1502,7 +1502,15 @@ export class SessionManager {
 			this._rewriteFile();
 			this.flushed = true;
 		} else {
-			appendPrivateFile(this.sessionFile, `${JSON.stringify(entry)}\n`, { privateParent: this.ownsSessionDir });
+			try {
+				appendPrivateFile(this.sessionFile, `${JSON.stringify(entry)}\n`, { privateParent: this.ownsSessionDir });
+			} catch (error) {
+				// The entry stays in fileEntries: drop the flushed mark so the next
+				// persist rewrites the whole transcript and backfills the gap instead
+				// of appending past a lost line.
+				this.flushed = false;
+				throw error;
+			}
 			this._notifyPersistListeners();
 		}
 	}
