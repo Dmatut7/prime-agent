@@ -240,6 +240,11 @@ function isImmediatePasteEscapeAbort(data: string): boolean {
 	return data === "\x1b[27u" || (data.startsWith("\x1b[27;") && data.endsWith("u"));
 }
 
+function containsCompleteKittyEscape(buffer: string): boolean {
+	if (buffer.includes("\x1b[27u")) return true;
+	return /\x1b\[27;[\d:]+u/.test(buffer);
+}
+
 /**
  * Buffers stdin input and emits complete sequences via the 'data' event.
  * Handles partial escape sequences that arrive across multiple chunks.
@@ -248,7 +253,6 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	private buffer: string = "";
 	private timeout: ReturnType<typeof setTimeout> | null = null;
 	private pasteWatchdog: ReturnType<typeof setTimeout> | null = null;
-	private pasteEscapeTimer: ReturnType<typeof setTimeout> | null = null;
 	private readonly timeoutMs: number;
 	private readonly pasteTimeoutMs: number;
 	private readonly pasteMaxBytes: number;
@@ -360,9 +364,12 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			this.finishPasteWithoutTerminator();
 			return;
 		}
+		if (containsCompleteKittyEscape(this.pasteBuffer)) {
+			this.discardPasteMode();
+			return;
+		}
 		// Idle timeout: each chunk proves the paste is still flowing.
 		this.armPasteWatchdog();
-		this.armPasteEscapeTimerIfNeeded();
 	}
 
 	private finishPasteIfComplete(): boolean {
@@ -410,21 +417,6 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		}, this.pasteTimeoutMs);
 	}
 
-	private armPasteEscapeTimerIfNeeded(): void {
-		this.clearPasteEscapeTimer();
-		// A trailing ESC may be the Esc key or the start of `201~`. Wait briefly
-		// so a split terminator can complete; otherwise abort paste mode.
-		if (!this.pasteMode || !this.pasteBuffer.endsWith("\x1b")) {
-			return;
-		}
-		this.pasteEscapeTimer = setTimeout(() => {
-			this.pasteEscapeTimer = null;
-			if (this.pasteMode) {
-				this.discardPasteMode();
-			}
-		}, this.timeoutMs);
-	}
-
 	private clearPasteWatchdog(): void {
 		if (this.pasteWatchdog) {
 			clearTimeout(this.pasteWatchdog);
@@ -432,16 +424,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		}
 	}
 
-	private clearPasteEscapeTimer(): void {
-		if (this.pasteEscapeTimer) {
-			clearTimeout(this.pasteEscapeTimer);
-			this.pasteEscapeTimer = null;
-		}
-	}
-
 	private clearPasteTimers(): void {
 		this.clearPasteWatchdog();
-		this.clearPasteEscapeTimer();
 	}
 
 	private emitDataSequence(sequence: string): void {

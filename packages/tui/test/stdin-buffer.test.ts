@@ -525,19 +525,40 @@ describe("StdinBuffer", () => {
 			assert.ok(emittedSequences.includes("x"));
 		});
 
-		it("discards an unterminated paste on a lone trailing ESC", async () => {
+		it("recognizes a Kitty Esc sequence split across chunks", () => {
 			processInput("\x1b[200~hello");
-			processInput("\x1b");
-			assert.strictEqual(emittedPaste.length, 0);
-			assert.strictEqual(emittedSequences.length, 0);
+			processInput("\x1b[27");
+			assert.strictEqual(buffer.isPasteMode(), true);
+			assert.deepStrictEqual(emittedPaste, []);
 
-			await wait(15);
-
-			assert.strictEqual(emittedPaste.length, 0);
-			assert.strictEqual(emittedSequences.length, 0);
+			processInput("u");
+			assert.strictEqual(buffer.isPasteMode(), false);
+			assert.deepStrictEqual(emittedPaste, []);
+			assert.deepStrictEqual(emittedSequences, []);
 
 			processInput("x");
 			assert.deepStrictEqual(emittedSequences, ["x"]);
+		});
+
+		it("does not discard ANSI color codes in an unterminated paste", async () => {
+			processInput("\x1b[200~hello\x1b[31mred");
+			await wait(20);
+			assert.strictEqual(buffer.isPasteMode(), true);
+			assert.deepStrictEqual(emittedPaste, []);
+
+			processInput("\x1b[201~");
+			assert.deepStrictEqual(emittedPaste, ["hello\x1b[31mred"]);
+		});
+
+		it("keeps paste when a chunk ends with ESC and CSI completes later", async () => {
+			processInput("\x1b[200~hello");
+			processInput("\x1b");
+			await wait(15);
+			assert.strictEqual(buffer.isPasteMode(), true);
+
+			processInput("[31mred\x1b[201~");
+			assert.deepStrictEqual(emittedPaste, ["hello\x1b[31mred"]);
+			assert.deepStrictEqual(emittedSequences, []);
 		});
 	});
 
