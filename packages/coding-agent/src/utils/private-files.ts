@@ -58,11 +58,17 @@ function ensureNoSymlinkPath(path: string, mode: number): void {
 			}
 		}
 		const stats = lstatSync(current);
-		if (index === 0 && stats.isSymbolicLink()) {
+		if (stats.isSymbolicLink()) {
+			// Intermediate symlinks (e.g. a symlinked ~/.prime) are followed after
+			// resolution; only the final component keeps the O_NOFOLLOW refusal so the
+			// private target itself is never swapped through a link.
+			if (index === components.length - 1) {
+				throw new Error(`Refusing to use non-directory private path: ${current}`);
+			}
 			current = realpathSync(current);
 			continue;
 		}
-		if (stats.isSymbolicLink() || !stats.isDirectory()) {
+		if (!stats.isDirectory()) {
 			throw new Error(`Refusing to use non-directory private path: ${current}`);
 		}
 	}
