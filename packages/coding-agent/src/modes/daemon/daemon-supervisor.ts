@@ -2546,6 +2546,15 @@ export class DaemonSupervisor {
 		worker.transientCreateCommand = undefined;
 	}
 
+	private describeWorkerSpawnFailure(error: Error): Error {
+		const errno = (error as NodeJS.ErrnoException).code;
+		const hint =
+			errno === "EMFILE" || errno === "ENFILE"
+				? ` (${this.workers.size} resident session workers are holding file descriptors; stop unused sessions or raise the open-file limit (ulimit -n))`
+				: "";
+		return new Error(`Failed to spawn session worker: ${error.message}${hint}`);
+	}
+
 	private async launchWorker(
 		command: DaemonCreateCommand,
 		existing?: ResidentWorker,
@@ -2601,12 +2610,21 @@ export class DaemonSupervisor {
 			: () => {};
 		child.once("close", detachWorkerStderr);
 		const childClosed = new Promise<void>((resolveClose) => child.once("close", () => resolveClose()));
+		let spawnFailure: Error | undefined;
+		const spawnSettled = new Promise<void>((resolveSpawn) => {
+			child.once("spawn", () => resolveSpawn());
+			child.once("error", (error) => {
+				spawnFailure = error instanceof Error ? error : new Error(String(error));
+				resolveSpawn();
+			});
+		});
 		child.on("error", (error) => {
 			this.log(
 				`Session worker ${workerId} process error: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		});
-		const startupGate = child.stdio[WORKER_STARTUP_GATE_FD];
+		// A failed spawn (e.g. EMFILE) leaves child.stdio undefined.
+		const startupGate = child.stdio?.[WORKER_STARTUP_GATE_FD];
 		const previousDescriptor = existing?.descriptor;
 		const previousIntentionalStop = existing?.intentionalStop;
 		let descriptorAssigned = false;
@@ -2614,6 +2632,10 @@ export class DaemonSupervisor {
 		let childProcessStartId: string | undefined;
 		let worker: ResidentWorker;
 		try {
+			await spawnSettled;
+			if (spawnFailure) {
+				throw this.describeWorkerSpawnFailure(spawnFailure);
+			}
 			if (!child.pid) {
 				throw new Error("Failed to obtain daemon session worker pid");
 			}
