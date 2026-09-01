@@ -18,11 +18,12 @@ import {
 	type DaemonServerCapability,
 	getDaemonCommandCompatibilities,
 	isDaemonMutatingCommand,
+	meetsDaemonCommandCompatibility,
 } from "./daemon-protocol.js";
 import type { DaemonWorkerCommand, DaemonWorkerCommandBody } from "./daemon-worker-protocol.js";
 
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
-type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;
+export type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;
 
 type DaemonWireCommandBody = DaemonCommandBody | DaemonWorkerCommandBody;
 
@@ -104,6 +105,26 @@ export interface DaemonClientReconnectOptions {
 	recoverDaemon: () => Promise<void>;
 	timeoutMs?: number;
 	onStatus?: (status: DaemonClientReconnectStatus) => void;
+}
+
+export interface DaemonTransportClient {
+	readonly hello: DaemonHello | undefined;
+	readonly isConnected: boolean;
+	supportsServerCapability(capability: DaemonServerCapability): boolean;
+	waitForHello(timeoutMs?: number): Promise<DaemonHello>;
+	connect(timeoutMs?: number): Promise<void>;
+	reconnect(timeoutMs?: number): Promise<void>;
+	disconnectForReconnect(reason: DaemonClosingReason): void;
+	resetTransportForReconnect(): void;
+	onMessage(listener: DaemonClientMessageListener): () => void;
+	onClose(listener: DaemonClientCloseListener): () => void;
+	enableRequestRecovery(): void;
+	request(
+		command: DaemonCommandBody,
+		timeoutMs?: number,
+		options?: DaemonClientRequestOptions,
+	): Promise<DaemonResponse>;
+	close(): void;
 }
 
 const DEFAULT_RECONNECT_TIMEOUT_MS = 60_000;
@@ -310,7 +331,7 @@ export class DaemonClient {
 		const hello = this.helloMessage ?? (await this.waitForHello());
 		const compatibilities = getDaemonCommandCompatibilities(command);
 		const missingCompatibility = compatibilities.find(
-			(compatibility) => !this.meetsCommandCompatibility(hello, compatibility),
+			(compatibility) => !meetsDaemonCommandCompatibility(hello, compatibility),
 		);
 		if (missingCompatibility) {
 			throw new DaemonCapabilityUnavailableError(command.type, missingCompatibility.capability);
@@ -322,16 +343,6 @@ export class DaemonClient {
 			options,
 			envelopeProtocolVersion >= DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION ? envelopeProtocolVersion : undefined,
 			compatibilities,
-		);
-	}
-
-	private meetsCommandCompatibility(hello: DaemonHello, compatibility: DaemonCommandCompatibility): boolean {
-		return (
-			hello.protocol.version >= compatibility.minProtocol &&
-			(compatibility.minSchemaRevision === undefined ||
-				(hello.schemaRevision ?? 0) >= compatibility.minSchemaRevision) &&
-			(compatibility.capability === undefined ||
-				hello.serverCapabilities?.includes(compatibility.capability) === true)
 		);
 	}
 
@@ -450,7 +461,7 @@ export class DaemonClient {
 					}
 					pending.awaitingReconnect = false;
 					const missingCompatibility = pending.compatibilities.find(
-						(compatibility) => !this.meetsCommandCompatibility(message, compatibility),
+						(compatibility) => !meetsDaemonCommandCompatibility(message, compatibility),
 					);
 					if (missingCompatibility) {
 						this.pendingRequests.delete(id);

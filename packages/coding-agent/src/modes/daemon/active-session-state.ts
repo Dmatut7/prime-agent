@@ -22,6 +22,7 @@ export interface DaemonSocketClient {
 	/** A push hit backpressure; one full-roster resync goes out on drain. */
 	rosterResyncPending?: boolean;
 	authenticated?: boolean;
+	authenticationRole?: "supervisor" | "session_client";
 	transport?: "jsonl" | "private-framed";
 	snapshotStreaming?: boolean;
 	snapshotActiveSessionIds?: Set<string>;
