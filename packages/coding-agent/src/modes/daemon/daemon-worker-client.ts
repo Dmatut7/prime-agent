@@ -33,6 +33,11 @@ export type DaemonWorkerFrameListener = (frame: PrivateFrame<DaemonWorkerFrameHe
 export type DaemonWorkerCloseListener = (error: Error) => void;
 type DaemonHello = Extract<DaemonOutbound, { type: "daemon_hello" }>;
 
+export class DaemonWorkerAuthenticationError extends Error {}
+
+/** A probe (hello/response/connect) timed out; recovery treats the worker as live-but-slow, never dead. */
+export class DaemonWorkerProbeTimeoutError extends Error {}
+
 export class DaemonWorkerClient {
 	private socket?: Socket;
 	private channel?: PrivateFramedChannel<DaemonWorkerFrameHeader>;
@@ -122,7 +127,7 @@ export class DaemonWorkerClient {
 				reject,
 				timeout: setTimeout(() => {
 					this.helloWaiters.delete(waiter);
-					reject(new Error("Timed out waiting for daemon worker hello"));
+					reject(new DaemonWorkerProbeTimeoutError("Timed out waiting for daemon worker hello"));
 				}, timeoutMs),
 			};
 			this.helloWaiters.add(waiter);
@@ -164,7 +169,7 @@ export class DaemonWorkerClient {
 	): Promise<Extract<DaemonResponse, { success: true }>> {
 		const response = await this.requestWorker({ type: "worker_auth", token, ...owner }, timeoutMs);
 		if (!response.success) {
-			throw new Error(response.error);
+			throw new DaemonWorkerAuthenticationError(response.error);
 		}
 		return response;
 	}
@@ -205,7 +210,9 @@ export class DaemonWorkerClient {
 		const response = new Promise<DaemonResponse>((resolve, reject) => {
 			const timeout = setTimeout(() => {
 				this.pending.delete(id);
-				reject(new Error(`Timed out waiting for daemon worker response to ${command.type}`));
+				reject(
+					new DaemonWorkerProbeTimeoutError(`Timed out waiting for daemon worker response to ${command.type}`),
+				);
 			}, timeoutMs);
 			this.pending.set(id, { resolve, reject, timeout });
 		});
