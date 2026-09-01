@@ -1254,11 +1254,8 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private armSavedSearchFetch(options: { duringReconnect?: boolean } = {}): void {
-		if (
-			this.savedSearchFetchStarted ||
-			this.persistentState.savedCatalogLoaded === true ||
-			this.editor.getText().trim().length === 0
-		) {
+		// The inactive section is catalog-fed, so no query gate: load on view open.
+		if (this.savedSearchFetchStarted || this.persistentState.savedCatalogLoaded === true) {
 			return;
 		}
 		this.savedSearchFetchStarted = true;
