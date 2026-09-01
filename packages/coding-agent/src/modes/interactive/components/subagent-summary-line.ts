@@ -1,6 +1,8 @@
 import { type Component, type Focusable, getKeybindings, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../../agent-connection/index.js";
+import { isDirectAgentChild } from "../../agents-view/agents-view-state.js";
 import { type AgentRosterStatus, classifyAgentStatus } from "../../daemon/agent-roster.js";
+import { classifySessionRosterStatus, type SessionSummary } from "../../daemon/daemon-session-list.js";
 import { theme } from "../theme/theme.js";
 import { keyText } from "./keybinding-hints.js";
 
@@ -36,6 +38,25 @@ export function countDirectSubagentStatuses(
 		if (child.parentId !== parentId || child.status === "cancelled") continue;
 		counts.total += 1;
 		counts[classifySubagentSnapshotStatus(child, activeHeartbeatSessionIds)] += 1;
+	}
+	return counts;
+}
+
+export function countRosterSubagentStatuses(
+	summaries: Iterable<SessionSummary>,
+	parent: { activeSessionId?: string | undefined; sessionId?: string | undefined; sessionFile?: string | undefined },
+	activeHeartbeatSessionIds: ReadonlySet<string>,
+): SubagentSummaryCounts {
+	const counts: SubagentSummaryCounts = { total: 0, running: 0, idle: 0, inactive: 0 };
+	for (const child of summaries) {
+		if (child.runtimeKind !== "subagent" || child.lifecycle !== "live") continue;
+		if (!isDirectAgentChild(child, parent)) continue;
+		counts.total += 1;
+		const status =
+			child.activeSessionId !== undefined && activeHeartbeatSessionIds.has(child.activeSessionId)
+				? "running"
+				: (child.rosterStatus ?? classifySessionRosterStatus(child));
+		counts[status] += 1;
 	}
 	return counts;
 }

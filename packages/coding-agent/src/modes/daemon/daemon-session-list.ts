@@ -9,7 +9,8 @@ import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import type { ActiveSessionState } from "./active-session-state.js";
-import { isSessionSummaryBusy } from "./agent-roster.js";
+
+import { type AgentRosterStatus, isSessionSummaryBusy } from "./agent-roster.js";
 
 export { classifySessionRosterStatus, isSessionSummaryBusy } from "./agent-roster.js";
 
@@ -78,6 +79,10 @@ export interface SessionSummary {
 	summary?: string;
 	/** Completion verdict for an idle session; absent while working or unjudged. */
 	taskState?: AgentTaskState;
+	rosterStatus?: AgentRosterStatus;
+	statusLabel?: "queued" | "recovering" | "failed";
+	/** Set while the owning worker has been silent past the staleness threshold. */
+	lastHeardFromAt?: string;
 	/** Resident session-host process state, populated by the global supervisor. */
 	workerState?: "starting" | "ready" | "recovering" | "stopping" | "failed";
 	/** Diagnostic process identity; clients must not use this as a stable session identifier. */

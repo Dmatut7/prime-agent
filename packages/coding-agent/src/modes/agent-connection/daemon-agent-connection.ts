@@ -20,6 +20,7 @@ import type { RefinementResult } from "../../core/refinement/index.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { SessionAlreadyActiveError } from "../../core/session-lease.js";
 import type { SessionStats } from "../../core/session-stats.js";
+import { AgentsViewRosterStore, STALE_ROSTER_DAEMON_MESSAGE } from "../agents-view/roster-store.js";
 import {
 	DaemonCapabilityUnavailableError,
 	type DaemonClient,
@@ -239,6 +240,7 @@ export class DaemonAgentConnection implements AgentConnection {
 	private readonly pendingReattachActiveSessionIds = new Set<string>();
 	private readonly snapshotRecoveryPromises = new Map<string, Promise<void>>();
 	private readonly ignoredSnapshotIds = new Set<string>();
+	private rosterStore: AgentsViewRosterStore | undefined;
 	private reconnectPromise?: Promise<void>;
 	private readonly definitiveRequestErrors = new WeakSet<Error>();
 	private disposing = false;
@@ -377,6 +379,25 @@ export class DaemonAgentConnection implements AgentConnection {
 			this.latestSnapshot = undefined;
 			this.latestSnapshotIsFresh = false;
 		}
+		// The roster bar is an accessory: its subscribe failure must never fail an
+		// otherwise-recovered session. The bar degrades; the next reconnect or rebind
+		// re-attaches through this same seam.
+		if (this.rosterStore) await this.rosterStore.attach(this.client).catch(() => undefined);
+	}
+
+	async subscribeAgentRoster(
+		listener: () => void,
+	): Promise<{ summaries(): SessionSummary[]; dispose(): Promise<void> }> {
+		this.rosterStore ??= new AgentsViewRosterStore();
+		const store = this.rosterStore;
+		if (!(await store.attach(this.client))) {
+			throw new Error(STALE_ROSTER_DAEMON_MESSAGE);
+		}
+		const unsubscribe = store.onUpdate(listener);
+		return {
+			summaries: () => store.summaries(),
+			dispose: async () => unsubscribe(),
+		};
 	}
 
 	subscribe(listener: AgentConnectionEventListener): () => void {
@@ -1447,6 +1468,8 @@ export class DaemonAgentConnection implements AgentConnection {
 		this.disposed = true;
 		this.updateRestartPending = false;
 		await Promise.allSettled([...this.activeSideQuestionIds].map((id) => this.abortSideQuestion(id)));
+		await this.rosterStore?.dispose().catch(() => undefined);
+		this.rosterStore = undefined;
 		this.unsubscribeDaemonMessages();
 		this.unsubscribeDaemonClose();
 		if (this.options.ownedSession) {

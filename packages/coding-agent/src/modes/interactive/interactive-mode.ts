@@ -166,6 +166,7 @@ import type {
 	AgentConnectionToolDefinition,
 } from "../agent-connection/index.js";
 import { AgentConnectionPromptAdmissionError } from "../agent-connection/index.js";
+import type { SessionSummary } from "../daemon/daemon-session-list.js";
 import { getModelArgumentCompletions } from "../model-autocomplete.js";
 import {
 	checkForPackageUpdates,
@@ -222,7 +223,11 @@ import {
 	styleSlashCommandText,
 } from "./components/slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "./components/slash-command-result-message.js";
-import { countDirectSubagentStatuses, SubagentSummaryLine } from "./components/subagent-summary-line.js";
+import {
+	countDirectSubagentStatuses,
+	countRosterSubagentStatuses,
+	SubagentSummaryLine,
+} from "./components/subagent-summary-line.js";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.js";
 import {
 	selectLatestToolExpandHint,
@@ -974,6 +979,7 @@ export class InteractiveMode {
 	private subagentSummaryLine: SubagentSummaryLine;
 	private subagentSnapshots = new Map<string, AgentConnectionRlmChildAgentSnapshot>();
 	private rlmNodeId: string | undefined;
+	private rosterBar: { summaries(): SessionSummary[]; dispose(): Promise<void> } | undefined;
 
 	private toolOutputExpanded = false;
 	private agentMessagesExpanded = false;
@@ -2790,6 +2796,8 @@ export class InteractiveMode {
 	private async rebindCurrentSession(): Promise<void> {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		void this.rosterBar?.dispose();
+		this.rosterBar = undefined;
 		if (this.localSessionHost) {
 			this.uiServices = this.localSessionHost.createUiServices();
 		}
@@ -2804,6 +2812,7 @@ export class InteractiveMode {
 			this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 		}
 		this.subscribeToAgent();
+		await this.subscribeToRosterBar();
 		// A session_action_update in the unsubscribed gap above is lost; re-sync the queue post-subscription.
 		this.patchConnectionState({ sessionActions: (await this.agentConnection.getState()).sessionActions });
 		this.refreshQueueSelectionFromState();
@@ -5079,6 +5088,19 @@ export class InteractiveMode {
 		};
 	}
 
+	private async subscribeToRosterBar(): Promise<void> {
+		if (!this.agentConnection.subscribeAgentRoster) return;
+		try {
+			this.rosterBar = await this.agentConnection.subscribeAgentRoster(() => {
+				this.updateSubagentSummaryLine();
+				this.ui.requestRender();
+			});
+		} catch {
+			this.rosterBar = undefined;
+		}
+		this.updateSubagentSummaryLine();
+	}
+
 	private subscribeToAgent(): void {
 		this.unsubscribe = this.agentConnection.subscribe(async (event) => {
 			try {
@@ -5927,6 +5949,7 @@ export class InteractiveMode {
 	}
 
 	private updateSubagentSummary(child: AgentConnectionRlmChildAgentSnapshot): void {
+		// "cancelled" also covers never-bound terminal runs; AgentSession owns that rule.
 		if (child.status === "cancelled") {
 			this.removeSubagentSnapshot(child.id);
 		} else {
@@ -5951,8 +5974,23 @@ export class InteractiveMode {
 				.filter((heartbeat) => heartbeat.job.status === "active")
 				.map((heartbeat) => heartbeat.job.activeSessionId),
 		);
+		const rosterSummaries = this.rosterBar?.summaries();
+		// A client-owned session has no row on the public roster; only then do the
+		// snapshots carry the bar. A public parent with zero roster children shows zero.
+		const sessionOnRoster =
+			rosterSummaries?.some((row) => row.sessionId === this.connectionState?.sessionId) === true;
 		this.subagentSummaryLine.setSubagentCounts(
-			countDirectSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId, activeHeartbeatSessionIds),
+			rosterSummaries && sessionOnRoster
+				? countRosterSubagentStatuses(
+						rosterSummaries,
+						{
+							activeSessionId: this.connectionState?.activeSessionId,
+							sessionId: this.connectionState?.sessionId,
+							sessionFile: this.connectionState?.sessionFile,
+						},
+						activeHeartbeatSessionIds,
+					)
+				: countDirectSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId, activeHeartbeatSessionIds),
 		);
 		if (!this.subagentSummaryLine.isSelectable() && this.subagentSummaryLine.focused) this.focusEditor();
 	}
@@ -10023,6 +10061,8 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 		if (this.unsubscribe) {
 			this.unsubscribe();
 		}
+		void this.rosterBar?.dispose();
+		this.rosterBar = undefined;
 		if (this.isInitialized) {
 			this.ui.stop({
 				preserveAltScreen: options.preserveAltScreen,
