@@ -2563,6 +2563,8 @@ export class AgentDaemon {
 					rlmSessionDir: options.sessionDir,
 					rlmParentNodeId: options.rlmParentNodeId,
 					rlmParentAgent: options.parentSession.sessionName ?? options.parentSession.sessionId,
+					semanticParentSessionId: options.parentSession.sessionId,
+					semanticSpawnedByRequestId: options.spawnedByRequestId,
 				},
 				runtimeMetadata: {
 					kind: "subagent",
