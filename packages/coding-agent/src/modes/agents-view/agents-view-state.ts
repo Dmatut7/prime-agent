@@ -76,6 +76,7 @@ export interface AgentsViewRow {
 	depth: number;
 	selectable: boolean;
 	runningSubagentCount: number;
+	recursiveCost: number;
 	/** Unique selection identity for this row. */
 	identity: string;
 	/** Identity of the agent row this row is nested under. */
@@ -248,6 +249,7 @@ export function summaryForUnifiedRecord(record: UnifiedSessionRecord): SessionSu
 			...record.daemon,
 			sessionName: record.daemon.sessionName ?? saved.name,
 			firstMessage: record.daemon.firstMessage ?? saved.firstMessage,
+			usage: record.daemon.usage ?? saved.usage,
 			sessionFile: record.daemon.sessionFile ?? canonicalSessionPath(saved.path),
 			parentSessionPath: record.daemon.parentSessionPath ?? saved.parentSessionPath,
 			rlmDepth: record.daemon.rlmDepth ?? saved.rlmDepth,
@@ -281,6 +283,7 @@ export function summaryForUnifiedRecord(record: UnifiedSessionRecord): SessionSu
 		firstMessage: saved.firstMessage,
 		summary: saved.agentStatus?.summary,
 		taskState: saved.agentStatus?.taskState,
+		usage: saved.usage,
 	};
 }
 
@@ -416,6 +419,32 @@ export function filterUnifiedSessions(
 export interface UnifiedSessionIndex {
 	byKey: Map<string, UnifiedSessionRecord>;
 	childrenByParent: Map<UnifiedSessionRecord, UnifiedSessionRecord[]>;
+}
+
+// Rolls costs over the UNFILTERED hierarchy: filters must never change a row's total.
+export function computeRecursiveCosts(
+	records: readonly UnifiedSessionRecord[],
+	index: UnifiedSessionIndex = buildUnifiedSessionIndex(records),
+): ReadonlyMap<UnifiedSessionRecord, number> {
+	const order = records.filter((record) => {
+		const parent = findParentRecord(record, index.byKey);
+		return !parent || parent === record;
+	});
+	for (let position = 0; position < order.length; position++) {
+		for (const child of index.childrenByParent.get(order[position]!) ?? []) {
+			order.push(child);
+		}
+	}
+	const costs = new Map<UnifiedSessionRecord, number>();
+	for (let position = order.length - 1; position >= 0; position--) {
+		const record = order[position]!;
+		let total = record.daemon?.usage?.cost ?? record.saved?.usage?.cost ?? 0;
+		for (const child of index.childrenByParent.get(record) ?? []) {
+			total += costs.get(child) ?? 0;
+		}
+		costs.set(record, total);
+	}
+	return costs;
 }
 
 export function buildUnifiedSessionIndex(records: readonly UnifiedSessionRecord[]): UnifiedSessionIndex {
@@ -668,6 +697,7 @@ export function buildAgentsViewRows(
 	expandedSubagentParents: ReadonlySet<string> = new Set(),
 	programShownParents: ReadonlySet<string> = new Set(),
 	scope?: AgentsViewScopeKey,
+	recursiveCosts?: ReadonlyMap<UnifiedSessionRecord, number>,
 ): AgentsViewRow[] {
 	const inputs = summariesOrRecords.map((input) =>
 		isUnifiedSessionRecord(input) ? { summary: summaryForUnifiedRecord(input), record: input } : { summary: input },
@@ -695,6 +725,7 @@ export function buildAgentsViewRows(
 			depth: 0,
 			selectable: true,
 			runningSubagentCount: 0,
+			recursiveCost: summary.usage?.cost ?? 0,
 			identity: record?.identity ?? getAgentsViewSummaryIdentity(summary),
 			...(record ? { record, heartbeat: record.heartbeat } : {}),
 		}),
@@ -729,10 +760,14 @@ export function buildAgentsViewRows(
 	for (let index = tallyOrder.length - 1; index >= 0; index--) {
 		const row = tallyOrder[index]!;
 		let count = 0;
+		let descendantsCost = 0;
 		for (const child of childrenByParent.get(row) ?? []) {
 			count += (child.section === "running" ? 1 : 0) + child.runningSubagentCount;
+			descendantsCost += child.recursiveCost;
 		}
 		row.runningSubagentCount = count;
+		row.recursiveCost =
+			(row.record ? recursiveCosts?.get(row.record) : undefined) ?? (row.summary.usage?.cost ?? 0) + descendantsCost;
 	}
 
 	const roots = baseRows.filter((row) => !nestedRows.has(row));
@@ -810,6 +845,7 @@ function createSubagentSummaryRow(
 		depth,
 		selectable: true,
 		runningSubagentCount: running,
+		recursiveCost: 0,
 		identity: `subagents:${parent.identity}`,
 		parentIdentity: parent.identity,
 		hasSpawnCode,
@@ -864,6 +900,7 @@ function buildSpawnCodeRows(
 		// Code rows are read-only context; selection skips over them.
 		selectable: false,
 		runningSubagentCount: 0,
+		recursiveCost: 0,
 		identity: `code:${parent.identity}:${groupIndex}:${lineIndex}`,
 		parentIdentity: parent.identity,
 		code,
