@@ -52,4 +52,11 @@ describe("classifyAgentStatus", () => {
 		expect(classifySessionRosterStatus(summaryFor(false, false, true))).toBe("inactive");
 		expect(classifySubagentSnapshotStatus(childFor(false, false))).toBe("inactive");
 	});
+
+	it("keeps a session with only delegated child work out of running", () => {
+		const delegating: SessionSummary = { ...summaryFor(true, false, false), hasRunningRlmChildren: true };
+		expect(classifySessionRosterStatus(delegating)).toBe("idle");
+		const streaming: SessionSummary = { ...summaryFor(true, true, false), hasRunningRlmChildren: true };
+		expect(classifySessionRosterStatus(streaming)).toBe("running");
+	});
 });

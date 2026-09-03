@@ -171,8 +171,8 @@ import {
 	buildRlmChildSnapshots,
 	buildSessionList,
 	classifySessionRosterStatus,
+	hasLiveSessionWork,
 	inactiveLifecycleForSession,
-	isActiveSessionBusy,
 	type SessionSummary,
 	scheduledJobRegistrations,
 	summaryForActiveSession,
@@ -6048,8 +6048,7 @@ export class AgentDaemon {
 		if (state.runtime.metadata.kind === "subagent") {
 			return false;
 		}
-		// A running bash or in-flight turn means there is live work to preserve.
-		if (state.runtime.session.isBashRunning || isActiveSessionBusy(state)) {
+		if (state.runtime.session.isBashRunning || hasLiveSessionWork(state)) {
 			return false;
 		}
 		return this.isEmptyDraftContent(state);
@@ -6974,7 +6973,7 @@ export class AgentDaemon {
 		}
 		const session = state.runtime.session;
 		const busy =
-			busyOverride ?? (isActiveSessionBusy(state) || session.isRetrying || session.hasAcceptedPromptInFlight);
+			busyOverride ?? (hasLiveSessionWork(state) || session.isRetrying || session.hasAcceptedPromptInFlight);
 		try {
 			this.recoveryJournal.record({
 				activeSessionId: state.activeSessionId,

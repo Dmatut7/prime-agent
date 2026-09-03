@@ -715,12 +715,24 @@ export function buildAgentsViewRows(
 			continue;
 		}
 		nestedRows.add(row);
-		if (row.section === "running") {
-			parent.runningSubagentCount += 1;
-		}
 		const siblings = childrenByParent.get(parent) ?? [];
 		siblings.push(row);
 		childrenByParent.set(parent, siblings);
+	}
+	// Busy-descendant tally from the live rows: iterative over the parent forest so deep chains cannot overflow.
+	const tallyOrder = baseRows.filter((row) => !nestedRows.has(row));
+	for (let index = 0; index < tallyOrder.length; index++) {
+		for (const child of childrenByParent.get(tallyOrder[index]!) ?? []) {
+			tallyOrder.push(child);
+		}
+	}
+	for (let index = tallyOrder.length - 1; index >= 0; index--) {
+		const row = tallyOrder[index]!;
+		let count = 0;
+		for (const child of childrenByParent.get(row) ?? []) {
+			count += (child.section === "running" ? 1 : 0) + child.runningSubagentCount;
+		}
+		row.runningSubagentCount = count;
 	}
 
 	const roots = baseRows.filter((row) => !nestedRows.has(row));
@@ -880,6 +892,10 @@ function compareAgentsViewRows(a: AgentsViewRow, b: AgentsViewRow): number {
 		}
 	}
 	if (a.section !== "running") {
+		const busyDescendantsDiff = Number(b.runningSubagentCount > 0) - Number(a.runningSubagentCount > 0);
+		if (busyDescendantsDiff !== 0) {
+			return busyDescendantsDiff;
+		}
 		const activityDiff = getTimestamp(b.summary.lastActivityAt) - getTimestamp(a.summary.lastActivityAt);
 		if (activityDiff !== 0) {
 			return activityDiff;
@@ -1007,9 +1023,6 @@ function getSessionStatusLabel(summary: SessionSummary, heartbeat?: UnifiedSessi
 	}
 	if (summary.isBashRunning === true) {
 		return "running bash";
-	}
-	if (summary.hasRunningRlmChildren === true) {
-		return "subagents running";
 	}
 	if (summary.sessionActions.active) {
 		return summary.sessionActions.active.label ?? summary.sessionActions.active.kind.replace("_", " ");

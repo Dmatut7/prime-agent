@@ -133,6 +133,35 @@ describe("AgentsViewMode", () => {
 		expect(self.savedSearchFetchStarted).toBe(true);
 	});
 
+	it("stops instead of deleting when an idle row's subtree still works", async () => {
+		const request = vi.fn(async () => ({ success: true as const, data: { cancelled: true } }));
+		const self = {
+			requireClient: () => ({ request, supportsServerCapability: () => true }),
+			setStatusMessage: vi.fn(),
+			refreshSessions: vi.fn(async () => true),
+		};
+		const idleWithBusyCrew = {
+			kind: "subagent",
+			section: "idle",
+			runningSubagentCount: 1,
+			summary: summary({ id: "crew-parent", activeSessionId: "crew-parent", sessionId: "crew-parent-session" }),
+		};
+
+		await invoke(
+			"killSubagent",
+			self,
+			{ identity: "child-row", rootActiveSessionId: "root-active", childId: "crew-parent-child" },
+			idleWithBusyCrew,
+		);
+
+		expect(request).toHaveBeenCalledWith({
+			type: "cancel_rlm_child",
+			activeSessionId: "root-active",
+			childId: "crew-parent-child",
+		});
+		expect(request).not.toHaveBeenCalledWith(expect.objectContaining({ type: "delete_rlm_subagent" }));
+	});
+
 	it("re-resolves subagent state before choosing stop or delete intent", async () => {
 		const child = summary({
 			id: "passive-child-session",
@@ -241,7 +270,7 @@ describe("AgentsViewMode", () => {
 			"killSubagent",
 			self,
 			{ identity: "child-row", rootActiveSessionId: "root-active", childId: "passive-child" },
-			{ section: "inactive" },
+			{ section: "inactive", runningSubagentCount: 0, summary: summary() },
 		);
 		expect(request).toHaveBeenCalledWith({
 			type: "cancel_rlm_child",
@@ -683,6 +712,38 @@ describe("AgentsViewMode", () => {
 		try {
 			expect(invoke("renderRow", view, rows[0], 160)).toContain("recovering");
 			expect(invoke("renderRow", view, rows[1], 160)).toContain("last heard");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("renders a collapsed group's busy-subagent badge legibly instead of dimmed", () => {
+		const parent = summary({ id: "parent", activeSessionId: "parent", sessionId: "parent-session" });
+		const busyChild = summary({
+			id: "busy-child",
+			activeSessionId: "busy-child",
+			sessionId: "busy-child-session",
+			sessionFile: "/tmp/busy-child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "parent",
+			activity: "working",
+			isSessionActive: true,
+			isStreaming: true,
+		});
+		const idleChild = { ...busyChild, activity: "idle" as const, isSessionActive: false, isStreaming: false };
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+
+		try {
+			const busyRows = buildAgentsViewRows([parent, busyChild]);
+			const busySummaryRow = busyRows.find((row) => row.kind === "subagent-summary");
+			expect(busySummaryRow).toMatchObject({ section: "idle", title: "1 subagent running" });
+			Reflect.set(view, "rows", busyRows);
+			expect(invoke("renderRow", view, busySummaryRow, 160)).toContain(theme.fg("success", "▸ 1 subagent running"));
+
+			const idleRows = buildAgentsViewRows([parent, idleChild]);
+			const idleSummaryRow = idleRows.find((row) => row.kind === "subagent-summary");
+			Reflect.set(view, "rows", idleRows);
+			expect(invoke("renderRow", view, idleSummaryRow, 160)).toContain(theme.fg("dim", "▸ 1 subagent"));
 		} finally {
 			stopThemeWatcher();
 		}

@@ -9,7 +9,7 @@ export interface AgentStatusInput {
 	resident: boolean;
 	/** Admitted child run whose session has not materialized yet. */
 	queuedChild: boolean;
-	/** Actively working: streaming, running tools/bash, or running children. */
+	/** Actively working: streaming or running tools/bash. */
 	busy: boolean;
 }
 
@@ -19,6 +19,7 @@ export function classifyAgentStatus(input: AgentStatusInput): AgentRosterStatus 
 	return input.busy ? "running" : "idle";
 }
 
+// Residency/shutdown-safety busy: delegated child work counts; the section classifier deliberately does not use it.
 export function isSessionSummaryBusy(
 	summary: Pick<SessionSummary, "isSessionActive" | "hasRunningRlmChildren">,
 ): boolean {
@@ -26,13 +27,13 @@ export function isSessionSummaryBusy(
 }
 
 export function classifySessionRosterStatus(
-	summary: Pick<SessionSummary, "activeSessionId" | "activity" | "isSessionActive" | "hasRunningRlmChildren">,
+	summary: Pick<SessionSummary, "activeSessionId" | "activity" | "isSessionActive">,
 	queuedChild = false,
 ): AgentRosterStatus {
 	return classifyAgentStatus({
 		resident: !!summary.activeSessionId,
 		queuedChild,
-		busy: summary.activity === "working" || isSessionSummaryBusy(summary),
+		busy: summary.activity === "working" || summary.isSessionActive === true,
 	});
 }
 
