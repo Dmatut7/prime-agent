@@ -100,6 +100,19 @@ describe("FIX-Q4 stale deferred terminal notices stop pinning the session", () =
 		}
 	});
 
+	it("stamps the deferral when a terminal notice is re-queued through sendCustomMessage", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		// Any path that puts a terminal notice back into the next-turn queue must stamp
+		// the deferral. Without a timestamp no abandonment timer is armed and the
+		// staleness predicate never fires, so the session stays pinned forever.
+		await harness.session.sendCustomMessage(terminalNotice("child-requeue"), { deliverAs: "nextTurn" });
+
+		expect(harness.session.getPendingNextTurnMessageSnapshots()).toHaveLength(1);
+		expect(harness.session.deferredRlmTerminalNoticeSince).toBeTypeOf("number");
+	});
+
 	it("delivers through the flush attempt when the pump can run again", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

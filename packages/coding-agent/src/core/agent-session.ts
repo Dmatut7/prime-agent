@@ -1955,6 +1955,7 @@ export class AgentSession {
 			}
 		}
 		this._pendingNextTurnMessages.unshift(...restorableMessages);
+		if (this._hasDeferredRlmTerminalNotices()) this._markRlmTerminalNoticeDeferred();
 		if (actions.length > 0) this._notifySessionInputCheckpointChange();
 		return actions;
 	}
@@ -5299,6 +5300,7 @@ export class AgentSession {
 			admissionFence.release();
 			if (!result.accepted || !result.ticket) {
 				if (prefixMessages) this._pendingNextTurnMessages.unshift(...prefixMessages);
+				if (this._hasDeferredRlmTerminalNotices()) this._markRlmTerminalNoticeDeferred();
 				reportPreflight(false, false);
 				return;
 			}
@@ -5464,6 +5466,7 @@ export class AgentSession {
 				commitFence?.release();
 				if (!result.accepted || !result.ticket) {
 					if (prefixMessages) this._pendingNextTurnMessages.unshift(...prefixMessages);
+					if (this._hasDeferredRlmTerminalNotices()) this._markRlmTerminalNoticeDeferred();
 					reportPreflight(false, false);
 					return;
 				}
@@ -6454,6 +6457,7 @@ export class AgentSession {
 		const executionPolicy = firstTurn.payload.executionPolicy;
 		const restoreNextTurnContext = () => {
 			this._pendingNextTurnMessages.unshift(...nextTurnMessages);
+			if (this._hasDeferredRlmTerminalNotices()) this._markRlmTerminalNoticeDeferred();
 			nextTurnMessages = [];
 		};
 		try {
@@ -6565,6 +6569,7 @@ export class AgentSession {
 		} catch (error) {
 			const delivered = new Set(this.agent.state.messages);
 			this._pendingNextTurnMessages.unshift(...nextTurnMessages.filter((message) => !delivered.has(message)));
+			if (this._hasDeferredRlmTerminalNotices()) this._markRlmTerminalNoticeDeferred();
 			for (const action of actions) {
 				if (action.payload.kind === "turn") {
 					action.payload.records = action.payload.records.filter((record) => record.role !== "next_turn");
@@ -6712,6 +6717,7 @@ export class AgentSession {
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
 			this._pendingNextTurnMessages.push(appMessage);
+			if (this._hasDeferredRlmTerminalNotices()) this._markRlmTerminalNoticeDeferred();
 		} else if (this.isStreaming) {
 			const normalized = normalizeMessageContent(message.content);
 			if (options?.deliverAs === "followUp") {
