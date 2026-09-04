@@ -127,7 +127,12 @@ describe("agent loop stream stall detection", () => {
 		expect(assistant?.stopReason).toBe("error");
 		expect(assistant?.errorMessage).toContain("Stream stalled");
 		expect(events.some((event) => event.type === "agent_end")).toBe(true);
-		expect(events.some((event) => event.type === "message_end")).toBe(true);
+		// Exactly one assistant message_end: the fork's stall path used to emit a
+		// duplicate for the same turn, which .some() could not see. The prompt's own
+		// message_end is separate, so filter by role rather than counting them all.
+		expect(events.filter((event) => event.type === "message_end" && event.message.role === "assistant")).toHaveLength(
+			1,
+		);
 	});
 
 	it("resets the stall deadline when events keep arriving", async () => {
