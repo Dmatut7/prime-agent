@@ -3,3 +3,5 @@
 - Kept the local "(no activity Xm)" quiet-duration label on each agents-view row while adopting the upstream heartbeat-aware status label.
 - Kept the local incremental session-file scan and restored upstream's per-entry usage accumulators into its resume state, so token and cost totals no longer drop for sessions that are scanned incrementally after going idle.
 - Removed the agents-view promotion of ancestor rows to running when a descendant only has an armed heartbeat, matching upstream: an armed heartbeat between firings is residency rather than work, so ancestor rows stay idle and no longer inherit the descendant's quiet-duration label.
+- Changed the daemon wire schema revision to 27 (the union of the fork and upstream 24-26 lineages); a daemon built before this change is now detected as stale and is restarted on the next client connection.
+- Fixed ephemeral (non-persisted) RLM sessions writing a `semantic-edges.jsonl` ledger into their session dir and registering that ledger for trace upload.

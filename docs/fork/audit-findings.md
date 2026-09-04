@@ -422,7 +422,7 @@ deps 线一条都没动的实证：`actions/checkout` 仍 pin `v7.0.0`（#1576 �
   修法：假件补 1 行 `streamReconstructor: { seed: vi.fn(), clear: vi.fn(), hasPartial: vi.fn(() => false) }`（现 `:196`）。**不走 src 侧加容错**（那是 fail-open，会吞真故障）。
   验证：该文件 `✓ 8 tests`；15 个官方新增测试文件整体 `15 files / 153 tests` 全绿。connection-seam 类全仓**只有这一处**，已闭合。
 
-- [ ] **F75 `test/extensions-timeout.test.ts:102` 既有红**（测试面 / 本地独有，P2 级；**不属本轮**）
+- [x] **F75 `test/extensions-timeout.test.ts:128`（原 `:102`，被本批 B1 的钉子挤下去 26 行；recheck-k3 重跑实测失败在 `:128:25`） 既有红**（测试面 / 本地独有，P2 级；**不属本轮**）
   `expect(result.errors).toHaveLength(1)` 实得 2（`AssertionError: expected [ { …(2) }, { …(2) } ] to have a length of 1 but got 2`）。
   **merge 之前就红**：在独立 scratch worktree `/tmp/r3-base` @ `0c504e475` 上逐字同样失败（同文件同行同断言同消息），跑完 `git worktree remove --force`（残留 0、本树 status 0 行、主仓哨兵 ` M`=4）。⇒ 进已知红清单第 6 项（父代理 2026-09-04 裁定新增），**不是本轮的账，但需有人认领**。
   性质：本地独有的 extension factory 超时测试（`320b720f0` “time out hung extension handlers so sessions stay live” 家族），其期望与 `src/core/extensions/timeout.ts` 现语义已不符 —— `loadExtensions([hangPath, okPath], tempDir, undefined, 40)` 现在**两条都进 errors**（超时 40ms 太紧，正常那条也超时），而测试仍期望「只有 hang 那条进 errors、ok 那条正常加载」（`:103-105` 还断言 `result.errors[0].error` 含 `"timed out"`、`result.extensions[0].path === okPath`）。
@@ -469,13 +469,13 @@ R3 合并后的现行落点（行号已漂，按符号给）：服务端强制 =
 
 1. `interactive-mode.ts` 未深审（本轮只核了与 #1896 相关的 `message_start`/`addChild`/`enforceChatComponentCap` 一条链）。
 2. 三个核查脚本是新写的，自身未经验证（本轮靠正控/负控兜：`/tmp/r3_posctrl.txt` 证明冲突标记门能数到三类标记）。
-3. `test/extensions-timeout.test.ts:102` = F75，既有红未修。
+3. `test/extensions-timeout.test.ts:128`（原 `:102`，被本批 B1 的钉子挤下去 26 行；recheck-k3 重跑实测失败在 `:128:25`） = F75，既有红未修。
 4. Windows 命名管道 ACL 未真机验证 = F4 备注 + F76。
 5. F15/F17 窄时序窗（W9 留档，k3 实证可达性极低）、F27e 次要内存项、k3 终审 7 条低危仍未动。
 6. 门 2 的「54 个本地独有测试文件」是**文件级**口径，本轮已证它抓不到两类红（见 §四.4）。收口那次跑了全量（320 collected 自洽），但**下一轮若只跑文件级口径就会漏**。
 
 7. **【R3 全面审查新增 · 已知缺口记账（下一轮输入）】**
-   - **M3(k)**：kernel stderr 日志**无 per-spawn 写预算**（单 spawn 内磁盘无界，rotation 只在下次 open 触发）+ `.old` 长存。**A 批明确不半迁移**（不加预算：fd-direct 下只能 `fstat`、语义与上游完全不同 = 第三种没人审的设计）⇒ 归**下一轮任务 B**（按 #1947 head `56982582b` 重取时一并解决）。
+   - **M3(k)**：kernel stderr 日志**无 per-spawn 写预算**（单 spawn 内磁盘无界，rotation 只在下次 open 触发）+ `.old` 长存。**同条还含 `:399` 的 `finally { if (stderrLogFd !== undefined) closeSync(stderrLogFd); }` 未 guard**（close 失败会让 kernel 起不来并掩盖 spawn 的原始错误；官方对这段有专门测试）。**A 批明确不半迁移**（不加预算：fd-direct 下只能 `fstat`、语义与上游完全不同 = 第三种没人审的设计）⇒ 归**下一轮任务 B**（按 #1947 head `56982582b` 重取时一并解决）。
    - **B1 放大器**：`daemon-mode.ts:637-642` 把**任何** `unhandledRejection` 变成 `process.exit(1)`（杀 daemon + 所有会话）。B1 只修了 `timeout.ts` 这一个源头，**放大器策略本身 R3 不改**（`:630-632` 注释表明它是有意的 fail-fast：先抓栈再让进程下去）。**daemon 该 `exit(1)` 还是 log-and-isolate 是可靠性设计决策**，留老板 / 下一轮。
    - **H2 调用方排序无自动 red-first 钉子**：`interactive-mode.ts` 的 `handleShareCommand` 是私有方法，且被 `spawnSync("gh", ["auth","status"])` 与 TUI 挡住 ⇒ 无法单测「预检必须在导出之后」这条排序。现有覆盖 = **缺口钉子**（`share-session.test.ts`：密钥只在导出附加部分时，扫 proxy = `[]`、扫导出 = `["API key (sk-)"]`，证明缺口为真）+ **制品层核**（预检在 `exportToHtml` 之后、读 `readPrivateFile(tmpFile)`、取消分支清临时目录）。**若要可测需把 `handleShareCommand` 重构出可注入的边界 = 超出本轮范围**；按封顶规矩这条**不算 red 验证过**。
    - **M5(s) digest 口径扩展 = 下一轮**：`DAEMON_SCHEMA_ID` 的摘要输入不覆盖 capability 集合与 `DAEMON_COMMAND_COMPATIBILITY`/`DAEMON_COMMAND_PLANE`，而 R3 的改动语义一半正在那里。**R3 不做**：重算 ID 会让所有在跑 daemon 立刻判 stale（`daemon-launch.ts:74-80` 的 `isCurrentDaemonHello` 比 `DAEMON_SCHEMA_ID`；`:344-347` 忙会话直接 `refusing to replace stale daemon`），属 schema-script 方法论改动。**下一轮做时的三条纪律**：M5+M6 必须同一提交；实跑验证必须在**隔离 agent dir** 下（否则 `:346` 会被自己的会话触发）；ID 用 `/tmp/r3_schema_digest.mjs` 重算、**绝不手写**。R3 本轮只改了 `daemon-protocol.ts` 的**注释**（27 已消费 → 下一个是 28；24 不是"first unambiguous revision"），**未动 `DAEMON_PROTOCOL_VERSION`/`DAEMON_SCHEMA_REVISION`/`DAEMON_SCHEMA_ID`**（提交后核过 diff 非注释行 = 0）。
