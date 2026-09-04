@@ -544,7 +544,9 @@ async function streamAssistantResponse(
 	const discarded = { cost: { ...EMPTY_USAGE.cost }, output: 0, attempts: 0 };
 	for (let attempt = 1; ; attempt++) {
 		const message = await streamAssistantResponseAttempt(context, config, signal, emit, streamFn);
-		// Overflow turns must pass through untouched so compaction recovery can see them.
+		// Overflow turns are never discarded, so compaction recovery can still see them.
+		// "Untouched" covers the retry decision and the token fields; when earlier attempts
+		// were discarded, their cost is still carried onto this message below.
 		const overflow = isContextOverflow(message, config.model.contextWindow);
 		if (isEmptyAssistantTurn(message) && !overflow) {
 			if (attempt < MAX_EMPTY_TURN_ATTEMPTS) {
