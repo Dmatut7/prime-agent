@@ -989,6 +989,13 @@ const SESSION_PERSIST_FAILURE_REPORT_MAX_MS = 300_000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
 /** How long a deferred RLM terminal notice may wait for delivery before it is abandoned. */
 const RLM_TERMINAL_NOTICE_ABANDON_AFTER_MS = 5 * 60_000;
+/**
+ * How long a writability probe stays valid. Writability rarely flips mid-session,
+ * and refine() re-checks it before writing, so a stale "allowed" cannot turn into
+ * a silent write failure - it only avoids re-reading the whole harness state on
+ * every turn boundary.
+ */
+const AUTO_REFINE_WRITABLE_PROBE_TTL_MS = 60_000;
 
 function noopRlmChildAbort(): void {}
 function noopRlmChildEventUnsubscribe(): void {}
@@ -1134,6 +1141,7 @@ export class AgentSession {
 	private readonly _durableRlmTerminalNoticeActionIds = new Set<string>();
 	private _rlmTerminalNoticeDeferredSince: number | undefined;
 	private _rlmTerminalNoticeAbandonment: { abandonedAt: number; count: number } | undefined;
+	private _rlmTerminalNoticeAbandonTimer: ReturnType<typeof setTimeout> | undefined;
 	private _sessionActionCommitTail: Promise<void> = Promise.resolve();
 	private _sessionActionCommitOwner: symbol | undefined;
 	private _pendingSessionActionFenceWaiters = 0;
@@ -1304,6 +1312,7 @@ export class AgentSession {
 	private _pendingAutoRefineReview: { reason: AutoRefineReason; review: AutoRefineReview } | undefined;
 	private _autoRefineBranchVersion = 0;
 	private _autoRefineReviewAbort?: AbortController;
+	private _autoRefineWritableProbe?: { at: number; allowed: boolean };
 	private _refineAbortController?: AbortController;
 	private readonly _autoRefineReviewer?: AutoRefineReviewer;
 	private readonly _serializedRefine: boolean;
@@ -4436,6 +4445,7 @@ export class AgentSession {
 		}
 		this._disposed = true;
 		this._stallWatchdog?.dispose();
+		this._clearRlmTerminalNoticeAbandonTimer();
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._sessionActionCommitDisposeAbortController.abort();
@@ -4444,6 +4454,7 @@ export class AgentSession {
 			// resolution cannot write harness state or re-subscribe handlers.
 			this._autoRefineReviewAbort?.abort();
 			this._refineAbortController?.abort();
+			this._autoRefineWritableProbe = undefined;
 			for (const timer of this._scheduledAutoRefineTimers) {
 				clearTimeout(timer);
 			}
@@ -5043,14 +5054,14 @@ export class AgentSession {
 	 */
 	maybeAbandonStaleDeferredRlmTerminalNotices(now = Date.now()): void {
 		if (!this._hasDeferredRlmTerminalNotices()) {
-			this._rlmTerminalNoticeDeferredSince = undefined;
+			this._clearRlmTerminalNoticeDeferred();
 			return;
 		}
 		const deferredSince = this._rlmTerminalNoticeDeferredSince;
 		if (deferredSince === undefined || now - deferredSince < RLM_TERMINAL_NOTICE_ABANDON_AFTER_MS) return;
 		this._flushDeferredRlmTerminalNotices();
 		if (!this._hasDeferredRlmTerminalNotices()) {
-			this._rlmTerminalNoticeDeferredSince = undefined;
+			this._clearRlmTerminalNoticeDeferred();
 			return;
 		}
 		let count = 0;
@@ -5059,15 +5070,67 @@ export class AgentSession {
 			count++;
 			return false;
 		});
-		this._rlmTerminalNoticeDeferredSince = undefined;
+		this._clearRlmTerminalNoticeDeferred();
 		this._rlmTerminalNoticeAbandonment = { abandonedAt: now, count };
 	}
 
-	/** Deferred terminal notices still inside their delivery window. */
+	/**
+	 * Deferred terminal notices still inside their delivery window.
+	 *
+	 * Pure on purpose: `isSessionActive` is read by session-list and roster polling,
+	 * and a read path must not flush notices, admit a turn action, or discard a
+	 * child's terminal report. Equivalent to the old flush-then-recheck shape, which
+	 * always ended up false once the threshold had passed. The abandonment itself is
+	 * driven by its own timer (see _armRlmTerminalNoticeAbandonTimer) and by the
+	 * quiescence race, not by whoever happens to read activity.
+	 */
 	private _hasActionableDeferredRlmTerminalNotices(): boolean {
-		if (!this._hasDeferredRlmTerminalNotices()) return false;
-		this.maybeAbandonStaleDeferredRlmTerminalNotices();
-		return this._hasDeferredRlmTerminalNotices();
+		return this._hasDeferredRlmTerminalNotices() && !this._isDeferredRlmTerminalNoticeStale();
+	}
+
+	/** Whether the deferred notices have waited past the abandonment threshold. */
+	private _isDeferredRlmTerminalNoticeStale(now = Date.now()): boolean {
+		const deferredSince = this._rlmTerminalNoticeDeferredSince;
+		return deferredSince !== undefined && now - deferredSince >= RLM_TERMINAL_NOTICE_ABANDON_AFTER_MS;
+	}
+
+	/** Record that terminal notices are deferred, and arm the abandonment driver. */
+	private _markRlmTerminalNoticeDeferred(): void {
+		this._rlmTerminalNoticeDeferredSince ??= Date.now();
+		this._armRlmTerminalNoticeAbandonTimer();
+	}
+
+	private _clearRlmTerminalNoticeDeferred(): void {
+		this._rlmTerminalNoticeDeferredSince = undefined;
+		this._clearRlmTerminalNoticeAbandonTimer();
+	}
+
+	/**
+	 * Abandonment used to happen only when something read `isSessionActive`, so a
+	 * session nobody polled kept its stale notices - and stayed resident - forever.
+	 * The timer is unref'd: it must never by itself hold the process open.
+	 */
+	private _armRlmTerminalNoticeAbandonTimer(): void {
+		if (this._rlmTerminalNoticeAbandonTimer !== undefined) return;
+		const deferredSince = this._rlmTerminalNoticeDeferredSince;
+		const elapsed = deferredSince === undefined ? 0 : Date.now() - deferredSince;
+		const waitMs = Math.max(0, RLM_TERMINAL_NOTICE_ABANDON_AFTER_MS - elapsed);
+		const timer = setTimeout(() => {
+			this._rlmTerminalNoticeAbandonTimer = undefined;
+			this.maybeAbandonStaleDeferredRlmTerminalNotices();
+			// Still deferred and not yet abandoned (the flush could not deliver and the
+			// threshold was not reached): keep driving instead of going quiet.
+			if (this._rlmTerminalNoticeDeferredSince !== undefined) this._armRlmTerminalNoticeAbandonTimer();
+		}, waitMs);
+		timer.unref?.();
+		this._rlmTerminalNoticeAbandonTimer = timer;
+	}
+
+	private _clearRlmTerminalNoticeAbandonTimer(): void {
+		if (this._rlmTerminalNoticeAbandonTimer !== undefined) {
+			clearTimeout(this._rlmTerminalNoticeAbandonTimer);
+			this._rlmTerminalNoticeAbandonTimer = undefined;
+		}
 	}
 
 	private _enqueueRlmTerminalNoticeAction(message: CustomMessage): void {
@@ -5112,7 +5175,7 @@ export class AgentSession {
 			this._pendingNextTurnMessages.splice(index, 1);
 		}
 		if (!this._hasDeferredRlmTerminalNotices()) {
-			this._rlmTerminalNoticeDeferredSince = undefined;
+			this._clearRlmTerminalNoticeDeferred();
 		}
 		this._scheduleSessionInputPump();
 	}
@@ -5154,7 +5217,7 @@ export class AgentSession {
 		try {
 			if (this._disposed || this._disposing) return;
 			this._pendingNextTurnMessages.push(cloneCustomMessage(message));
-			this._rlmTerminalNoticeDeferredSince ??= Date.now();
+			this._markRlmTerminalNoticeDeferred();
 			this._flushDeferredRlmTerminalNotices();
 		} finally {
 			fence.release();
@@ -5171,7 +5234,7 @@ export class AgentSession {
 			const message = primaryDeliveryRecord(action).message;
 			if (message.role === "custom") this._pendingNextTurnMessages.push(cloneCustomMessage(message));
 		}
-		if (this._hasDeferredRlmTerminalNotices()) this._rlmTerminalNoticeDeferredSince ??= Date.now();
+		if (this._hasDeferredRlmTerminalNotices()) this._markRlmTerminalNoticeDeferred();
 		const ids = new Set(actions.map((action) => action.id));
 		this._cancelSessionActions(
 			(action) => ids.has(action.id),
@@ -7398,7 +7461,7 @@ export class AgentSession {
 	restorePendingNextTurnMessages(messages: readonly CustomMessage[]): void {
 		this._pendingNextTurnMessages.push(...messages.map((message) => cloneCustomMessage(message)));
 		if (messages.some((message) => this._isRlmTerminalNotice(message))) {
-			this._rlmTerminalNoticeDeferredSince ??= Date.now();
+			this._markRlmTerminalNoticeDeferred();
 		}
 		this._flushDeferredRlmTerminalNotices();
 	}
@@ -8171,14 +8234,26 @@ export class AgentSession {
 	}
 
 	private _autoRefineAllowedForSession(): boolean {
-		if (!isPersistentHarnessStorageSupported() || this._rlmDepth !== 0 || this._localHarnessStateDir() === undefined)
-			return false;
+		if (!isPersistentHarnessStorageSupported() || this._rlmDepth !== 0) return false;
+		// One call, one local: this used to call _localHarnessStateDir() twice, the
+		// second time behind a non-null assertion, and each call can mkdir the session
+		// artifact directory.
+		const dir = this._localHarnessStateDir();
+		if (dir === undefined) return false;
+		const probe = this._autoRefineWritableProbe;
+		if (probe !== undefined && Date.now() - probe.at < AUTO_REFINE_WRITABLE_PROBE_TTL_MS) return probe.allowed;
+		// This runs on the event queue, and loading the harness state walks every path
+		// segment and parses the whole local store, so it is probed at most once a
+		// minute rather than once per turn boundary.
+		let allowed = false;
 		try {
-			assertHarnessStateWritable(loadHarnessState(this._localHarnessStateDir()!, "local"));
-			return true;
+			assertHarnessStateWritable(loadHarnessState(dir, "local"));
+			allowed = true;
 		} catch {
-			return false;
+			allowed = false;
 		}
+		this._autoRefineWritableProbe = { at: Date.now(), allowed };
+		return allowed;
 	}
 
 	private _settlePostCompactionContinue(error?: Error): void {
@@ -8211,6 +8286,8 @@ export class AgentSession {
 		this._autoRefineReviewAbort?.abort();
 		this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
 		this._assistantTurnsSinceAutoRefine = 0;
+		// The branch changed, so re-probe writability instead of trusting the cache.
+		this._autoRefineWritableProbe = undefined;
 		// Increment branch version BEFORE aborting/awaiting the serialized plan.
 		// This invalidates the plan's branchVersion check at the boundary
 		// so even if the plan completes, the boundary will reject it

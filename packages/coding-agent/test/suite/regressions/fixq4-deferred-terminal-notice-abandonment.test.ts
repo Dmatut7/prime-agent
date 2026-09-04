@@ -7,7 +7,7 @@
  * evictable, with a record of the attempt.
  */
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createRlmChildTerminalNoticeMessage } from "../../../src/core/messages.js";
 import { createHarness, type Harness } from "../harness.js";
 
@@ -55,6 +55,49 @@ describe("FIX-Q4 stale deferred terminal notices stop pinning the session", () =
 		expect(harness.session.rlmTerminalNoticeAbandonment).toMatchObject({ count: 1 });
 		expect(harness.session.getPendingNextTurnMessageSnapshots()).toEqual([]);
 		expect(harness.session.isSessionActive).toBe(false);
+	});
+
+	it("does not abandon or flush when isSessionActive is merely read", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.requestAbort();
+		harness.session.restorePendingNextTurnMessages([terminalNotice("child-pure-getter")]);
+
+		// Backdate past the threshold. Reading activity is a poll path (session list,
+		// roster, subagent snapshots), so it must not discard a child's report or
+		// admit a turn action just because somebody asked whether the session is busy.
+		const internals = harness.session as unknown as { _rlmTerminalNoticeDeferredSince: number | undefined };
+		internals._rlmTerminalNoticeDeferredSince = Date.now() - STALE_MS;
+
+		// Stale notices stop pinning the session, which is the same answer the old
+		// flush-then-recheck shape gave - but now without the side effects.
+		for (let i = 0; i < 5; i++) expect(harness.session.isSessionActive).toBe(false);
+
+		expect(harness.session.rlmTerminalNoticeAbandonment).toBeUndefined();
+		expect(harness.session.getPendingNextTurnMessageSnapshots()).toHaveLength(1);
+	});
+
+	it("abandons on its own timer without anything reading isSessionActive", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.requestAbort();
+		expect(harness.session.isQueuedWorkSuspended).toBe(true);
+
+		vi.useFakeTimers();
+		try {
+			harness.session.restorePendingNextTurnMessages([terminalNotice("child-own-driver")]);
+			expect(harness.session.deferredRlmTerminalNoticeSince).toBeTypeOf("number");
+			expect(harness.session.rlmTerminalNoticeAbandonment).toBeUndefined();
+
+			// Nobody reads isSessionActive here. The threshold must still fire, because
+			// a session that nobody polls used to keep its stale notices forever.
+			await vi.advanceTimersByTimeAsync(STALE_MS + 1000);
+
+			expect(harness.session.rlmTerminalNoticeAbandonment).toMatchObject({ count: 1 });
+			expect(harness.session.getPendingNextTurnMessageSnapshots()).toEqual([]);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("delivers through the flush attempt when the pump can run again", async () => {
