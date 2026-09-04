@@ -163,7 +163,15 @@ describe("FIX-Q4 stale deferred terminal notices stop pinning the session", () =
 	// Source scan, in-repo precedent: daemon-protocol.test.ts reads its own source to pin the
 	// schema digest. This is what makes "every injection point routes through the mutators"
 	// fail-able instead of a manual grep: routing one point around the mutators reddens it, and
-	// so does any future injection point that writes the array directly.
+	// so does any future injection point that writes the array directly. Seven of the nine
+	// injection points have no nail of their own, so this is their only guard.
+	//
+	// Scope limit, so the next reader does not assume full coverage: the slice runs from the
+	// kernel's doc comment to the mark helper's, which puts both directional shells inside the
+	// block. A shell that bypassed the kernel and wrote the array directly would still be
+	// "inside", so inside.length stays satisfied and this test would not notice. That property -
+	// the shells must delegate to the kernel - is held by the mutator-level pair below and by the
+	// temporal chain, not by this scan.
 	it("routes every next-turn queue injection through the mutators", () => {
 		const source = readFileSync(resolve(__dirname, "../../../src/core/agent-session.ts"), "utf8");
 		const ANCHOR_START = "The only way messages enter the next-turn queue";
