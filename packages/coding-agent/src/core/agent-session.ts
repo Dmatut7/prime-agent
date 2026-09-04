@@ -1212,6 +1212,8 @@ export class AgentSession {
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
+	/** Open extension dialogs. A turn blocked on one is waiting for the user, not stalled. */
+	private _pendingUiDialogs = 0;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
 	private _extensionShutdownHandler?: ShutdownHandler;
 	private _extensionErrorListener?: ExtensionErrorListener;
@@ -3695,7 +3697,8 @@ export class AgentSession {
 				this._disposing ||
 				this.isCompacting ||
 				this._branchSummaryOperation !== undefined ||
-				this._autoRefineInProgress,
+				this._autoRefineInProgress ||
+				this._pendingUiDialogs > 0,
 			onStage: (info) => this._handleStallWatchdogStage(info),
 		};
 		return new StallWatchdog(options);
@@ -9407,9 +9410,46 @@ export class AgentSession {
 		extensions.runtime.getExecEnv = provider;
 	}
 
+	/**
+	 * Count open extension dialogs so the stall watchdog can treat "waiting for the
+	 * user" as a pause. Both hosts hand their UI context over through bindExtensions,
+	 * so wrapping it here covers the interactive dialogs and the daemon-forwarded ones
+	 * (which the daemon tracks in its own extensionUiRequests map) without either host
+	 * having to report back. `notify` is not a dialog and stays untouched.
+	 */
+	private _withDialogTracking(uiContext: ExtensionUIContext): ExtensionUIContext {
+		// Typed as the original signature so a generic member (custom<T>) keeps its type
+		// parameters; Reflect.apply preserves the host's `this` binding, and the counter
+		// always decrements even when the dialog rejects.
+		const counted = <F extends (...args: never[]) => Promise<unknown>>(dialog: F): F => {
+			const wrapped = (...args: Parameters<F>): Promise<unknown> => {
+				this._pendingUiDialogs += 1;
+				return Promise.resolve()
+					.then(() => Reflect.apply(dialog, uiContext, args) as Promise<unknown>)
+					.finally(() => {
+						this._pendingUiDialogs -= 1;
+					});
+			};
+			return wrapped as F;
+		};
+		// Every member that returns a promise and settles only on user input has to be
+		// counted; missing one leaves the turn abortable while a dialog is open. That is
+		// select/confirm/input, plus editor (multi-line editor) and custom (a component
+		// that takes keyboard focus and settles through its done callback). notify is
+		// fire-and-forget and every other member is synchronous, so they are left alone.
+		return {
+			...uiContext,
+			select: counted(uiContext.select),
+			confirm: counted(uiContext.confirm),
+			input: counted(uiContext.input),
+			editor: counted(uiContext.editor),
+			custom: counted(uiContext.custom),
+		};
+	}
+
 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
 		if (bindings.uiContext !== undefined) {
-			this._extensionUIContext = bindings.uiContext;
+			this._extensionUIContext = this._withDialogTracking(bindings.uiContext);
 		}
 		if (bindings.commandContextActions !== undefined) {
 			this._extensionCommandContextActions = bindings.commandContextActions;
