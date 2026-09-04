@@ -9272,12 +9272,32 @@ export class InteractiveMode {
 			return;
 		}
 
-		// Show cancellable loader, replacing the editor
-		const loader = new BorderedLoader(this.ui, theme, "Creating gist...");
-		this.editorContainer.clear();
-		this.editorContainer.addChild(loader);
-		this.ui.setFocus(loader);
-		this.ui.requestRender();
+		// Show cancellable loader, replacing the editor. Constructing and mounting it can
+		// throw, and restoreEditor - the method's other cleanup path - is not defined yet,
+		// so a throw here would leave the 0700 directory and the 0600 export on disk.
+		let loader: BorderedLoader;
+		try {
+			loader = new BorderedLoader(this.ui, theme, "Creating gist...");
+			this.editorContainer.clear();
+			this.editorContainer.addChild(loader);
+			this.ui.setFocus(loader);
+			this.ui.requestRender();
+		} catch (error: unknown) {
+			fs.rmSync(temp.directory, { recursive: true, force: true });
+			// clear() may already have run, so put the editor back; a failure while doing
+			// that must not mask the original error.
+			try {
+				this.editorContainer.clear();
+				this.editorContainer.addChild(this.editor);
+				this.ui.setFocus(this.editor);
+			} catch {
+				// Ignore restore errors
+			}
+			this.showError(
+				`Failed to start the share upload: ${error instanceof Error ? error.message : "Unknown error"}`,
+			);
+			return;
+		}
 
 		const restoreEditor = () => {
 			loader.dispose();
