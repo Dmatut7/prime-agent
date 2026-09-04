@@ -182,7 +182,10 @@ describe("FIX-Q4 stale deferred terminal notices stop pinning the session", () =
 		expect(end).toBeGreaterThan(start);
 		const mutatorBlock = source.slice(start, end);
 
-		const injection = /_pendingNextTurnMessages\.(push|unshift)\(/;
+		// splice(0, 0, ...) inserts too, so it is in the scan. A concat-shaped insert does not
+		// match here because .concat is called on the other operand; that whole family is covered
+		// by the reassignment rule below instead. A bare index assignment is not worth chasing.
+		const injection = /_pendingNextTurnMessages\.(push|unshift|splice)\(/;
 		const inside = mutatorBlock.split("\n").filter((line) => injection.test(line));
 		const outside = source
 			.replace(mutatorBlock, "")
@@ -193,9 +196,28 @@ describe("FIX-Q4 stale deferred terminal notices stop pinning the session", () =
 		// The kernel inserts with the spread parameter; nothing else may insert at all except the
 		// goal-context push, which never carries a terminal notice.
 		expect(inside.length).toBeGreaterThanOrEqual(1);
+		// Two legitimate direct uses, both listed verbatim so any third one reddens this test:
+		// the goal-context push, which never carries a terminal notice, and the flush loop's
+		// removal of a notice it has just delivered as a real action.
 		expect(outside).toEqual([
 			'this._pendingNextTurnMessages.push(createGoalContextMessage(this._goalState, "continuation"));',
+			"this._pendingNextTurnMessages.splice(index, 1);",
 		]);
+
+		// Reassigning the field can also insert (restorable.concat(pending), for example), and no
+		// method-call scan catches that shape. The rule is directional: a reassignment may only
+		// clear or shrink the queue, never grow it, so the RHS has to be [] or a filter of itself.
+		const reassign = /_pendingNextTurnMessages\s*=[^=]/;
+		const grown = source
+			.split("\n")
+			.map((line) => line.trim())
+			.filter((line) => reassign.test(line))
+			.filter(
+				(line) =>
+					!line.startsWith("this._pendingNextTurnMessages = [];") &&
+					!line.startsWith("this._pendingNextTurnMessages = this._pendingNextTurnMessages.filter("),
+			);
+		expect(grown).toEqual([]);
 	});
 
 	// The temporal chain, driven through the unshift route: defer and arm, a turn drains the
