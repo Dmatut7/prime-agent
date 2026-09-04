@@ -9905,6 +9905,13 @@ export class AgentSession {
 				commandPrefix: this.settingsManager.getShellCommandPrefix(),
 				shellPath: this.settingsManager.getShellPath(),
 				sessionId: this.sessionId,
+				// Handler registration is a one-time snapshot taken here, while skill
+				// visibility (_modelVisibleSkills) is recomputed on every system-prompt
+				// rebuild. The writable-probe TTL therefore bounds a known
+				// eventual-consistency window to at most one TTL: the model can briefly see
+				// the refine skill before its handler is registered, or the reverse. This is
+				// fail-closed - the hard preflight before an actual refine still catches a
+				// genuinely unwritable store.
 				hostHandlers: this._createKernelHostHandlers(),
 				pythonSkills,
 				snapshotDir: this._ipythonKernelSnapshotDir,
