@@ -8307,7 +8307,11 @@ export class AgentSession {
 		this._autoRefineReviewAbort?.abort();
 		this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
 		this._assistantTurnsSinceAutoRefine = 0;
-		// The branch changed, so re-probe writability instead of trusting the cache.
+		// Drop the cached verdict so the next refine re-probes. The branch change does
+		// not move the session directory, so this is not about a new target: the probe
+		// is only advisory. What actually stops a write to an unwritable harness state
+		// is saveHarnessState re-asserting against the real target directory and
+		// letting the syscall error propagate.
 		this._autoRefineWritableProbe = undefined;
 		// Increment branch version BEFORE aborting/awaiting the serialized plan.
 		// This invalidates the plan's branchVersion check at the boundary

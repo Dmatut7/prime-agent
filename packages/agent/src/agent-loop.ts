@@ -530,10 +530,12 @@ async function streamAssistantResponse(
 	// A discarded attempt emits no message_end, so its spend would vanish from any
 	// accounting that reads usage off the transcript. Carry cost and output tokens
 	// forward onto the terminal message. Input tokens, cacheRead, cacheWrite and
-	// totalTokens are deliberately left at the final attempt's values:
-	// isContextOverflow compares input + cacheRead against the context window, so
-	// inflating them would turn an ordinary empty response into a false overflow and
-	// route it to compaction instead of a retry.
+	// totalTokens are deliberately left at the final attempt's values: they describe
+	// the context that attempt actually occupied, and summing attempts would report a
+	// context size no single request ever had. Note this is a data-semantics reason,
+	// not an overflow-misfire one - the terminal message is an error turn, and
+	// isContextOverflow's token branch only runs for stop-length turns, so inflating
+	// the fields here could not have reached the compaction path anyway.
 	const discarded = { cost: { ...EMPTY_USAGE.cost }, output: 0 };
 	for (let attempt = 1; ; attempt++) {
 		const message = await streamAssistantResponseAttempt(context, config, signal, emit, streamFn);
