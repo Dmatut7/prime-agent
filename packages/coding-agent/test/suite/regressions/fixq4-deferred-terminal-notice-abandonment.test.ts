@@ -6,12 +6,23 @@
  * delivery via the normal flush and otherwise abandons the notices, becoming
  * evictable, with a record of the attempt.
  */
+
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CustomMessage } from "../../../src/core/messages.js";
 import { createRlmChildTerminalNoticeMessage } from "../../../src/core/messages.js";
 import { createHarness, type Harness } from "../harness.js";
 
 const STALE_MS = 6 * 60_000;
+
+type SessionWithNextTurnInternals = {
+	_takePendingNextTurnMessages(): CustomMessage[];
+	_pushPendingNextTurnMessages(...messages: CustomMessage[]): void;
+	_unshiftPendingNextTurnMessages(...messages: CustomMessage[]): void;
+	_enqueuePendingNextTurnMessages(messages: readonly CustomMessage[], atFront: boolean): void;
+};
 
 function terminalNotice(id: string) {
 	return createRlmChildTerminalNoticeMessage({
@@ -113,35 +124,128 @@ describe("FIX-Q4 stale deferred terminal notices stop pinning the session", () =
 		expect(harness.session.deferredRlmTerminalNoticeSince).toBeTypeOf("number");
 	});
 
-	it("stamps the deferral when a terminal notice arrives through the unshift route", async () => {
+	it.each([
+		["_pushPendingNextTurnMessages", "push"],
+		["_unshiftPendingNextTurnMessages", "unshift"],
+	] as const)("%s stamps the deferral for a terminal notice (%s route)", async (member, _route) => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		const internals = harness.session as unknown as {
-			_unshiftPendingNextTurnMessages(...messages: unknown[]): void;
-			_enqueuePendingNextTurnMessages(messages: readonly unknown[], atFront: boolean): void;
-			deferredRlmTerminalNoticeSince: number | undefined;
-		};
+		const internals = harness.session as unknown as SessionWithNextTurnInternals;
 
-		// The re-injection routes (cancel, prefix restore, commit rollback) all unshift.
-		// The deferral guard lives in the shared core, so this route has to stamp too:
-		// a queued notice with no timestamp arms no timer and never goes stale.
-		expect(internals.deferredRlmTerminalNoticeSince).toBeUndefined();
-		internals._unshiftPendingNextTurnMessages(terminalNotice("child-unshift-route"));
-		expect(internals.deferredRlmTerminalNoticeSince).toBeTypeOf("number");
+		expect(harness.session.deferredRlmTerminalNoticeSince).toBeUndefined();
+		internals[member](terminalNotice(`child-${member}`));
+
 		expect(harness.session.getPendingNextTurnMessageSnapshots()).toHaveLength(1);
+		expect(harness.session.deferredRlmTerminalNoticeSince).toBeTypeOf("number");
+	});
 
-		// A non-notice message must not stamp anything.
-		const harness2 = await createHarness();
-		harnesses.push(harness2);
-		const internals2 = harness2.session as unknown as {
-			_enqueuePendingNextTurnMessages(messages: readonly unknown[], atFront: boolean): void;
-			deferredRlmTerminalNoticeSince: number | undefined;
-		};
-		internals2._enqueuePendingNextTurnMessages(
-			[{ role: "custom", customType: "not-a-terminal-notice", content: "x", timestamp: Date.now() }],
+	it("does not stamp the deferral for a message that is not a terminal notice", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const internals = harness.session as unknown as SessionWithNextTurnInternals;
+
+		internals._enqueuePendingNextTurnMessages(
+			[
+				{
+					role: "custom",
+					customType: "not-a-terminal-notice",
+					content: "x",
+					timestamp: Date.now(),
+				} as unknown as CustomMessage,
+			],
 			true,
 		);
-		expect(internals2.deferredRlmTerminalNoticeSince).toBeUndefined();
+
+		expect(harness.session.getPendingNextTurnMessageSnapshots()).toHaveLength(1);
+		expect(harness.session.deferredRlmTerminalNoticeSince).toBeUndefined();
+	});
+
+	// Source scan, in-repo precedent: daemon-protocol.test.ts reads its own source to pin the
+	// schema digest. This is what makes "every injection point routes through the mutators"
+	// fail-able instead of a manual grep: routing one point around the mutators reddens it, and
+	// so does any future injection point that writes the array directly.
+	it("routes every next-turn queue injection through the mutators", () => {
+		const source = readFileSync(resolve(__dirname, "../../../src/core/agent-session.ts"), "utf8");
+		const ANCHOR_START = "The only way messages enter the next-turn queue";
+		const ANCHOR_END = "/** Record that terminal notices are deferred, and arm the abandonment driver. */";
+		const start = source.indexOf(ANCHOR_START);
+		const end = source.indexOf(ANCHOR_END);
+		expect(start).toBeGreaterThan(0);
+		expect(end).toBeGreaterThan(start);
+		const mutatorBlock = source.slice(start, end);
+
+		const injection = /_pendingNextTurnMessages\.(push|unshift)\(/;
+		const inside = mutatorBlock.split("\n").filter((line) => injection.test(line));
+		const outside = source
+			.replace(mutatorBlock, "")
+			.split("\n")
+			.filter((line) => injection.test(line))
+			.map((line) => line.trim());
+
+		// The kernel inserts with the spread parameter; nothing else may insert at all except the
+		// goal-context push, which never carries a terminal notice.
+		expect(inside.length).toBeGreaterThanOrEqual(1);
+		expect(outside).toEqual([
+			'this._pendingNextTurnMessages.push(createGoalContextMessage(this._goalState, "continuation"));',
+		]);
+	});
+
+	// The temporal chain, driven through the unshift route: defer and arm, a turn drains the
+	// queue, the timer fires against an empty queue and clears the stamp without rearming, the
+	// restore puts the notice back, and the rearmed driver abandons on its own - with nobody
+	// reading isSessionActive for its side effects anywhere in this test.
+	it("re-stamps the deferral when a drained terminal notice is put back through the unshift path", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const internals = harness.session as unknown as SessionWithNextTurnInternals;
+
+		// Suspend the pump first, like the sibling nails: with it running, the flush inside
+		// restorePendingNextTurnMessages would deliver the notice and leave nothing to drain.
+		harness.session.requestAbort();
+		expect(harness.session.isQueuedWorkSuspended).toBe(true);
+
+		vi.useFakeTimers();
+		try {
+			harness.session.restorePendingNextTurnMessages([terminalNotice("child-drained")]);
+			const stampedAt = harness.session.deferredRlmTerminalNoticeSince;
+			expect(stampedAt).toBeTypeOf("number");
+			expect(harness.session.isSessionActive).toBe(true);
+
+			// Re-marking must not move the stamp: the ??= is load-bearing, because a plain
+			// assignment would reset the abandonment clock on every re-injection and a busy
+			// session would never reach the threshold.
+			await vi.advanceTimersByTimeAsync(60_000);
+			internals._unshiftPendingNextTurnMessages(terminalNotice("child-second"));
+			expect(harness.session.deferredRlmTerminalNoticeSince).toBe(stampedAt);
+
+			// A turn takes the whole queue as prefix context. The stamp must survive: take is a
+			// drain, not a delivery.
+			const taken = internals._takePendingNextTurnMessages();
+			expect(taken).toHaveLength(2);
+			expect(harness.session.getPendingNextTurnMessageSnapshots()).toEqual([]);
+			expect(harness.session.deferredRlmTerminalNoticeSince).toBe(stampedAt);
+
+			// The armed timer fires against an empty queue: maybeAbandon's first branch clears the
+			// stamp and disarms, and the callback does not rearm because the stamp is gone.
+			await vi.advanceTimersByTimeAsync(STALE_MS + 1000);
+			expect(harness.session.deferredRlmTerminalNoticeSince).toBeUndefined();
+			expect(harness.session.rlmTerminalNoticeAbandonment).toBeUndefined();
+
+			// The turn fails and puts the notices back (production shape: _cancelSessionActions'
+			// restorable path and the _startPreparedTurnActions restore paths both unshift).
+			internals._unshiftPendingNextTurnMessages(...taken);
+			expect(harness.session.getPendingNextTurnMessageSnapshots()).toHaveLength(2);
+			expect(harness.session.deferredRlmTerminalNoticeSince).toBeTypeOf("number");
+			expect(harness.session.isSessionActive).toBe(true);
+
+			// Nobody reads isSessionActive from here on: the rearmed driver must finish the job.
+			await vi.advanceTimersByTimeAsync(STALE_MS + 1000);
+			expect(harness.session.rlmTerminalNoticeAbandonment).toMatchObject({ count: 2 });
+			expect(harness.session.getPendingNextTurnMessageSnapshots()).toEqual([]);
+			expect(harness.session.isSessionActive).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("delivers through the flush attempt when the pump can run again", async () => {
