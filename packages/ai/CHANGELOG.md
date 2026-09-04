@@ -1,12 +1,5 @@
 # Changelog
 
-## [Unreleased]
-
-- Fixed Anthropic-compatible endpoints receiving empty record-valued tool arguments by converting catch-all `patternProperties` schemas to `additionalProperties`.
-- Fixed OpenAI Codex SSE retries to skip non-429 4xx responses, honor `Retry-After`, and respect `maxRetries`.
-- Wired `maxRetryDelayMs` as the Codex SSE `Retry-After` cap (default 60000ms; `0` disables). Documented that Mistral, Google, and Vertex AI currently do not retry HTTP 429.
-- Capped OpenAI Codex SSE retry backoff on thrown network errors with `maxRetryDelayMs`, matching the HTTP 429 path.
-
 ## [0.9.0] - 2026-09-01
 
 - Refreshed the model catalog from live provider catalogs (pricing updates, new and removed models); fixed OpenCode Go Qwen routes mislabeled as Anthropic and excluded private dev/ Prime Inference routes.
