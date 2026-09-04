@@ -623,7 +623,7 @@ R3 合并后的现行落点（行号已漂，按符号给）：服务端强制 =
 
 1. **①产物轴**（node_modules/dist 共享产物，F75/extension-loading）：scratch worktree 借 dist 时三级 swap「三层同红」证的是产物在三层稳定存在、不是该红为代码缺陷。
 2. **②调用口径轴**（CI 矩阵 scripts/tagsFilter/shard/exclude）：E-1 调用口径层覆盖缺口（`repl-kernel-parent-watchdog` 2 条，详见下文三覆盖缺口）+ STAGE1/STAGE2/STAGE3 口径可加性（test:ci / test:process / test:kernel 互斥对方族）+ `test:process-stress` 不在 CI 矩阵（8 条 process-stress CI 从不跑、E 报告显式声明）。
-3. **③runner shell 环境轴**（`RLM_*`/`PRIME_AGENT_INTERNAL_*`，含**二阶**落盘 header 通道）：本轮 62 条（auto-refine 50 + recursion 11 = 61 条一阶 + daemon-agent-roster 1 条二阶）。**一阶通道** `process.env.RLM_DEPTH=1` → `agent-session.ts:8261` auto-refine 门 `_rlmDepth !== 0 return false` 恒 false；**二阶通道** RLM_DEPTH=1 **烤进落盘 session header**（`session-manager.ts` `rootRlmDepthFromEnv()`）→ `rlm-ledger.ts:857` `(deletedInfo?.rlmDepth ?? 0) > 0` → knownChild=true → positivelyTopLevel=false → `:860 edges()` 抛。二阶要隔离落盘状态（全新 HOME/agent dir）；主红族 fixture 都 mkdtempSync 本次新建 ⇒ env -u 能救。
+3. **③runner shell 环境轴**（`RLM_*`/`PRIME_AGENT_INTERNAL_*`，含**二阶**落盘 header 通道）：第三轴合计 79 条，其中 62 条 = 深度门机制已定位子集（auto-refine 50 + recursion 11 = 61 条一阶 + daemon-agent-roster 1 条二阶）；其余 17 条由双形态干净环境同名转绿坐实为 env 产物、**逐条变量归因未做**（一次 env -u 掉 16 个变量、无法归因到单变量）。**一阶通道** `process.env.RLM_DEPTH=1` → `agent-session.ts:8261` auto-refine 门 `_rlmDepth !== 0 return false` 恒 false；**二阶通道** RLM_DEPTH=1 **烤进落盘 session header**（`session-manager.ts` `rootRlmDepthFromEnv()`）→ `rlm-ledger.ts:857` `(deletedInfo?.rlmDepth ?? 0) > 0` → knownChild=true → positivelyTopLevel=false → `:860 edges()` 抛。二阶要隔离落盘状态（全新 HOME/agent dir）；主红族 fixture 都 mkdtempSync 本次新建 ⇒ env -u 能救。
 4. **④host 工具配置轴**（`~/.gitconfig` insteadOf / `GIT_*` / `SSH_*` / locale）：git-context 1 条——本机 `url.https://github.com/.insteadof git@github.com:` 把 scp 形 url 重写成 https，`src/utils/git.ts:264` 的 `git remote get-url origin` 应用 insteadOf。**单变量证明**：`10_cleanenv/cleanenv_envu_other10`（只 env -u、无 GIT_CONFIG_*）仍红 vs `13_axis_verification/git-context_hostaxis`（env -u + `GIT_CONFIG_GLOBAL=/dev/null` + `GIT_CONFIG_SYSTEM=/dev/null`）6/0 全绿 ⇒ 两组唯一差别是 GIT_CONFIG_* ⇒ host 第四轴成立、非「同时剥两轴」混淆。
 5. **⑤本机服务/凭据轴**（Ollama provider / `ANTHROPIC_API_KEY` 类凭据）：coding-agent **34 凭证门 skip**（rpc 14 / agent-session-tree-navigation 10 / compaction-extensions 8 / compaction 2，门禁串 `skipIf(!API_KEY|!ANTHROPIC_API_KEY|!ANTHROPIC_OAUTH_TOKEN)`，recheck-final 逐条 grep 独立坐实）；ai 包 **Ollama 簇 6 红 + 714 skip**（**标出处**：上一轮 ai 包全量跑车道的工件，不在 E 批 json 工件集 `~/.prime/r3_e_json/`（全为 coding-agent 侧）内、recheck-final 无法独立重算，按 S9 第56条「无法独立核的数字必须标出处」记为引用值）。
 
@@ -650,7 +650,7 @@ R3 合并后的现行落点（行号已漂，按符号给）：服务端强制 =
 | 类 | 条数 | 定性 | 工件 |
 | --- | --- | --- | --- |
 | auto-refine 族（7文件） | 61 | ENVIRONMENT 第三轴一阶 | 干净环境 env-u + env-i 双确认 341 executed / 0 failed、61 红名逐名转绿 |
-| daemon-agent-roster 等（9文件） | 18 | ENVIRONMENT 第三轴二阶 | 干净环境 other10 357/2（18 转绿含 daemon-agent-roster 24/0、daemon-mode 186/0） |
+| daemon-agent-roster 等（9文件） | 18 | ENVIRONMENT 第三轴（1 条二阶已定位 `rlm-ledger:857`；其余 17 条由双形态干净环境同名转绿坐实为 env 产物、逐条变量归因未做） | 干净环境 other10 357/2（18 转绿含 daemon-agent-roster 24/0、daemon-mode 186/0） |
 | git-context | 1 | host 第四轴 | GIT_CONFIG_*/dev/null 转绿 6/0 + 本机 insteadOf 活体复现 + 单变量证明 |
 | 4600-unwinds | 1 | pre-existing 真代码红（fork-only：#1249 best-effort vs #1372 期望失败语义冲突） | listening 0.114s 完整 stderr + 签名 sha256 全等 e3dca0d6a1b0e724 + blob BASE==HEAD d55d16b741a9bd4b |
 | **test:ci scope 合计** | **81** | **79 环境（第三轴）+ 1 host（第四轴）+ 1 pre-existing 真代码红** | 0 本轮引入、逐名闭合 |
