@@ -21,7 +21,9 @@ vi.mock("../src/utils/private-files.js", () => ({
 // The loader is what fails here: constructing and mounting it runs outside the export/read/confirm
 // guards, so this is the edge that used to leave the temp directory behind.
 vi.mock("../src/modes/interactive/components/bordered-loader.js", () => ({
-	BorderedLoader: vi.fn(() => {
+	// A function expression, not an arrow: the source constructs it with `new`, and vitest
+	// warns when a mock that gets constructed has an arrow implementation.
+	BorderedLoader: vi.fn(function (this: unknown) {
 		throw new Error("loader mount blew up");
 	}),
 }));

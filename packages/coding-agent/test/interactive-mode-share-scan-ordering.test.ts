@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { spawnSync } from "child_process";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 // The source imports from "child_process" (no node: prefix), so mock that exact specifier.
@@ -52,8 +53,8 @@ const proto = InteractiveMode.prototype as unknown as {
 	handleShareCommand(this: ShareThis): Promise<void>;
 };
 
-const shareDirCount = (): number =>
-	readdirSync(tmpdir()).filter((entry) => entry.startsWith("prime-agent-share-")).length;
+const shareDirNames = (): Set<string> =>
+	new Set(readdirSync(tmpdir()).filter((entry) => entry.startsWith("prime-agent-share-")));
 
 /**
  * The ordering claim is "the secret preflight must scan the bytes that are actually
@@ -91,14 +92,23 @@ describe("handleShareCommand scans the exported bytes", () => {
 			editor: {},
 		};
 
-		const before = shareDirCount();
+		// This nail depends on the child_process mock. The real `gh auth status` succeeds on
+		// a logged-in machine, so a mock that silently failed to apply would still pass here
+		// and the test would quietly become environment-dependent. Assert the interception
+		// rather than assuming it; the specifier must match the source import exactly.
+		expect(vi.isMockFunction(spawnSync)).toBe(true);
+
+		const before = shareDirNames();
 		await proto.handleShareCommand.call(fakeThis);
+		expect(vi.mocked(spawnSync)).toHaveBeenCalled();
 
 		// The dialog fired, so the scanner saw the export bytes. Scanning the proxy would
 		// have found nothing and never asked.
 		expect(confirmMessages).toHaveLength(1);
 		expect(fakeThis.showStatus).toHaveBeenCalledWith("Share cancelled");
-		// Cancelling after the export exists has to remove it.
-		expect(shareDirCount()).toBe(before);
+		// Cancelling after the export exists has to remove it. Compared as a name set rather
+		// than a count: another suite creating and removing a directory with the same prefix
+		// concurrently would move the count without this test having leaked anything.
+		expect([...shareDirNames()].filter((name) => !before.has(name))).toEqual([]);
 	});
 });
