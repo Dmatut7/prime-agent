@@ -5870,15 +5870,13 @@ export class InteractiveMode {
 
 	private startAssistantStreamingMessage(message: AssistantMessage): void {
 		// An empty-turn retry emits a fresh message_start per attempt and no message_end
-		// for the dropped one, so settle the previous component here instead of leaving
-		// it streaming in the chat tree (same edge agent_end covers).
+		// for the dropped one. Both message_end and agent_end clear streamingComponent,
+		// so a live component here is always an unmatched start for a message that was
+		// popped and never persisted: drop it instead of settling it into a bubble that
+		// /resume would not show. Both fields are reassigned below, so there is nothing
+		// to clear here.
 		if (this.streamingComponent) {
-			if (this.streamingMessage) {
-				this.streamingComponent.updateContent(this.streamingMessage, false);
-			} else {
-				this.chatContainer.removeChild(this.streamingComponent);
-			}
-			this.streamingComponent = undefined;
+			this.chatContainer.removeChild(this.streamingComponent);
 		}
 		this.streamingComponent = new AssistantMessageComponent(
 			undefined,

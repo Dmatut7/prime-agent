@@ -159,6 +159,30 @@ describe("InteractiveMode streaming events", () => {
 		expect(fakeThis.streamingMessage).toBeUndefined();
 	});
 
+	test("drops the unmatched streaming bubble when the next message_start arrives", async () => {
+		const fakeThis = createFakeInteractiveModeThis();
+		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+		const droppedAttempt: AssistantMessage = {
+			...createAssistantMessage(""),
+			content: [{ type: "thinking", thinking: "pondering the discarded turn" }],
+		};
+
+		// An empty-turn retry emits a fresh message_start per attempt and no message_end
+		// for the dropped one. That message was popped and never persisted, so settling
+		// it here would leave a bubble that /resume does not show.
+		await handleEvent.call(fakeThis, { type: "message_start", message: droppedAttempt });
+		expect(fakeThis.chatContainer.children).toHaveLength(1);
+		expect(renderChat(fakeThis.chatContainer)).toContain("pondering the discarded turn");
+
+		await handleEvent.call(fakeThis, {
+			type: "message_start",
+			message: createAssistantMessage("second attempt"),
+		});
+
+		expect(fakeThis.chatContainer.children).toHaveLength(1);
+		expect(renderChat(fakeThis.chatContainer)).not.toContain("pondering the discarded turn");
+	});
+
 	test("renders assistant end events when attaching after all updates", async () => {
 		const fakeThis = createFakeInteractiveModeThis();
 		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
