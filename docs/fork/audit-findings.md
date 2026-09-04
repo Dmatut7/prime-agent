@@ -539,3 +539,81 @@ R3 合并后的现行落点（行号已漂，按符号给）：服务端强制 =
 ⇒ **符号正确性只能靠配对表**（本轮 p3/p8 各自独立发明、结论一致）：① import 三向（ours/theirs/merged）逐符号声明↔使用配对，查 0 未定义名与 0 重复声明（TS2300/TS2440/TS2451 类）；② **调用点实参直方图 ↔ 被调函数形参个数**（判据不是「形参有没有被用」，而是「块外调用点传了几个实参 ↔ 块内有没有透传到位」；p3 用它把「`omitStreamingMessages` 尾参恒 false」从担心变成硬结论：src 侧 11 个外部调用点实参全 ≤3）；③ 接口成员与 import 名的重复检查；④ 方法体三方 diff（`merged − theirs` 应全是 ours 半边、`merged − ours` 应全是官方半边）。
 
 ---
+
+
+---
+
+## 五、R3 修复批 · 六车道双审后的记账更正与教训（2026-09-05 收口）
+
+本节是修复批（`067436d5e..HEAD`）落地后，按六车道双审（recheck-adv / recheck-k3-pf / -sess / -trap / -gap / 广度）结论做的**记账更正**。**行号一律带当前 blob 前 16 位或不写行号只写 grep 定位句**——本轮反复实证裸行号会漂（见 §五.6）。
+
+### 5.1 F1 定性升级：`latent-with-open-precondition` → **「第一方可达真 bug（窄合取）」**
+
+原记账把「queued 终报可无时间戳 ⇒ 永久钉住 `isSessionActive`」写成潜在缺陷、且修复提交 `f8cc06eba` 的 body 称达到它「需要一个扩展通过 `sendCustomMessage` 送终报自定义类型，这本身已属 off-contract」。
+
+**recheck-k3-sess 建复现测试在旧 blob `beba3e0871f6a8b0` 上把危险态完整复现，并在 HEAD 上反转全绿 ⇒ 定性升级为第一方可达**。它原判「第一方不可达」的错误前提是**假设 flush 被挡 ⇔ pump 被挡**；逐字核出**不对称**：
+
+- flush 守卫（`agent-session.ts` `_flushDeferredRlmTerminalNotices`）**第一行就含** `this._sessionInputAdmissionPauses.size > 0 ||`
+- pump 的三道门**都不含** admission pause：`_scheduleSessionInputPump` 只看 `_sessionInputPumpSuspended || _queuedWorkPauses.size > 0`；`_hasSelectableSessionInput` 只看 actionStore 的 queued/selected；`_isBusyForSessionInput("pump")` = `externalBusy || _disposed || _disposing || _sessionInputPump…`
+
+⇒ **admission pause 期间被 defer 的终报躺在 pending（flush 被挡），而此前已 admit 的回合仍可被 pump prepare**，preparation-timing 策略在 take 点把终报拿进回合局部。**第一方正常发生，无需任何 enqueue 失败。**
+
+**正确记法（四环合取，每环都第一方，合取窄但真实）**：preparation-timing 回合（directPrompt / injected）+ admission pause 期间 defer + prepare 跨 5 分钟阈值窗口（refine barrier / commit fence 竞争 / 慢扩展钩）+ 失败后回灌。
+
+**`f8cc06eba` 措辞更正（不改提交、按纪律只在此更正）**：body 里那句「off-contract extension」**只对 `sendCustomMessage` 入口类成立，对 checkout 类（take 路）不成立** ⇒ **checkout 类第一方可达**。修复本身已把两类都结构性关闭，仅措辞把可达性说窄了。
+
+**修复形状三层（都已落地并各自复验）**：① 逐点标记 `f8cc06eba` ② 收口成 choke-point mutator `ded8882db` ③ **结构加固 `b118c5812`：两薄壳 + 一内核 `_enqueuePendingNextTurnMessages(messages, atFront)`，守卫只有一份 ⇒「半守卫」状态不可表达**（make illegal states unrepresentable）。**加固与钉子互补不替代**：加固让守卫不可半摘，但 unshift 路的端到端覆盖仍需不变量钉子（三级钉子 `860eb9150` + unshift 单元钉 `c5469a1f6` + scope-limit 注释 `4a7e4c1c9` + 扫描方向轴 `70a11266d`）。
+
+### 5.2 已知红清单第 7 项：18 条 auto-refine 红 = **pre-R3 fork 既有红**
+
+`test/suite/agent-session-queue.test.ts` 的 **`18 failed | 93 passed (111)`**。**三级 swap 定性（判「既有红」必须做到 fork 基线，不能只做到本轮基线）**：
+
+| 层 | 结果 |
+| --- | --- |
+| HEAD | `18 failed \| 93 passed (111)` |
+| 本轮基线 `067436d5e` | 逐字相同 |
+| **fork 基线 `0c504e475`（pre-R3，scratch worktree）** | **逐字相同** ⇒ **pre-R3 就红** |
+
+配套证据：测试文件 **byte-identical（142708 B）**；merge 对该文件 auto-refine 面**只 1 行**（`harnessState: this._loadMergedHarnessState(),`）⇒ 与 **F75 同族**（本地独有测试面 × 既有实现语义漂移）。**深挖 defer 到下一轮**（父代理裁定），本条只是定性记账。
+
+**F75（第 6 项）三级链本轮补强**：原记账已有 `0c504e475` 一层的证据；本轮补三层——① 撤本回合注释改仍红 ② `timeout.ts` 换本轮基线 `067436d5e` 版仍红（且 `f8bea4cc0` 新钉子如预期变红）**⇒ 不是 `f8bea4cc0` 的行为改动引起** ③ `git diff 067436d5e..HEAD -- <该测试>` **只有 `f8bea4cc0` 新增的那条钉子，红条目 `records a hanging file factory…` 在 diff 里 0 命中 ⇒ 红条目文本本轮未变**。
+
+### 5.3 指针与行号更正（N6 / B5）
+
+- **refine 的 hard preflight 承重 assert 在 `:8739`，不是派单写的 `:8737-8738`**——`:8737` 是 `}`。**grep 定位句**：`assertHarnessStateWritable(loadHarnessState(preflightDir`。
+- **`_applyExtensionBindings` 当前 blob**：**定义 `:9629`**、**调用 `:9566` 与 `:9939`**、**包装点 `_withDialogTracking` 在 `:9554`**。旧 blob `84b85ed641587d7f` 的 `:9605/:9542/:9915/:9530` 全部已漂。
+- **M2 的 `:3710` 是 `agent-session.ts:3710`（`isPaused` 里的 `this._pendingUiDialogs > 0,`），不是 `interactive-mode.ts:3710`**（后者是 `if (spacerWhenEmpty) {`，且该文件**无 watchdog**）。
+- **A9 的注释原文在 `packages/agent/src/agent-loop.ts`，不在 `packages/coding-agent`**——按 finding 找原文必须先 `git show --stat <commit>` 拿真实文件路径（`c8f32d571` 碰的是 `packages/agent`），再全仓 `grep -rn` 不限包。
+- **`createExtensionUIContext` 同名跨文件不同物**：`interactive-mode.ts` 的是**私有方法**，`daemon-extension-binding.ts` 的是**模块级函数**（daemon host 用）。**FORK_NOTES 里「23-26 四个号永久退役」已更正为「23-27 五个号、下一个可用号是 28」**（`8901d21c1`），指针改为 grep 定位句。
+
+### 5.4 缺口与盲区记账（有意不修 / 记盲区）
+
+- **B 扫描钉的两条已知盲区**（写进钉子注释，免得下个人以为它全覆盖）：① **薄壳必须转调内核**不由 B 钉——B 的切片 `ANCHOR_START`（内核 doc）→ `ANCHOR_END`（mark helper doc）**含两个薄壳**，薄壳绕过内核直写那行仍在块内、`inside.length >= 1` 仍成立；该性质由 **A 两路（`it.each` push/unshift）+ C 端到端时序链**钉（**实证**：unshift 薄壳绕过内核 → 2 failed = A-unshift + C，**B 不在红集**）。② **裸下标赋值 `_pendingNextTurnMessages[i] = notice`** 方法扫描与重赋值规则**都抓不到**（注释已自报 "not worth chasing"；**实测全文件 0 命中**，是"确实不存在"不是"漏追"）。
+- **B 的 allowlist 是 `startsWith` 前缀匹配 ⇒ 将来合法的收缩写法（如 `= this._pendingNextTurnMessages.slice(1)`）会红 = fail-closed 有意为之**，改动必须显式，别当假红。同理，让被豁免的 goal-context push 也走 mutator 会**有意**红（MutN）。
+- **A10 的三节链无单钉全覆盖**：端到端「快捷键开的对话框会暂停 watchdog」由**三节**钉——A10 的身份钉（快捷键 context **就是** runner 那份，`toBe` 不是形状）+ `8e02194a9` 的接线钉（绑定对话框开着时 armed watchdog 真 snooze）+ **静态事实**（`hasUI()` 与 `getUIContext()` 键于同一字段 ⇒ `hasUI()` 真必为包装版）。**没有单条钉子覆盖全链，断一节不会让任何单条钉子红。**
+- **A10 是最小修法；整体去重是下一轮重构候选**：`interactive-mode.ts` 的 `createContext()` 与 `runner.ts` 的 `createContext()` **只在 `ui`/`hasUI` 两字段重复**；**动作字段（`newSession`/`compact` 带 TUI 副作用）与 runner 版不同构** ⇒ 整体去重会改快捷键的动作语义。**A10 只改这两字段是对的，去重另立。**
+- **A8-N1（安全方向注记，不改代码）**：`compaction.ts` 的 `usage.totalTokens || input+output+cacheRead+cacheWrite` 回退——provider 不报 `totalTokens` 时，A8 携带上去的 `output` 会抬高上下文估算。**方向安全**：只可能让 compaction 略早触发，不会漏触发。
+- **M3(k) 的 `:399` closeSync 未 guard**：**本条已在 §2.2 的 M3(k) 记账里（"`:399` 的 `finally { if (stderrLogFd !== undefined) closeSync(stderrLogFd); }` 未 guard"）⇒ B3 是重复项，不再单列。**
+- **`:6714` 终报可经 `sendCustomMessage` 绕过时间戳**：**并入 option B 后不再单独 DEFER**（choke-point mutator 已结构性关闭该路径）。
+- **原 4 条已知缺口不变**：M3(k) per-spawn 写预算、B1 放大器（`daemon-mode.ts` 把任何 `unhandledRejection` 变 `process.exit(1)`）、H2 排序（**本轮已加钉子 ⇒ 见 §5.5**）、M5(s) digest 口径。
+
+### 5.5 H2 缺口状态：「未做 → 已做」
+
+`audit-findings.md` 原 §2.2 那条「H2 调用方排序无自动 red-first 钉子 …… 无法单测 …… 若要可测需重构出可注入边界」**已在 `86b8293f1` 就地更正**：prototype 提取 + `vi.mock("child_process")` 即可驱动真方法，**不需要重构**。落地 = `test/interactive-mode-share-scan-ordering.test.ts`，red-first 实证 = 换回 proxy 形状后 **`expected [] to have a length of 1 but got +0`、wall 1.5s（断言红而非 30s 超时红）**。**「按封顶规矩这条不算 red 验证过」一句作废。**
+
+### 5.6 本轮教训（全部实测出来，与 S9 既有各条同族）
+
+1. **报 SHA 前必须 `git cat-file -t <sha>` 验存在**；SHA 必须在 commit **成功返回后从 git 输出复制**，不能预先写。**`git commit --only -- <paths>` 对未 tracked 的新文件会 EXIT=1**（`did not match any file(s) known to git`）⇒ **新文件先 `git add`**；**commit 的 EXIT 必须核**。本轮我曾报出 3 个不存在的 SHA，其中 1 个是在 commit 实际失败时写的 ⇒ 下游按假锚对账 `fatal`。
+2. **「既有红」的定性必须做到 fork 基线**（HEAD → 本轮基线 → fork 基线三层逐字相同才叫既有）；只 swap 到本轮基线会把 merge 引入的红误记成既有进而漏修。
+3. **scratch worktree 借 `node_modules` 用符号链接时，删除顺序必须「先 `os.unlink` 链接、再 `git worktree remove --force`」**；反了会顺着链接动到真依赖树。清完要核：残留 False + 真 `node_modules` isdir + `worktree list` 无该项 + 主仓哨兵完好 + 施工树 porcelain 空。
+4. **给扫描类钉子扩 pattern 时，regex 的每一支都要有自己的红**。「把想到的语法都塞进同一个 regex」经常塞进**死支**——本轮 `concat` 支就是死的（真实写法 `x.concat(field)` 的 `.concat(` 调在**另一个操作数**上，任何以字段名开头的 method-call pattern 都匹配不到）。抓不到就问「这一族的真实共性是什么轴」（这里是**赋值方向**而非**方法名**），**换轴而不是硬凑 pattern**。
+5. **新加的条件分支 / 防御守卫必须自带一个「去掉它就红」的变异体**，否则它要么没必要、要么没被看守。本轮 A8 的 overflow 条件化第一版就是零红（41 passed），补了钉子才红。
+6. **静态核过的前提也要实跑一次才算数**。审查方在真实代码上逐字核过的前提仍可能漏**运行期环境事实**——F12 的「`_localHarnessStateDir()` 会 mkdir」实际是**目录只在首次写入时才创建**，钉子第一步就 ENOENT。**钉子的红要读失败详情，分清「被测性质红」与「环境形状红」**（ENOENT 属后者 = 假信号形状）。
+7. **反向半条（断言「不发生 X」）在「删掉产生 X 的机制」这类变异体下天然 GREEN ⇒ 对该类零鉴别力**；它的价值只在「机制过度触发」类变异体上。**报变异体归因必须逐 test 名核，不能靠「这条钉子依赖那个机制」直觉推**（本轮我把 MutF 的 6 条红归因错了 1 条：反向半条其实是 GREEN，第 6 条红是 `pins while fresh`）。**归因与判据分开**：计数一直对，错的是「哪几条」的解释。
+8. **改注释类 finding 要 grep 全仓同一句话，`src` 与 `test` 常各存一份**——A9 改了 `agent-loop.ts` 却漏了 `agent-loop.test.ts` 的同源残留，做 A8 时才撞见。
+9. **scope-expanding 改动必须回头重核所有描述该代码 scope 的注释**——A8 把 carry 从 exhausted 分支 hoist 到全终局后，A9 刚按 F2 改对的那段注释立刻陈旧、且与新加的内层注释**互相矛盾**（外层说「到不了 compaction 路」、内层说「inflate output 会藏 overflow」），是复审方逐句对撞才发现。
+10. **重定位不是走过场**：按 finding 找代码原文要 grep 全仓同名符号确认**哪个定义**（同名跨文件不同物）；笔记引号里的句子要 grep 原文核**存在**（本轮一句"covers both hosts at once"全仓 0 命中 = 我记的是转述）。**重定位能撞出笔记没记的更严重形状**——A10 的真缺口不是「包装没覆盖某 host」，而是「快捷键路绕开了 runner 那份已包装 context，且 `hasUI: true` 是硬编码的第二个谎」。
+11. **「无法单测」的定性常是想象力失败**。判它之前先试 prototype 提取 + mock 到能让被测分支跑起来的**最小集**。本轮两处翻案：H2 调用方排序（原判「需重构」）、share 清理边（原判「太重」）。
+12. **钉子依赖 mock、而真实实现在本机也能跑通时，绿不携带信息**——必须用 `vi.isMockFunction(...)` + 调用计数坐实 mock 真拦截了。本轮自查：nit-2 钉子 mock `"node:child_process"` 而源码 import `"child_process"`，本机 `gh` 已装且已登录（`gh auth status` rc=0）⇒ 若 mock 空转钉子照样绿；探针实测 `isMockFunction=true`、`calls=1` 才排除。**mock 的 specifier 要与源码 import 逐字对齐，别依赖归一化。**
+13. **变异体锚点在文件里命中多次时，不能随便挑一个**——本轮 `this._autoRefineWritableProbe = undefined;` 命中 2 次，改用后续行组成**唯一锚**（命中 1）再打，避免「打错地方却以为验过了」。
+14. **「0 SKIP」比「N passed」有信息量**；对账门必须报 SKIP 数，非 0 要说明对照面为什么不在场。**先 `--collect-only` 核 `collected == passed + failed + skipped` 再跑全量**；`EXIT=9` 或整数秒腰斩先疑看门狗。
