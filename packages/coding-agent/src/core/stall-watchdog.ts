@@ -64,6 +64,9 @@ export interface StallWatchdogOptions {
 export type StallWatchdogState = "idle" | "armed" | "warned" | "aborting";
 
 const DEFAULT_ABORT_SETTLE_GRACE_MS = 10_000;
+/** Floor for the pause snooze budget; the budget also scales with `warnAfterMs`. */
+const PAUSED_BUDGET_FLOOR_MS = 30 * 60 * 1000;
+const PAUSED_BUDGET_WARN_MULTIPLIER = 10;
 
 export class StallWatchdog {
 	private readonly options: StallWatchdogOptions;
@@ -72,6 +75,7 @@ export class StallWatchdog {
 	private armedAt = 0;
 	private lastActivityAt = 0;
 	private timerHandle: unknown = undefined;
+	private pausedSince: number | undefined = undefined;
 
 	constructor(options: StallWatchdogOptions) {
 		this.options = options;
@@ -103,9 +107,14 @@ export class StallWatchdog {
 
 	/** Start watching a turn. Re-arming resets the escalation state. */
 	arm(): void {
-		if (!this.active) return;
+		if (!this.active) {
+			// Disabling the watchdog must also drop a timer armed by an earlier turn.
+			this.clearTimer();
+			return;
+		}
 		this.armedAt = this.timers.now();
 		this.lastActivityAt = this.armedAt;
+		this.pausedSince = undefined;
 		this.state = "armed";
 		this.scheduleWarn();
 	}
@@ -125,6 +134,7 @@ export class StallWatchdog {
 	/** Stop watching: the turn ended (or the session is going away). */
 	disarm(): void {
 		this.clearTimer();
+		this.pausedSince = undefined;
 		this.state = "idle";
 	}
 
@@ -140,15 +150,39 @@ export class StallWatchdog {
 		}
 	}
 
+	private get maxPausedMs(): number {
+		return Math.max(PAUSED_BUDGET_WARN_MULTIPLIER * this.warnAfterMs, PAUSED_BUDGET_FLOOR_MS);
+	}
+
+	/**
+	 * Whether a firing timer should snooze instead of escalating. Snoozing is
+	 * bounded: a wedged pause (a compaction that never settles, for example) must
+	 * not silence the watchdog forever, so past `maxPausedMs` it stops being an
+	 * excuse and escalation resumes.
+	 */
+	private shouldSnoozeForPause(): boolean {
+		if (!this.options.isPaused?.()) {
+			this.pausedSince = undefined;
+			return false;
+		}
+		const now = this.timers.now();
+		if (this.pausedSince === undefined) this.pausedSince = now;
+		return now - this.pausedSince < this.maxPausedMs;
+	}
+
 	private scheduleWarn(): void {
 		this.clearTimer();
 		this.timerHandle = this.timers.setTimeout(() => this.fireWarn(), this.warnAfterMs);
 	}
 
 	private fireWarn(): void {
+		if (!this.active) {
+			this.disarm();
+			return;
+		}
 		this.timerHandle = undefined;
 		if (this.state === "idle") return;
-		if (this.options.isPaused?.()) {
+		if (this.shouldSnoozeForPause()) {
 			// Snooze: the paused phase legitimately owns the turn boundary, so its
 			// silent time is not stall evidence. Rebase activity and re-check after
 			// another full warn window once the pause lifts.
@@ -165,9 +199,13 @@ export class StallWatchdog {
 	}
 
 	private fireAbort(): void {
+		if (!this.active) {
+			this.disarm();
+			return;
+		}
 		this.timerHandle = undefined;
 		if (this.state !== "warned") return;
-		if (this.options.isPaused?.()) {
+		if (this.shouldSnoozeForPause()) {
 			// Same snooze as fireWarn: paused silence is not stall evidence.
 			this.lastActivityAt = this.timers.now();
 			this.state = "armed";
@@ -181,6 +219,10 @@ export class StallWatchdog {
 	}
 
 	private fireAbortUnsettled(): void {
+		if (!this.active) {
+			this.disarm();
+			return;
+		}
 		this.timerHandle = undefined;
 		if (this.state !== "aborting") return;
 		this.emitStage("abort_unsettled");

@@ -219,6 +219,31 @@ describe("StallWatchdog", () => {
 		expect(stages).toEqual(["warn", "warn", "abort"]);
 	});
 
+	it("escalates once a wedged pause outlives the snooze budget", () => {
+		const clock = new FakeClock();
+		const stages: string[] = [];
+		const watchdog = new StallWatchdog({
+			enabled: true,
+			warnAfterMs: 1000,
+			// Warn-only: keeps the expectation to a single stage however far the clock runs.
+			abortAfterMs: undefined,
+			timers: clock.timersImpl,
+			// A wedged pause: it never lifts, which is what a compaction that never
+			// settles looks like from here.
+			isPaused: () => true,
+			onStage: (info) => stages.push(info.stage),
+		});
+
+		watchdog.arm();
+		// The budget is max(10 * warnAfterMs, 30min) = 30min, counted from the first
+		// snooze, so 29 minutes of wedged pause is still excused.
+		clock.advance(29 * 60 * 1000);
+		expect(stages).toEqual([]);
+		// Past the budget the pause stops being an excuse and escalation resumes.
+		clock.advance(2 * 60 * 1000);
+		expect(stages).toEqual(["warn"]);
+	});
+
 	it("reads warn/abort thresholds live from getter functions", () => {
 		const clock = new FakeClock();
 		const stages: string[] = [];
@@ -266,6 +291,32 @@ describe("StallWatchdog", () => {
 		watchdog.arm();
 		clock.advance(60_000);
 		expect(stages).toEqual([]);
+		expect(watchdog.currentState).toBe("idle");
+	});
+
+	it("stops escalating when the watchdog is disabled mid-turn", () => {
+		const clock = new FakeClock();
+		const stages: string[] = [];
+		let enabled = true;
+		const watchdog = new StallWatchdog({
+			enabled: () => enabled,
+			warnAfterMs: 1000,
+			abortAfterMs: 3000,
+			abortSettleGraceMs: 500,
+			timers: clock.timersImpl,
+			onStage: (info) => stages.push(info.stage),
+		});
+
+		watchdog.arm();
+		clock.advance(1000);
+		expect(stages).toEqual(["warn"]);
+		expect(watchdog.currentState).toBe("warned");
+
+		// The user turns the watchdog off while an abort timer is already pending:
+		// the pending escalation must be dropped, not fired into a live turn.
+		enabled = false;
+		clock.advance(60_000);
+		expect(stages).toEqual(["warn"]);
 		expect(watchdog.currentState).toBe("idle");
 	});
 
