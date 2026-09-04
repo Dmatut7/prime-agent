@@ -86,8 +86,10 @@ describe("ensurePrivateDirectory memoization", () => {
 
 		rmSync(target, { recursive: true, force: true });
 		writeFileSync(target, "not a directory");
+		// 0700 on purpose: a regular file at the private mode passes the symlink and
+		// mode conditions, so only isDirectory() can catch it.
+		chmodSync(target, 0o700);
 
-		// The mode check alone would not catch this: a regular file can be 0700 too.
 		expect(() => ensurePrivateDirectory(target)).toThrow("non-directory private path");
 	});
 
