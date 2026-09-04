@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -51,6 +51,44 @@ describe("ensurePrivateDirectory memoization", () => {
 
 		expect(statSync(target).isDirectory()).toBe(true);
 		expect(statSync(target).mode & 0o777).toBe(0o700);
+	});
+
+	it("refuses a memoized directory swapped for a symlink however the path is spelled", () => {
+		const dir = tempRoot();
+		const outside = join(dir, "outside");
+		ensurePrivateDirectory(outside);
+
+		// Each spelling needs its own memo entry: the unnormalized-spelling case is only
+		// reachable through a memo hit, and the first refusal would drop the entry that
+		// the later spellings depend on.
+		// Spellings that resolve() folds onto the same memo key. A "./" suffix is not
+		// one of them: it names a different path, which is legitimately created.
+		const spellings = ["", "/", "/.", "//", "/./"];
+		spellings.forEach((suffix, index) => {
+			const target = join(dir, `target-${index}`);
+			mkdirSync(target, { mode: 0o700 });
+			ensurePrivateDirectory(target); // memoize it as a real directory
+			rmSync(target, { recursive: true, force: true });
+			symlinkSync(outside, target, "dir"); // swap it for a link to another 0700 dir
+
+			// resolve() strips the suffix, so the key still hits; a trailing slash or
+			// "/." makes POSIX lstat follow the link and see the 0700 target.
+			const spelled = `${target}${suffix}`;
+			expect(() => ensurePrivateDirectory(spelled), JSON.stringify(spelled)).toThrow("non-directory private path");
+		});
+	});
+
+	it("refuses a memoized directory replaced by a regular file", () => {
+		const dir = tempRoot();
+		const target = join(dir, "target");
+		mkdirSync(target, { mode: 0o700 });
+		ensurePrivateDirectory(target);
+
+		rmSync(target, { recursive: true, force: true });
+		writeFileSync(target, "not a directory");
+
+		// The mode check alone would not catch this: a regular file can be 0700 too.
+		expect(() => ensurePrivateDirectory(target)).toThrow("non-directory private path");
 	});
 
 	it("refuses a memoized directory swapped for a symlink", () => {

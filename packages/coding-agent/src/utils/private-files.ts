@@ -42,11 +42,10 @@ const WRITE_BATCH_CHARS = 64 * 1024;
 /**
  * Private directories already validated in this process. Re-walking every
  * ancestor on each append costs dozens of syscalls on paths that run per log
- * line and per session entry. Only the ancestor walk and the directory mode
- * re-assertion are memoized: the checks on the file being written stay per
- * call, so a swapped or symlinked target is still refused, and a memo hit still
- * lstat's the directory so a deleted one is recreated and a loosened mode is
- * re-tightened. What a hit skips is the ancestor walk only.
+ * line and per session entry. A hit still lstat's the directory, so a deleted
+ * one is recreated, a swap for a symlink or a non-directory is refused, and a
+ * loosened mode is re-tightened; the checks on the file being written stay per
+ * call. What a hit skips is the ancestor walk only.
  */
 const validatedDirectories = new Set<string>();
 
@@ -134,7 +133,10 @@ export function assertRegularFileNoSymlink(path: string): void {
 
 export function ensurePrivateDirectory(path: string): void {
 	const resolved = resolve(path);
-	if (validatedDirectories.has(resolved) && stillUsablePrivateDirectory(path)) return;
+	// Check the resolved path, not the caller's spelling: a trailing slash or "/."
+	// makes POSIX lstat follow a symlinked final component, so an unnormalized check
+	// would see the link's 0700 target and accept the link.
+	if (validatedDirectories.has(resolved) && stillUsablePrivateDirectory(resolved)) return;
 	validatedDirectories.delete(resolved);
 	validatePrivateDirectory(path);
 	rememberValidatedDirectory(resolved);
@@ -151,9 +153,9 @@ export function ensurePrivateDirectory(path: string): void {
  * win32 does not report 0700 on directories, so the memo never hits there and
  * every call takes the full path - the pre-memoization behaviour, unchanged.
  */
-function stillUsablePrivateDirectory(path: string): boolean {
+function stillUsablePrivateDirectory(resolvedPath: string): boolean {
 	try {
-		const stats = lstatSync(path);
+		const stats = lstatSync(resolvedPath);
 		return !stats.isSymbolicLink() && stats.isDirectory() && (stats.mode & 0o777) === PRIVATE_DIRECTORY_MODE;
 	} catch (error) {
 		if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
