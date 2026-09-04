@@ -45,9 +45,8 @@ const WRITE_BATCH_CHARS = 64 * 1024;
  * line and per session entry. Only the ancestor walk and the directory mode
  * re-assertion are memoized: the checks on the file being written stay per
  * call, so a swapped or symlinked target is still refused, and a memo hit still
- * lstat's the directory so a deleted one is recreated. The trade is that a
- * directory whose mode is loosened externally after its first validation is not
- * re-tightened until this entry is evicted.
+ * lstat's the directory so a deleted one is recreated and a loosened mode is
+ * re-tightened. What a hit skips is the ancestor walk only.
  */
 const validatedDirectories = new Set<string>();
 
@@ -142,14 +141,20 @@ export function ensurePrivateDirectory(path: string): void {
 }
 
 /**
- * One lstat on the memo fast path. It keeps the two properties a hit must not
- * lose: a directory that disappeared is recreated by the full validation, and a
- * directory swapped for a symlink or a non-directory is refused by it.
+ * One lstat on the memo fast path. It keeps the properties a hit must not lose:
+ * a directory that disappeared is recreated by the full validation, a directory
+ * swapped for a symlink or a non-directory is refused by it, and a directory
+ * whose mode was loosened externally is re-tightened by it. The mode comes from
+ * the same lstat, so re-checking it costs nothing. Only the ancestor walk is
+ * skipped, which needs write access to an ancestor to subvert.
+ *
+ * win32 does not report 0700 on directories, so the memo never hits there and
+ * every call takes the full path - the pre-memoization behaviour, unchanged.
  */
 function stillUsablePrivateDirectory(path: string): boolean {
 	try {
 		const stats = lstatSync(path);
-		return !stats.isSymbolicLink() && stats.isDirectory();
+		return !stats.isSymbolicLink() && stats.isDirectory() && (stats.mode & 0o777) === PRIVATE_DIRECTORY_MODE;
 	} catch (error) {
 		if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
 		throw error;
