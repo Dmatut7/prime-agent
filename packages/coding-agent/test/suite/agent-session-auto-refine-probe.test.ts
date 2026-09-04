@@ -1,4 +1,7 @@
+import { mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { dirname } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getHarnessStatePath } from "../../src/core/refinement/refinement.js";
 import { createHarness, type Harness } from "./harness.js";
 
 type SessionWithRefineProbe = {
@@ -52,6 +55,46 @@ describe("_autoRefineAllowedForSession probe cost", () => {
 		// Before the fix this was two calls per invocation and no cache at all.
 		expect(spy).toHaveBeenCalledTimes(1);
 		expect(internals._autoRefineWritableProbe).toBeDefined();
+	});
+
+	it("serves the cached verdict within the TTL instead of re-probing", async () => {
+		// The call-count nail above would still pass for an implementation that caches the
+		// resolved directory but re-loads and re-asserts the store on every call, which is
+		// where most of the cost lives. This nails the verdict itself being reused.
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		const internals = rootSession(harness);
+		const dir = internals._localHarnessStateDir();
+		expect(dir).toBeTypeOf("string");
+		const statePath = getHarnessStatePath(dir as string);
+
+		// A fresh persisted session has no state file yet, and a missing file loads as an
+		// empty store, which is writable.
+		expect(internals._autoRefineAllowedForSession()).toBe(true);
+
+		try {
+			// Break the state file, not its directory: loadHarnessState validates the
+			// directory shape first and lstats the state file second, where a symlink is
+			// refused as a non-regular private file. A dangling link is enough, because
+			// lstat reports the link itself instead of following it.
+			// The harness directory is only created on first write, so make it here; the
+			// directory shape check runs before the file lstat and wants a 0700 directory.
+			mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 });
+			rmSync(statePath, { force: true });
+			symlinkSync("nowhere", statePath);
+
+			// Still allowed: the TTL is serving the cached verdict rather than re-probing.
+			expect(internals._autoRefineAllowedForSession()).toBe(true);
+
+			// Positive control: the break above is real, so once the cache is dropped the
+			// same shape has to be detected. Without this, the assertion above could pass
+			// merely because replacing the file changed nothing.
+			await internals._invalidatePendingAutoRefineForBranchChange();
+			expect(internals._autoRefineAllowedForSession()).toBe(false);
+		} finally {
+			// Leave no dangling link behind, or harness cleanup can trip over it.
+			rmSync(statePath, { force: true });
+		}
 	});
 
 	it("re-probes after the cache is invalidated", async () => {
