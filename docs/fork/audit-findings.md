@@ -564,17 +564,13 @@ R3 合并后的现行落点（行号已漂，按符号给）：服务端强制 =
 
 **修复形状三层（都已落地并各自复验）**：① 逐点标记 `f8cc06eba` ② 收口成 choke-point mutator `ded8882db` ③ **结构加固 `b118c5812`：两薄壳 + 一内核 `_enqueuePendingNextTurnMessages(messages, atFront)`，守卫只有一份 ⇒「半守卫」状态不可表达**（make illegal states unrepresentable）。**加固与钉子互补不替代**：加固让守卫不可半摘，但 unshift 路的端到端覆盖仍需不变量钉子（三级钉子 `860eb9150` + unshift 单元钉 `c5469a1f6` + scope-limit 注释 `4a7e4c1c9` + 扫描方向轴 `70a11266d`）。
 
-### 5.2 已知红清单第 7 项：18 条 auto-refine 红 = **pre-R3 fork 既有红**
+### 5.2 已知红清单第 7 项：18 条 auto-refine 红 = **ENVIRONMENT（runner env 泄漏）、非 pre-R3 fork 既有红**【2026-09-05 干净环境实验更正】
 
-`test/suite/agent-session-queue.test.ts` 的 **`18 failed | 93 passed (111)`**。**三级 swap 定性（判「既有红」必须做到 fork 基线，不能只做到本轮基线）**：
+**原记账（撤回）**：三级 swap（HEAD / 本轮基线 `067436d5e` / fork 基线 `0c504e475` 三层 `18 failed | 93 passed (111)` 逐字同红）判「pre-R3 就红 = fork 既有红」。**此结论错**：三级 swap 控制了**代码轴**（同 scratch 只切 commit），**没控 env 轴**——三层都在同一个 agent worker shell 里跑、`RLM_DEPTH=1` 泄漏进三层 ⇒「三层逐字同红」证的是「污染 env 下这些红稳定」不是「pre-existing 代码红」。**swap 对 env/host/负载轴天然盲（BASE 与 HEAD 共享同一 runner shell + 同一 host config + 同一机器负载）**。
 
-| 层 | 结果 |
-| --- | --- |
-| HEAD | `18 failed \| 93 passed (111)` |
-| 本轮基线 `067436d5e` | 逐字相同 |
-| **fork 基线 `0c504e475`（pre-R3，scratch worktree）** | **逐字相同** ⇒ **pre-R3 就红** |
+**干净环境决定性实验**（`env -u` 全套 16 变量 `RLM_*`/`PRIME_AGENT_INTERNAL_*`/`PRIME_AGENT_*` + `env -i HOME/PATH/TMPDIR` 对照、`--maxWorkers=1`、工件 `~/.prime/r3_e_json/10_cleanenv/`）：auto-refine 族 7 文件（`agent-session-serialized-refine`28 + `agent-session-recursion`11 + `agent-session-queue`18 + `refine-skill`1 + `refine-extension`1 + `daemon-serialized-refine`1 + `config-integration`1 = **61 红**）**341 passed / 0 failed 全绿**（env -u 与 env -i 双确认一致）⇒ **这 61 红（含本条 18）= ENVIRONMENT（runner env 泄漏）、不是代码红**。
 
-配套证据：测试文件 **byte-identical（142708 B）**；merge 对该文件 auto-refine 面**只 1 行**（`harnessState: this._loadMergedHarnessState(),`）⇒ 与 **F75 同族**（本地独有测试面 × 既有实现语义漂移）。**深挖 defer 到下一轮**（父代理裁定），本条只是定性记账。
+**泄漏机制（一阶通道）**：agent worker shell 导出 `RLM_DEPTH=1`（根代理=0、子 worker=1），vitest 与 `harness.ts` 都不清它 ⇒ `agent-session.ts` `_rlmDepth = config.rlmDepth ?? (header ?? parseDepth(process.env.RLM_DEPTH, 0))` 读到 1 ⇒ `_autoRefineAllowedForSession()` 深度门 `_rlmDepth !== 0 return false` 恒 false ⇒ auto-refine 整体关闭 ⇒ auto-refine 族测试（期望 `vi.fn()` 被调用但 got 0 times）全红。**CI（Actions runner）不导出 RLM_DEPTH ⇒ 这 61 条在 CI 全绿 ⇒ 它们不是「红」是本机跑法产物（F75 同类错误第四变体：环境不正确 ⇒ 把环境产物当代码性质）**。完整五环境轴 taxonomy（五轴 canonical）+ 三段式标签 + fork-improvement setupFiles 候选见 §5.7。
 
 **F75（第 6 项）三级链本轮补强**：原记账已有 `0c504e475` 一层的证据；本轮补三层——① 撤本回合注释改仍红 ② `timeout.ts` 换本轮基线 `067436d5e` 版仍红（且 `f8bea4cc0` 新钉子如预期变红）**⇒ 不是 `f8bea4cc0` 的行为改动引起** ③ `git diff 067436d5e..HEAD -- <该测试>` **只有 `f8bea4cc0` 新增的那条钉子，红条目 `records a hanging file factory…` 在 diff 里 0 命中 ⇒ 红条目文本本轮未变**。
 
@@ -618,3 +614,77 @@ R3 合并后的现行落点（行号已漂，按符号给）：服务端强制 =
 12. **钉子依赖 mock、而真实实现在本机也能跑通时，绿不携带信息**——必须用 `vi.isMockFunction(...)` + 调用计数坐实 mock 真拦截了。本轮自查：nit-2 钉子 mock `"node:child_process"` 而源码 import `"child_process"`，本机 `gh` 已装且已登录（`gh auth status` rc=0）⇒ 若 mock 空转钉子照样绿；探针实测 `isMockFunction=true`、`calls=1` 才排除。**mock 的 specifier 要与源码 import 逐字对齐，别依赖归一化。**
 13. **变异体锚点在文件里命中多次时，不能随便挑一个**——本轮 `this._autoRefineWritableProbe = undefined;` 命中 2 次，改用后续行组成**唯一锚**（命中 1）再打，避免「打错地方却以为验过了」。
 14. **「0 SKIP」比「N passed」有信息量**；对账门必须报 SKIP 数，非 0 要说明对照面为什么不在场。**先 `--collect-only` 核 `collected == passed + failed + skipped` 再跑全量**；`EXIT=9` 或整数秒腰斩先疑看门狗。
+
+### 5.7 E 批干净环境决定性实验：五环境轴 taxonomy + 三段式标签 + 红账最终口径（0 本轮引入 + 3 条 pre-existing 真代码红 + 80 环境）（2026-09-05）
+
+**背景（dogfooding 陷阱）**：E 批全量测试对账在 agent worker shell 里跑，产品运行时导出内部变量（`RLM_DEPTH=1`、`PRIME_AGENT_INTERNAL_*` 全套、`PRIME_AGENT_*`）正好被产品自己的测试读取（`agent-session.ts` 读 `process.env.RLM_DEPTH`）⇒ **产品运行环境污染产品测试**。这种污染对 swap/多点对照**天然免疫**（所有层共享同一 shell），必须单独当一个轴控制。根代理 `RLM_DEPTH=0`、子 worker（build-stage-a/b、recheck-adv/recheck-final）`RLM_DEPTH=1` ⇒ 子 worker 跑的测试被污染方式与根不同。归账任何红前先 `env|sort` × `grep -rn "process\.env\.[A-Z_]*" packages/*/src` 求交集、交集里每个变量都是能改被测行为的通道。
+
+**五环境轴 taxonomy（五轴 canonical，parent 裁定 2026-09-05：②固定为调用口径轴、本机服务/凭据为第五轴；本节初版草稿曾把「本机服务/凭据」编为「第二轴」，现按裁定更正撤回）**：
+
+1. **①产物轴**（node_modules/dist 共享产物，F75/extension-loading）：scratch worktree 借 dist 时三级 swap「三层同红」证的是产物在三层稳定存在、不是该红为代码缺陷。
+2. **②调用口径轴**（CI 矩阵 scripts/tagsFilter/shard/exclude）：E-1 调用口径层覆盖缺口（`repl-kernel-parent-watchdog` 2 条，详见下文三覆盖缺口）+ STAGE1/STAGE2/STAGE3 口径可加性（test:ci / test:process / test:kernel 互斥对方族）+ `test:process-stress` 不在 CI 矩阵（8 条 process-stress CI 从不跑、E 报告显式声明）。
+3. **③runner shell 环境轴**（`RLM_*`/`PRIME_AGENT_INTERNAL_*`，含**二阶**落盘 header 通道）：本轮 62 条（auto-refine 50 + recursion 11 = 61 条一阶 + daemon-agent-roster 1 条二阶）。**一阶通道** `process.env.RLM_DEPTH=1` → `agent-session.ts:8261` auto-refine 门 `_rlmDepth !== 0 return false` 恒 false；**二阶通道** RLM_DEPTH=1 **烤进落盘 session header**（`session-manager.ts` `rootRlmDepthFromEnv()`）→ `rlm-ledger.ts:857` `(deletedInfo?.rlmDepth ?? 0) > 0` → knownChild=true → positivelyTopLevel=false → `:860 edges()` 抛。二阶要隔离落盘状态（全新 HOME/agent dir）；主红族 fixture 都 mkdtempSync 本次新建 ⇒ env -u 能救。
+4. **④host 工具配置轴**（`~/.gitconfig` insteadOf / `GIT_*` / `SSH_*` / locale）：git-context 1 条——本机 `url.https://github.com/.insteadof git@github.com:` 把 scp 形 url 重写成 https，`src/utils/git.ts:264` 的 `git remote get-url origin` 应用 insteadOf。**单变量证明**：`10_cleanenv/cleanenv_envu_other10`（只 env -u、无 GIT_CONFIG_*）仍红 vs `13_axis_verification/git-context_hostaxis`（env -u + `GIT_CONFIG_GLOBAL=/dev/null` + `GIT_CONFIG_SYSTEM=/dev/null`）6/0 全绿 ⇒ 两组唯一差别是 GIT_CONFIG_* ⇒ host 第四轴成立、非「同时剥两轴」混淆。
+5. **⑤本机服务/凭据轴**（Ollama provider / `ANTHROPIC_API_KEY` 类凭据）：coding-agent **34 凭证门 skip**（rpc 14 / agent-session-tree-navigation 10 / compaction-extensions 8 / compaction 2，门禁串 `skipIf(!API_KEY|!ANTHROPIC_API_KEY|!ANTHROPIC_OAUTH_TOKEN)`，recheck-final 逐条 grep 独立坐实）；ai 包 **Ollama 簇 6 红 + 714 skip**（**标出处**：上一轮 ai 包全量跑车道的工件，不在 E 批 json 工件集 `~/.prime/r3_e_json/`（全为 coding-agent 侧）内、recheck-final 无法独立重算，按 S9 第56条「无法独立核的数字必须标出处」记为引用值）。
+
+**三段式标签**（基线 swap 只控代码轴、对 host/负载轴天然盲 ⇒「基线也红」只证「非本轮引入」不证「是代码红」；与 W25.3 同一纪律两面：归环境要核阈值本轮没改防 cop-out、归代码要核 host/负载轴已排除）：
+
+1. **代码轴** = 基线 swap（同 scratch 只切 commit）：BASE=HEAD 同红 ⇒ 非本轮引入。
+2. **host 轴** = `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null` 隔离下转绿 ⇒ host-config 产物。
+3. **能力/负载轴 vs 真代码轴** = 超时签名必须读完整 `failureMessages` 尾部区分（S9 第61条），再配预算对照（fixture timeoutMs vs 产品启动预算）与负载留证（vm_stat/loadavg 入 label）：被测进程 stderr 有 `listening` 行 = 进程已正常启动 ⇒ 不是能力缺口、要查断言/语义（4600 即此）；无 listening 行且全为握手超时 = 能力缺口（daemon-supervisor-process 族）。
+
+**4600-unwinds 结论级更正（recheck-adv W31 + parent 独立核 + recheck-final 复核）**：**撤回**原「4600-unwinds→能力/负载轴（daemon 启动慢 flaky-by-design）」标签——那是只读签名首行 `Timed out waiting for fixture message` 的误判；**更正为 pre-existing 真代码红（fork-only defect）**。六条证据：
+
+1. **语义冲突**：产品 `daemon-supervisor.ts:836-847` 注释与实现 `// Cron migration is best-effort: … must never keep the supervisor from starting.`（来自 `3d935f674` **#1249**）vs 测试 `4600-supervisor-singleton.test.ts:1165-1170` 写坏 cron JSON（`"{ malformed\n"`）后 `expect(await waitForType(postBindFailure, "failed")).toMatchObject({ error: expect.stringContaining("JSON") })`（来自 `d51590c41` **#1372**）⇒ 产品按 best-effort 继续启动、测试期望失败（`"failed"` 永不到来）⇒ `:218` 超时 `exit=null/null`（子进程活且已 listening）。
+2. **完整 stderr 尾部**（1302 字符）：`Prime Agent daemon supervisor <uuid> listening on <sock>`，ts `21:44:51.552 → .666` = **0.114 s** 即启动监听 ⇒ supervisor 正常起来，「起不动/20s 不够」的能力缺口读法被工件自己的 stderr 推翻；只读首行就会误判。
+3. **fork-only 硬证**：`git merge-base --is-ancestor 3d935f674 0c504e475` rc=0、`d51590c41` rc=0（#1249/#1372 都是 BASE 祖先）；`git branch -r --contains` 两者**只含 fork/\*、不含 upstream/main** ⇒ fork-only defect。
+4. **本轮未动**：测试文件 blob BASE==HEAD 逐字相同（sha256 前 16 = `d55d16b741a9bd4b`，1187 行）；supervisor 文件本轮 +1311 行但那段 best-effort catch **逐字相同**；`timeoutMs = 20_000`（:205/:237）与 `DAEMON_STARTUP_TIMEOUT_MS = 30_000`（daemon-launch.ts:33）两边同值 ⇒ 20s<30s 预算错配也是既有的（作为设计观察成立、但不是本次失败原因）。
+5. **签名同一**：4 份失败签名（BASE×2 + HEAD×2）归一化后 sha256 全等 `e3dca0d6a1b0e724`。
+6. **处置**：记 **named-root-cause known-red（fork-only pre-existing defect：#1249 best-effort vs #1372 期望失败的语义冲突）**；fix 为 fork-improvement 候选（按 #1249 明示意图改测试：第二阶段期望从 `"failed"`+含 JSON 改成「启动继续成功 `ready`」+ 一条 warn 记录；反向让 supervisor fail-fast 与 `:844-845` 注释冲突）；**不现在修**（pre-existing 非本轮、超 R3 scope）。
+
+**E 批红账最终口径（recheck-final 冷启动独立重算坐实）**：**撤回**原「红账 81→2 塌缩」与「零真代码红」两处表述，更正为：
+
+- **81 条 test:ci 稳定红 = 79 第三轴（runner env 泄漏）+ 1 第四轴（git-context host config）+ 1 条 pre-existing 真代码红（4600）**，81=79+1+1 逐名闭合。
+- **全批 = 0 本轮引入代码红 + 3 条 pre-existing 真代码红（4600 ×1，test:ci scope；roundtrip ×2，test:kernel scope）+ 80 环境（79 第三轴 + 1 第四轴）**；known-red 台账从 81 量级收敛到 3 条 named-root-cause pre-existing 真代码红，CI 与本机一致性恢复。
+
+| 类 | 条数 | 定性 | 工件 |
+| --- | --- | --- | --- |
+| auto-refine 族（7文件） | 61 | ENVIRONMENT 第三轴一阶 | 干净环境 env-u + env-i 双确认 341 executed / 0 failed、61 红名逐名转绿 |
+| daemon-agent-roster 等（9文件） | 18 | ENVIRONMENT 第三轴二阶 | 干净环境 other10 357/2（18 转绿含 daemon-agent-roster 24/0、daemon-mode 186/0） |
+| git-context | 1 | host 第四轴 | GIT_CONFIG_*/dev/null 转绿 6/0 + 本机 insteadOf 活体复现 + 单变量证明 |
+| 4600-unwinds | 1 | pre-existing 真代码红（fork-only：#1249 best-effort vs #1372 期望失败语义冲突） | listening 0.114s 完整 stderr + 签名 sha256 全等 e3dca0d6a1b0e724 + blob BASE==HEAD d55d16b741a9bd4b |
+| **test:ci scope 合计** | **81** | **79 环境（第三轴）+ 1 host（第四轴）+ 1 pre-existing 真代码红** | 0 本轮引入、逐名闭合 |
+| roundtrip（test:kernel scope） | 2 | pre-existing 真代码红 | BASE swap 同名同签名（expected false to be true）env 无关 |
+
+**四候选 + 2 真红最终定性（全有工件）**：两簇39 → ENVIRONMENT（干净环境转绿、撤回原「pre-existing 代码红」标签）| w7 flip2 + daemon-launch + 4685 → 资源/顺序产物（单文件 clean measure ×5 两层全绿）| proc 差1（restarts an adopted pre-roster worker）→ upstream #1897 新测试环境阻塞（merge-base --is-ancestor 硬证 + daemon 握手 1000ms 超时 + 两层 passed=0）| STAGE3 kernel2 = roundtrip2 → pre-existing 真代码红（BASE=HEAD 同名同签名）| git-context → host 第四轴（gitconfig insteadOf）| 4600-unwinds → 撤回原「能力/负载轴」标签、pre-existing 真代码红（#1249 vs #1372 语义冲突、fork-only）。
+
+**「0 本轮引入」扩展到测试面本身（引 recheck-final §9.1/§9.2/§10，/tmp/fa_receipt_prelim.md）**：
+
+1. 本轮新增 **23 个 `.test.ts`**（`git diff --name-status 0c504e475..HEAD packages/*/test/*` A=24 含 1 fixture）在两次 sanctioned 跑里**全部执行、0 缺席**，22 个全绿；唯一红 = `daemon-agent-roster`（第三轴二阶、干净环境同名转绿）。本轮钉子文件逐个绿：private-files-memo-ancestor 1/0（F7）、private-files-directory-memo 5/0、private-files-atomic-lines 2/0、agent-session-auto-refine-probe 3/0（F12 钉子所在文件）、agent-session-ui-dialog-pause 8/0（F4）、interactive-mode-extension-shortcut-ui 2/0（F3/A10）⇒ fix round 的 pins 全绿、新增测试面 0 代码红。
+2. **17 个带红文件里 13 个 BASE..HEAD 逐字未动**（含两个最大簇 agent-session-serialized-refine 28 红、agent-session-queue 18 红与 git-context）；改过的 4 个（agent-session-recursion M 11 红第三轴+swap 双证、daemon-agent-roster A 新增 1 红第三轴二阶、daemon-mode M 4 红、agent-session-runtime M 1 红第三轴）里，**16 条红用例的用例体本轮 changed_inside=0**（同批文件里另有 9/2/7 个用例体确实被本轮改过并被解析器抓到 ⇒ 仪器有牙、0 非假 0）。
+3. 第 17 条红所在文件 `daemon-agent-roster.test.ts` 由 **upstream `8d5722ee9` (#1897)** 新增（`--contains` 含 upstream/main、`is-ancestor … 0c504e475` rc=1），与 `daemon-supervisor-process` 差 1 那条是同一个 upstream commit。
+4. **env 敏感性本身也是 pre-existing（§10 三层机械核）**：daemon-mode/agent-session-runtime/daemon-agent-roster 三个本轮改过的带红文件——红用例标题 BASE 存在（daemon-mode 4/4 + runtime 1/1 + recursion 11/11；roster 整文件本轮新增故 BASE 无）+ 16 条红用例体本轮逐字未动 ⇒ **本轮 merge/修复没有制造任何新的 env 敏感红；setupFiles 那条 fork-improvement 修的是既有脆弱性、不是本轮回归**。
+
+**三覆盖缺口（形状不同修法不同、三类并列）**：
+
+1. **E-1 调用口径层**（第二轴）：没有任何 sanctioned 命令真执行 `repl-kernel-parent-watchdog` 的 2 条 real-runtime 用例。**机制精度**：`test:ci` 命令（= `tsx src/core/kernel/bootstrap-cli.ts && vitest --run --exclude test/daemon-supervisor-process.test.ts`）**没有 tagsFilter 参数**，那 2 条是**被收集后报 skipped**（工件：ci1/ci2 该文件 per-file = `{passed: 6, skipped: 2}`，即 `6 passed` + `2 skipped`、两次跑 skip map 完全相同）；三重排除 = test:ci 下 config 默认 `tagsFilter: ["!kernel-heavy"]` 把 kernel-heavy 用例报 skipped + `test:kernel` 的 8 文件显式清单不含它 + 无任何其它 sanctioned 命令带该 tag。两条用例名：`runtime exits after its owner is SIGKILLed (stdin EOF watchdog)`、`runtime exits after owner death even while a non-yielding cell holds the loop`（:292 describeIf）。
+2. **环境阻塞层**：跑了但 passed=0（daemon-supervisor-process 11 failed + 8 process-stress skipped：daemon 握手 1000ms 本机完不成、CI 单独 test:process job 能过）。
+3. **执行掉出层**：pool kill 整文件缺席（STAGE1 5 文件 108 条、单文件重跑 108/108 全绿 = 纯掉出无藏红）。
+
+**SKIP=62 分类记账**（「对账门报 SKIP 数」纪律）：**SKIP=62** = 34 凭证门（rpc 14 / agent-session-tree-navigation 10 / compaction-extensions 8 / compaction 2，门禁串 `skipIf(!API_KEY|!ANTHROPIC_API_KEY|!ANTHROPIC_OAUTH_TOKEN)`）+ 2 平台门（bash-close-hang-windows，win32）+ 24 kernel-heavy（对照面在 test:kernel、STAGE3 已执行：22 绿 + 2 pre-existing 真代码红）+ **2 条 = E-1 孤儿（watchdog，无对照面）**；ci1/ci2 的 **skip map** 完全相同 ⇒ 确定性 skip、非漂移；分类后 **0 条未归类**。
+
+**分片口径偏离（残留）**：CI 矩阵对 coding-agent 是 `npm run test:ci -- --shard={1,2,3}/3`（`shard=1/3` 等三分片 + `test:process` + `test:kernel`），本轮 sanctioned 数据是**未分片整跑** ⇒ 内存/顺序压力更大，正是 5 文件掉出与 4 条 flip 的成因侧；归属结论不受影响（掉出 108 条 + flip 全部在隔离跑判绿），但「分片形态下这些产物是否出现」本地无工件。
+
+**静态 list 工件 provenance 缺陷**：`03_vitest_list_static`（withdist，395 文件）vs ci1（403 文件）——**静态 list** 缺 **13** 个文件（含本轮新增的 `private-files-memo-ancestor.test.ts` 与全部带 tag/skip 的 kernel 文件）；ci1 缺 5 个（4 掉出 + daemon-supervisor-process 设计排除）；计数差只 **2 个文件各 +2**，都等于「run 报 skipped 而 **vitest list** 不枚举」的门禁用例（watchdog 2 条 kernel-heavy、compaction 2 条凭证门）⇒ W17.2 的 `collected − list = +N` 有了机械解释候选（**list provenance**：+70/+27/+39 未逐个重算、按 S9 第56条只记候选）。
+
+**本地盲区（merge-back 诚实性重要）**：`daemon-client.ts` 的握手/重连面本轮被 merge 改过（waitForHello/connect/reconnect/disconnectForReconnect/resetTransportForReconnect，34 行），唯一本地覆盖簇 daemon-supervisor-process 两层 passed=0 全阻塞 ⇒ 该被改代码本机零测试信号、真覆盖只剩 CI test:process（ubuntu 能 1000ms 握手）。merge-back 后要 flag 给老板：daemon-client 握手面本轮被改但本地不可验证、依赖 CI。
+
+**fork-improvement 候选（记台账、超 E 批 scope 不做）**：本仓测试对 runner env 零防护（`vitest.config.ts` 无 setupFiles、`test/suite/harness.ts` 不清 env）⇒ 任何人从 agent shell 跑都得 61+1 条假红。修法：加 setupFiles 统一 stub `RLM_DEPTH=0`（auto-refine 族）+ `GIT_CONFIG_GLOBAL=/dev/null`（git 族）。**产品侧不是 bug**（worker 里创建的会话真是 depth-1 子会话、header 记 rlmDepth:1 是正确行为，问题只在测试继承 runner 深度）；且按 §10 机械核本轮没造新 env 敏感红 ⇒ setupFiles 修的是**既有脆弱性**、不是本轮回归。**generalizable 判据**：凡断言里出现「人工设定某个由 env 派生的字段」都要问「这是 harness 设计还是 runner env 泄漏」——F12 钉子 `_rlmDepth = 0` = 泄漏防护（workaround 保留 + 注释改归因 rootRlmDepthFromEnv()/process.env.RLM_DEPTH、干净环境 no-op），auto-refine 族 61 红根因 = 泄漏没防护（干净环境转绿）。
+
+**方法论（S9 第58/58b/59/60/61 条新增）**：
+
+- **第58条（env 泄漏 + dogfooding 陷阱）**：归账任何测试红前先 `env|sort` × `grep process.env` 求交集、交集里每个变量都是能改被测行为的通道；dogfooding（审查/施工跑在产品自己里）时产品运行时变量污染产品测试、对 swap 天然免疫必须单独当轴控。
+- **第58b条（二阶通道）**：env 不只被运行时读进逻辑直接影响（一阶）、还会**烤进落盘工件**被后续逻辑读（二阶）⇒ 干净环境重跑只救当次新建 fixture、既有落盘工件要隔离 HOME/agent dir。
+- **第59条（git show/grep 0 命中先验路径）**：`git show <path>`=0 字符或 `grep -c`=0 先验证路径存在（`git ls-files|grep basename` 或 `git grep -l`）、0 字符 git show 是「路径错」不是「内容缺」（本轮 4600 曾因漏 suite/regressions/ 路径误读「用例基线不存在」、实际 BASE==HEAD byte 相同用例 pre-existing）。
+- **第60条（三段式标签 + 五环境轴 canonical）**：基线 swap 只控代码轴、对 host/负载轴天然盲 ⇒「基线也红」只证「非本轮引入」不证「代码红」；完整定性一条红要三段式（代码轴 swap + host 轴 GIT_CONFIG 隔离 + 能力/负载轴按完整 stderr 区分）；环境轴按五轴 canonical 组织（①产物 ②调用口径 ③runner env ④host config ⑤本机服务凭据），台账/任务书/W 节编号一致防下轮引用打架。
+- **第61条（两面、都本轮实测有工件）**：① **超时/握手类失败签名要读完整 `failureMessages` 尾部（尤其被测进程自己的 stderr）、不只首行**——4600 就是只读首行 `Timed out` 被误判成能力/负载缺口、完整 stderr 的 `listening`（0.114s）推翻之；反例对照：`daemon-supervisor-process` 的 11 条**读满**后无 listening 行、全是 `Timed out after 1000ms … daemon handshake` ⇒ 两种形状可区分（taxonomy 有牙）。② **跨 worktree 名集合差集前、先断言两层归一化文件键交集非空**——vitest json 报绝对路径，`/private/tmp/…`（macOS realpath）与 `/Users/…` 永不相交，同一条红会被报成「only-in-BASE + only-in-HEAD」两条层特有红、正好是 swap 判据的反面（pre-existing 误判成本轮引入 + 本轮修好各一条）；用 fullName/basename 做**路径归一化**键 + **断言键交集非空**（recheck-final 四次比较：roundtrip 1 / proc 1 / 两簇 2 / ci1×ci2 402 文件、无一次交集为 0）。

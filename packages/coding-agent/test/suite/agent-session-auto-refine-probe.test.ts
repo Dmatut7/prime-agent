@@ -13,8 +13,11 @@ type SessionWithRefineProbe = {
 };
 
 /**
- * The suite harness builds a depth-1 (RLM child) session, and the probe only runs
- * for a root session, so the depth is set to the value the code path requires.
+ * The depth is seeded by rootRlmDepthFromEnv() from process.env.RLM_DEPTH, so running
+ * inside an agent worker shell makes every harness session a depth-1 child, and
+ * _autoRefineAllowedForSession() returns false at the depth gate (agent-session.ts
+ * _rlmDepth !== 0). Pinning _rlmDepth = 0 here keeps this nail independent of the
+ * runner environment; under a clean environment it is a no-op.
  */
 function rootSession(harness: Harness): SessionWithRefineProbe {
 	const internals = harness.session as unknown as SessionWithRefineProbe;
