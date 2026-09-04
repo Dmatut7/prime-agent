@@ -11010,8 +11010,11 @@ export class AgentSession {
 				// Strong RLM quiescence also owns session-level work (bash, refine,
 				// branch mutation, and manual compaction) that interactive waitForIdle
 				// intentionally ignores. Wake on activity changes (upstream #1859), raced
-				// with a 1s tick so time-based terminal-notice abandonment (FIX-Q4) still
-				// fires while idle.
+				// with a 1s tick so this loop re-checks a deferred terminal notice whose
+				// delivery window closes while idle. The tick only observes: abandonment
+				// itself is driven by its own timer (see
+				// _armRlmTerminalNoticeAbandonTimer), because both predicates below are
+				// pure reads and must not flush or discard anything.
 				if (this.isSessionActive || this._hasActionableDeferredRlmTerminalNotices()) {
 					await wait(
 						Promise.race([
