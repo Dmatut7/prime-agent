@@ -1,6 +1,7 @@
 // Kernel client for the REPL runtime: the kernel is a JSON-lines subprocess
-// (`python -m rlm.repl`) — requests on stdin, events on stdout, stderr kept as
-// a diagnostics tail. The protocol is documented in prime-agent-runtime/src/rlm/repl.md.
+// (`python -m rlm.repl`) — requests on stdin, events on stdout, the process's stderr
+// appended to a per-session log file (the in-memory tail holds host diagnostics only).
+// The protocol is documented in prime-agent-runtime/src/rlm/repl.md.
 import { type ChildProcess, spawn } from "node:child_process";
 import {
 	closeSync,
@@ -8,7 +9,6 @@ import {
 	existsSync,
 	fchmodSync,
 	fstatSync,
-	mkdirSync,
 	openSync,
 	readSync,
 	renameSync,
@@ -18,7 +18,7 @@ import {
 import { dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { v4 as uuid } from "uuid";
-import { assertRegularFileNoSymlink, requireNoFollow } from "../../utils/private-files.js";
+import { assertRegularFileNoSymlink, ensurePrivateDirectory, requireNoFollow } from "../../utils/private-files.js";
 import { reapKernelOrphanProcesses, recordOrphanProcessState } from "../orphan-process-journal.js";
 import { ensureKernelPython } from "./bootstrap.js";
 import {
@@ -76,6 +76,13 @@ const MAX_BACKGROUND_OUTPUT_CHARS = 64 * 1024;
 
 const MAX_KERNEL_STDERR_CHARS = 8 * 1024;
 const MAX_KERNEL_STDERR_LOG_BYTES = 5 * 1024 * 1024;
+// Startup-failure report size, split so host diagnostics and the kernel's own tail each
+// keep a quota and neither can crowd the other out of the window.
+const MAX_KERNEL_STDERR_REPORT_CHARS = 1024;
+const KERNEL_STDERR_HOST_TAIL_CHARS = 256;
+// O_NONBLOCK degrades to 0 on win32 (as in private-files.ts): a no-op on regular files,
+// but a planted FIFO then fails at once instead of blocking the event loop.
+const NONBLOCK_FLAG = constants.O_NONBLOCK ?? 0;
 
 /** ExecuteResult plus the raw fields of the request's `done` event (state ops). */
 interface InternalExecuteResult extends ExecuteResult {
@@ -171,6 +178,9 @@ export class ReplKernelManager {
 	private child?: ChildProcess;
 	private readyDeferred?: ReturnType<typeof createDeferred<number>>;
 	private kernelStderr = "";
+	/** Byte offset this spawn's kernel started at in the stderr log, so a failure report
+	 * never shows a previous incarnation's bytes; undefined when this spawn has no log fd. */
+	private stderrLogWindowStart?: number;
 	/** Serializes execute() calls — the runtime runs one request at a time. */
 	private executionQueue: Promise<unknown> = Promise.resolve();
 	private activeExecution?: ActiveExecution;
@@ -251,13 +261,24 @@ export class ReplKernelManager {
 	 */
 	private openStderrLogFd(): number | undefined {
 		const path = this.options.stderrLogPath;
+		this.stderrLogWindowStart = undefined;
 		if (!path) return undefined;
 		try {
-			mkdirSync(dirname(path), { recursive: true });
-			if (existsSync(path) && statSync(path).size > MAX_KERNEL_STDERR_LOG_BYTES) {
-				// Drop any prior .old first: rename fails on Windows if it exists.
-				rmSync(`${path}.old`, { force: true });
-				renameSync(path, `${path}.old`);
+			ensurePrivateDirectory(dirname(path));
+			const exists = existsSync(path);
+			// Refuse a planted non-regular file before anything touches it: O_NOFOLLOW covers
+			// symlinks only (and degrades to 0 on win32), and opening a FIFO O_WRONLY would
+			// block the event loop inside the kernel boot permit.
+			if (exists) assertRegularFileNoSymlink(path);
+			if (exists && statSync(path).size > MAX_KERNEL_STDERR_LOG_BYTES) {
+				try {
+					// Drop any prior .old first: rename fails on Windows if it exists.
+					rmSync(`${path}.old`, { force: true });
+					renameSync(path, `${path}.old`);
+				} catch (error) {
+					// A failed rotation must not cost the log: keep appending instead.
+					this.appendKernelDiagnostic(`cannot rotate kernel stderr log: ${errorMessage(error)}`);
+				}
 			}
 			// Fork policy (#1249 private session files): 0600, and refuse a planted
 			// symlink. openSync's mode only applies at creation and this log survives
@@ -265,10 +286,16 @@ export class ReplKernelManager {
 			// degrades to 0 on win32, matching orphan-process-journal.
 			const fd = openSync(
 				path,
-				constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | requireNoFollow(constants.O_NOFOLLOW),
+				constants.O_WRONLY |
+					constants.O_APPEND |
+					constants.O_CREAT |
+					requireNoFollow(constants.O_NOFOLLOW) |
+					NONBLOCK_FLAG,
 				0o600,
 			);
 			if (process.platform !== "win32") fchmodSync(fd, 0o600);
+			// O_APPEND put the write offset at EOF, so this is exactly the byte the kernel starts at.
+			this.stderrLogWindowStart = fstatSync(fd).size;
 			return fd;
 		} catch (error) {
 			this.appendKernelDiagnostic(`cannot open kernel stderr log: ${errorMessage(error)}`);
@@ -278,26 +305,30 @@ export class ReplKernelManager {
 
 	private stderrTail(): string {
 		let fileTail = "";
-		if (this.options.stderrLogPath) {
+		const windowStart = this.stderrLogWindowStart;
+		if (this.options.stderrLogPath && windowStart !== undefined) {
 			try {
-				// Positional read of the tail only: a kernel that spewed until the
-				// ready timeout can leave a log far too large to read whole.
+				// Positional read of this spawn's bytes only: a kernel that spewed until the
+				// ready timeout can leave a log far too large to read whole, and the log
+				// survives across spawns, so the window starts where this kernel started.
 				assertRegularFileNoSymlink(this.options.stderrLogPath);
 				const fd = openSync(this.options.stderrLogPath, constants.O_RDONLY | requireNoFollow(constants.O_NOFOLLOW));
 				try {
 					const size = fstatSync(fd).size;
-					const length = Math.min(size, 1024);
+					const start = Math.min(windowStart, size);
+					const length = Math.min(size - start, MAX_KERNEL_STDERR_REPORT_CHARS - KERNEL_STDERR_HOST_TAIL_CHARS);
 					const buffer = Buffer.alloc(length);
-					readSync(fd, buffer, 0, length, size - length);
-					fileTail = buffer.toString("utf8");
+					// A short read (the file shrank under us) must not surface as NUL padding.
+					const bytesRead = readSync(fd, buffer, 0, length, size - length);
+					fileTail = buffer.toString("utf8", 0, bytesRead);
 				} finally {
 					closeSync(fd);
 				}
 			} catch {
-				// Unreadable log; host diagnostics below still surface.
+				// Unreadable log; the host diagnostics still surface on their own.
 			}
 		}
-		return `${fileTail}${this.kernelStderr}`.slice(-1024);
+		return `${this.kernelStderr.slice(-KERNEL_STDERR_HOST_TAIL_CHARS)}${fileTail}`;
 	}
 
 	async start(options: KernelStartOptions = {}): Promise<void> {
