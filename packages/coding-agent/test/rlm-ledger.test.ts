@@ -33,6 +33,7 @@ import { dirname, join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
+import { EventLog } from "../src/core/event-log.js";
 import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../src/core/rlm-runtime.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
 import * as sessionManagerModule from "../src/core/session-manager.js";
@@ -103,6 +104,83 @@ describe("rlm spawn ledger", () => {
 			expect(JSON.parse(lines[4])).toMatchObject({ v: 1, op: "delete", reason: "revoked" });
 			expect(statSync(ledger.ledgerPath).mode & 0o777).toBe(0o600);
 			expect(statSync(dirname(ledger.ledgerPath)).mode & 0o777).toBe(0o700);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("reuses one whole-file replay across consecutive edge reads and never leaks the cache", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-replay-cache-"));
+		let replaySpy: ReturnType<typeof vi.spyOn> | undefined;
+		try {
+			const { sessionsDir, parentFile } = makeRoots(root);
+			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			await ledger.appendSpawn({
+				childId: "sub-11111111",
+				parent: parentFile,
+				child: join(root, "a.jsonl"),
+				depth: 1,
+				name: "worker-a",
+			});
+			// Warm the cache first: the opening read also carries the one-time seed.
+			const first = await ledger.edges();
+			expect(first).toEqual([expect.objectContaining({ childId: "sub-11111111", name: "worker-a" })]);
+
+			replaySpy = vi.spyOn(EventLog.prototype, "replaySync");
+			const second = await ledger.edges();
+			const third = await ledger.edges();
+			// Two more answers off the same (size, mtimeMs) guard, zero more whole-file reads.
+			expect(replaySpy).not.toHaveBeenCalled();
+			expect(second).toEqual(first);
+			expect(third).toEqual(first);
+
+			// A caller writing into its own result must never reach the cached edges.
+			const [edge] = second;
+			if (!edge) throw new Error("Missing ledger edge");
+			edge.name = "polluted-by-caller";
+			const fourth = await ledger.edges();
+			expect(fourth).toEqual([expect.objectContaining({ name: "worker-a" })]);
+			// The isolation came from the per-replay clone, not from a fresh read.
+			expect(replaySpy).not.toHaveBeenCalled();
+		} finally {
+			replaySpy?.mockRestore();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("drops the replay cache on its own append so the next read sees the new record", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-append-invalidate-"));
+		try {
+			const { sessionsDir, parentFile } = makeRoots(root);
+			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			await ledger.appendSpawn({
+				childId: "sub-11111111",
+				parent: parentFile,
+				child: join(root, "a.jsonl"),
+				depth: 1,
+				name: "worker-a",
+			});
+			// Warm the cache so the append has something to invalidate; this leg also
+			// proves the field name below is the real one, not a typo reading undefined.
+			expect(await ledger.edges()).toHaveLength(1);
+			expect(Reflect.get(ledger, "replayCache")).toBeDefined();
+
+			await ledger.appendSpawn({
+				childId: "sub-22222222",
+				parent: parentFile,
+				child: join(root, "b.jsonl"),
+				depth: 1,
+				name: "worker-b",
+			});
+			// An append that lands inside the filesystem's mtime granularity is invisible
+			// to a stat, and our own write is the one case the (size, mtimeMs) guard can
+			// rule out for free — so this leg, not the behavioral one below, is what pins
+			// the invalidation itself.
+			expect(Reflect.get(ledger, "replayCache")).toBeUndefined();
+			expect(await ledger.edges()).toEqual([
+				expect.objectContaining({ childId: "sub-11111111", name: "worker-a" }),
+				expect.objectContaining({ childId: "sub-22222222", name: "worker-b" }),
+			]);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
