@@ -6,6 +6,14 @@ import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
  * has to come from the runner: bindExtensions installs the dialog-tracking wrapper there, and a
  * fresh context would leave shortcut-opened dialogs uncounted, so the stall watchdog would not
  * pause for them.
+ *
+ * Scope limit, so the next reader does not assume one test covers the whole property. "A dialog
+ * opened through a shortcut pauses the stall watchdog" is a three-link chain: this identity nail
+ * (the shortcut context is the runner's), the wiring nail in
+ * test/suite/agent-session-ui-dialog-pause.test.ts (a bound dialog open makes an armed watchdog
+ * snooze), and the static fact that hasUI() and getUIContext() key off the same field, so a true
+ * hasUI() always means the wrapped context. No single test covers the chain, and breaking one
+ * link does not redden any one of them alone.
  */
 function extract(runnerHasUI: boolean) {
 	const tracked = { __which: "tracked", confirm: vi.fn() };

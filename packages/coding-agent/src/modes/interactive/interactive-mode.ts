@@ -3172,6 +3172,12 @@ export class InteractiveMode {
 			// installed, and extension handlers get their UI context from it. Building a
 			// fresh one here left the shortcut path uncounted, so a dialog opened by a
 			// shortcut handler did not pause the stall watchdog.
+			//
+			// The fallback is only reached when the runner has no bound UI context at all,
+			// in which case there is no session-side wrapper either, so there is no dialog
+			// counting to lose. It depends on every host passing uiContext to
+			// bindExtensions; a host that bound an empty set while interactive mode kept
+			// this fallback would hand out a real but uncounted context.
 			ui: extensionRunner.hasUI() ? extensionRunner.getUIContext() : this.createExtensionUIContext(),
 			hasUI: extensionRunner.hasUI(),
 			cwd: this.getCurrentCwd(),
