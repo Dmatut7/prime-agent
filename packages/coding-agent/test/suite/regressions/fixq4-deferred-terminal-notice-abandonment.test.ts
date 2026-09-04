@@ -113,6 +113,37 @@ describe("FIX-Q4 stale deferred terminal notices stop pinning the session", () =
 		expect(harness.session.deferredRlmTerminalNoticeSince).toBeTypeOf("number");
 	});
 
+	it("stamps the deferral when a terminal notice arrives through the unshift route", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const internals = harness.session as unknown as {
+			_unshiftPendingNextTurnMessages(...messages: unknown[]): void;
+			_enqueuePendingNextTurnMessages(messages: readonly unknown[], atFront: boolean): void;
+			deferredRlmTerminalNoticeSince: number | undefined;
+		};
+
+		// The re-injection routes (cancel, prefix restore, commit rollback) all unshift.
+		// The deferral guard lives in the shared core, so this route has to stamp too:
+		// a queued notice with no timestamp arms no timer and never goes stale.
+		expect(internals.deferredRlmTerminalNoticeSince).toBeUndefined();
+		internals._unshiftPendingNextTurnMessages(terminalNotice("child-unshift-route"));
+		expect(internals.deferredRlmTerminalNoticeSince).toBeTypeOf("number");
+		expect(harness.session.getPendingNextTurnMessageSnapshots()).toHaveLength(1);
+
+		// A non-notice message must not stamp anything.
+		const harness2 = await createHarness();
+		harnesses.push(harness2);
+		const internals2 = harness2.session as unknown as {
+			_enqueuePendingNextTurnMessages(messages: readonly unknown[], atFront: boolean): void;
+			deferredRlmTerminalNoticeSince: number | undefined;
+		};
+		internals2._enqueuePendingNextTurnMessages(
+			[{ role: "custom", customType: "not-a-terminal-notice", content: "x", timestamp: Date.now() }],
+			true,
+		);
+		expect(internals2.deferredRlmTerminalNoticeSince).toBeUndefined();
+	});
+
 	it("delivers through the flush attempt when the pump can run again", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
