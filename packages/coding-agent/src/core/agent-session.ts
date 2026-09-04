@@ -5099,15 +5099,24 @@ export class AgentSession {
 	 * "a queued terminal notice always has a timestamp" structural rather than something
 	 * each re-injection path has to remember: without a timestamp no abandonment timer is
 	 * armed and the staleness predicate never fires, so the session stays pinned forever.
+	 *
+	 * The guard lives in this one core, not in each directional shell, so it cannot be
+	 * half-present: dropping it breaks both the push and the unshift routes at once.
 	 */
+	private _enqueuePendingNextTurnMessages(messages: readonly CustomMessage[], atFront: boolean): void {
+		if (atFront) this._pendingNextTurnMessages.unshift(...messages);
+		else this._pendingNextTurnMessages.push(...messages);
+		if (messages.some((message) => this._isRlmTerminalNotice(message))) {
+			this._markRlmTerminalNoticeDeferred();
+		}
+	}
+
 	private _pushPendingNextTurnMessages(...messages: CustomMessage[]): void {
-		this._pendingNextTurnMessages.push(...messages);
-		if (messages.some((message) => this._isRlmTerminalNotice(message))) this._markRlmTerminalNoticeDeferred();
+		this._enqueuePendingNextTurnMessages(messages, false);
 	}
 
 	private _unshiftPendingNextTurnMessages(...messages: CustomMessage[]): void {
-		this._pendingNextTurnMessages.unshift(...messages);
-		if (messages.some((message) => this._isRlmTerminalNotice(message))) this._markRlmTerminalNoticeDeferred();
+		this._enqueuePendingNextTurnMessages(messages, true);
 	}
 
 	/** Record that terminal notices are deferred, and arm the abandonment driver. */
