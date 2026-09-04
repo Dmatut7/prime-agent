@@ -138,7 +138,10 @@ export function ensurePrivateDirectory(path: string): void {
 	// would see the link's 0700 target and accept the link.
 	if (validatedDirectories.has(resolved) && stillUsablePrivateDirectory(resolved)) return;
 	validatedDirectories.delete(resolved);
-	validatePrivateDirectory(path);
+	// Validate the resolved spelling too, so the key and the checked object are the
+	// same string everywhere in this function. resolve() is idempotent, so this does
+	// not change behaviour.
+	validatePrivateDirectory(resolved);
 	rememberValidatedDirectory(resolved);
 }
 
@@ -150,12 +153,17 @@ export function ensurePrivateDirectory(path: string): void {
  * the same lstat, so re-checking it costs nothing. Only the ancestor walk is
  * skipped, which needs write access to an ancestor to subvert.
  *
- * win32 does not report 0700 on directories, so the memo never hits there and
- * every call takes the full path - the pre-memoization behaviour, unchanged.
+ * On win32 a directory's mode bits do not report 0700, so the hit condition
+ * `(stats.mode & 0o777) === PRIVATE_DIRECTORY_MODE` is not satisfied and every call
+ * takes the full path: same behaviour as before the memo, at the cost of one extra
+ * lstat. Nothing here depends on a platform this test suite cannot observe.
  */
 function stillUsablePrivateDirectory(resolvedPath: string): boolean {
 	try {
 		const stats = lstatSync(resolvedPath);
+		// !isSymbolicLink() is redundant under lstat semantics (a link to a directory
+		// reports isDirectory() false), and is kept as explicit defence in depth rather
+		// than nailed by its own test. The other two conditions each have one.
 		return !stats.isSymbolicLink() && stats.isDirectory() && (stats.mode & 0o777) === PRIVATE_DIRECTORY_MODE;
 	} catch (error) {
 		if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
