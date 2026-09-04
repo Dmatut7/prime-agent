@@ -28,6 +28,8 @@ import type {
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import type { StallDiagnostics } from "../../core/stall-diagnostics.js";
+import type { SessionUsageSummary } from "../../core/usage.js";
+import type { SessionSummary } from "../daemon/daemon-session-list.js";
 
 /**
  * Client-side interaction boundary consumed by InteractiveMode.
@@ -134,6 +136,7 @@ export interface AgentConnectionSavedSessionInfo {
 	firstMessage: string;
 	allMessagesText: string;
 	agentStatus?: AgentConnectionAgentStatus;
+	usage?: SessionUsageSummary;
 }
 
 export type AgentConnectionSessionListProgress = (loaded: number, total: number) => void;
@@ -710,6 +713,7 @@ export interface AgentConnection {
 	getToolDefinition(name: string): Promise<AgentConnectionToolDefinition | undefined>;
 	setSessionEntryLabel(entryId: string, label: string | undefined): Promise<void>;
 	respondToExtensionUiRequest(requestId: string, response: AgentConnectionExtensionUiResponse): Promise<void>;
+	subscribeAgentRoster?(listener: () => void): Promise<{ summaries(): SessionSummary[]; dispose(): Promise<void> }>;
 	supportsAcpMcpServers?(): boolean;
 	/** True when waitForHeadlessCompletion accepts the RLM quiescence barrier. */
 	supportsRlmQuiescenceBarrier?(): boolean;

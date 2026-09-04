@@ -40,6 +40,22 @@ function namedLine(name: string): string {
 }
 
 /**
+ * A whole Usage record: every field addAssistantUsage() reads must be present,
+ * or the totals come out NaN. cost.total is an integer so the expectations below
+ * stay exact instead of needing toBeCloseTo().
+ */
+function usageLine(input: number, output: number) {
+	return {
+		input,
+		output,
+		cacheRead: 1,
+		cacheWrite: 2,
+		totalTokens: input + output,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: input },
+	};
+}
+
+/**
  * A cold read of identical bytes at an untouched path, which never resumes and
  * so reports what a full scan would. Every incremental result is compared
  * against this rather than against hand-written expectations.
@@ -131,5 +147,81 @@ describe("readSessionInfo incremental rescan", () => {
 
 		appendFileSync(path, messageLine("assistant", "still orphan", 2000));
 		expect(await readSessionInfo(path)).toBeNull();
+	});
+
+	/**
+	 * The #2003 usage aggregates are part of what a scan accumulates, so a resumed
+	 * scan has to restore them or the reported totals shrink on every append. Each
+	 * append is a separate pass: three appends in one write would only ever exercise
+	 * the full scan and prove nothing about resume.
+	 */
+	it("reports the same usage totals on a resumed scan as on a full one", async () => {
+		const path = join(dir, "usage.jsonl");
+		writeFileSync(path, headerLine() + messageLine("user", "question", 1000), "utf8");
+		await expectMatchesFullScan(path);
+
+		// An assistant turn carrying usage. Its entry id is what the attribution fold keys on.
+		const assistantId = `entry-${++counter}`;
+		appendFileSync(
+			path,
+			`${JSON.stringify({
+				type: "message",
+				id: assistantId,
+				parentId: null,
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "answer" }],
+					timestamp: 2000,
+					usage: usageLine(100, 20),
+				},
+			})}\n`,
+			"utf8",
+		);
+		// Non-zero fixture on purpose: sessionUsageSummaryFrom() returns undefined for
+		// all-zero totals, and undefined on both sides would pass the comparison vacuously.
+		let info = await expectMatchesFullScan(path);
+		expect(info?.usage).toBeDefined();
+		// 100 input + 1 cacheRead + 2 cacheWrite; 20 output; cost.total 100.
+		expect(info?.usage).toEqual({ inputTokens: 103, outputTokens: 20, cost: 100 });
+
+		// A summarization entry carrying its own usage: the grow-only accumulator.
+		appendFileSync(
+			path,
+			`${JSON.stringify({
+				type: "compaction",
+				id: `entry-${++counter}`,
+				parentId: null,
+				summary: "s",
+				firstKeptEntryId: assistantId,
+				tokensBefore: 5000,
+				usage: usageLine(10, 5),
+			})}\n`,
+			"utf8",
+		);
+		info = await expectMatchesFullScan(path);
+		// (100 + 10) input + (1 + 1) cacheRead + (2 + 2) cacheWrite; 20 + 5 output; cost 100 + 10.
+		expect(info?.usage).toEqual({ inputTokens: 116, outputTokens: 25, cost: 110 });
+
+		// Attribution arriving in a LATER pass than its target. Only a restored
+		// assistantUsageById makes has(targetId) true here, exactly like a full scan;
+		// without it the target's usage is silently never folded and never subtracted.
+		appendFileSync(
+			path,
+			`${JSON.stringify({
+				type: "child_usage_attributed",
+				id: `entry-${++counter}`,
+				parentId: null,
+				targetId: assistantId,
+				childUsage: usageLine(30, 4),
+				aggregateUsage: usageLine(130, 24),
+			})}\n`,
+			"utf8",
+		);
+		info = await expectMatchesFullScan(path);
+		expect(info?.usage).toBeDefined();
+		// The target's 100/20 is overwritten by the aggregate 130/24, then the child 30/4 is
+		// subtracted back out, so own spend stays 110/25/110 plus the compaction — the fold is
+		// value-neutral on the tokens it accounts for, and drops cacheRead/cacheWrite by one each.
+		expect(info?.usage).toEqual({ inputTokens: 113, outputTokens: 25, cost: 110 });
 	});
 });

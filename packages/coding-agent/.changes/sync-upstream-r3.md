@@ -1,0 +1,5 @@
+- Changed the agents view to declare first-party daemon capabilities when connecting, so supervisor-only capabilities (agent roster, direct peer transport) are requested explicitly instead of being advertised by every worker.
+- Changed daemon roster attach degradation (daemon not advertising the agent roster, or the subscribe request failing) to be recorded in the agent log instead of being swallowed silently; session behaviour is unchanged.
+- Kept the local "(no activity Xm)" quiet-duration label on each agents-view row while adopting the upstream heartbeat-aware status label.
+- Kept the local incremental session-file scan and restored upstream's per-entry usage accumulators into its resume state, so token and cost totals no longer drop for sessions that are scanned incrementally after going idle.
+- Removed the agents-view promotion of ancestor rows to running when a descendant only has an armed heartbeat, matching upstream: an armed heartbeat between firings is residency rather than work, so ancestor rows stay idle and no longer inherit the descendant's quiet-duration label.
