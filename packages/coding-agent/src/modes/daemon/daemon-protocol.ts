@@ -102,8 +102,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 //   24 fork 3e65c87439aa | upstream 75f88f1a91df
 //   25 fork 4044beb7c9f4 | upstream 585ef1102921
 //   26 fork 31fb64b6f4ee | upstream 962b8b4c5e35
-export const DAEMON_SCHEMA_REVISION = 26;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-26-31fb64b6f4ee";
+//   27 union of both sides' 24/25/26 (sync-upstream-r3 merge); see S5.1 table in docs/fork/sync-upstream-r3.md
+export const DAEMON_SCHEMA_REVISION = 27;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-27-589a2219bc8b";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
