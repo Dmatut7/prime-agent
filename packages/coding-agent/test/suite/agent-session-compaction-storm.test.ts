@@ -1,3 +1,4 @@
+import type { ShouldStopAfterTurnContext } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHarness, type Harness } from "./harness.js";
@@ -9,6 +10,8 @@ type SessionWithCompactionInternals = {
 		queueAutonomousContinuation?: boolean,
 	) => Promise<boolean>;
 	_runAutoCompaction: (reason: "overflow" | "threshold" | "requested", willRetry: boolean) => Promise<boolean>;
+	_thresholdCompactionNeeded: (context: ShouldStopAfterTurnContext) => Promise<boolean>;
+	_continueAfterThresholdCompaction: boolean;
 };
 
 function createUsage(totalTokens: number) {
@@ -205,5 +208,34 @@ describe("threshold compaction storm guards (scan2 C1/C2/C4)", () => {
 		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
 		await internals._checkCompaction(assistant, false, false);
 		expect(runSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the turn running while the threshold cooldown is armed", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			models: [{ id: "faux-1", contextWindow: 200_000 }],
+		});
+		harnesses.push(harness);
+		const internals = harness.session as unknown as SessionWithCompactionInternals;
+
+		harness.setResponses([fauxAssistantMessage("seed reply")]);
+		await harness.session.prompt("seed");
+		// Arm the cooldown the same way the case above does: one skipped attempt.
+		await internals._runAutoCompaction("threshold", false);
+
+		const assistant = createAssistant(harness, { totalTokens: 190_000, timestamp: Date.now() + 1000 });
+		harness.sessionManager.appendMessage(assistant);
+		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+
+		// The shouldStopAfterTurn hook has to agree with _checkCompaction. Cooling down
+		// must not stop the loop, queue a continuation for a compaction that will not
+		// run, or set the flag that would leak into the next compaction. The hook only
+		// reads `message` from its context.
+		const needed = await internals._thresholdCompactionNeeded({
+			message: assistant,
+		} as unknown as ShouldStopAfterTurnContext);
+
+		expect(needed).toBe(false);
+		expect(internals._continueAfterThresholdCompaction).toBe(false);
 	});
 });

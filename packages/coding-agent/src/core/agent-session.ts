@@ -2924,6 +2924,13 @@ export class AgentSession {
 			return false;
 		}
 
+		// Mirror _checkCompaction: a cooling-down threshold must not stop the loop or
+		// queue continuations for a compaction that will not run. Without this the hook
+		// ends the turn and burns a continuation while agent_end's cooldown check skips
+		// the compaction, so nothing is compacted, nothing is disclosed, and
+		// _continueAfterThresholdCompaction leaks into the next compaction.
+		if (this._isThresholdCompactionCoolingDown(contextWindow)) return false;
+
 		// Goal continuation takes exclusive priority over autonomous continuation, matching _getContinuationMessages.
 		if (this._queueGoalContinuationForThresholdCompaction(context.message)) {
 			this._continueAfterThresholdCompaction = true;
@@ -3751,6 +3758,10 @@ export class AgentSession {
 
 	private _handleStallWatchdogStage(info: StallWatchdogStageInfo): void {
 		const settings = this.settingsManager.getStallWatchdogSettings();
+		// The watchdog re-checks its own live flag before firing, but a stage can be in
+		// flight when the user disables it. Never warn about, or abort, a live turn the
+		// user just put back under their own control.
+		if (!settings.enabled) return;
 		const diagnostics = this._collectStallDiagnostics(info.silentMs);
 		const silentSeconds = Math.max(1, Math.round(info.silentMs / 1000));
 		const logFields = {
@@ -4009,7 +4020,18 @@ export class AgentSession {
 				// never retryable. A subagent must tell its parent instead of parking
 				// silently in needs_input (the synthesized completed_without_reply
 				// notice carries no error context and reads like a normal completion).
-				await this._notifyParentOfTerminalError(msg);
+				try {
+					await this._notifyParentOfTerminalError(msg);
+				} catch (error) {
+					// The parent notice is best-effort; the retry resolution and goal
+					// finalization below are not. A throw here would reject
+					// _processAgentEvent, which is swallowed, leaving _retryPromise
+					// unresolved and the session wedged in isRetrying.
+					sessionLog.warn("subagent terminal-error notice failed", {
+						sessionId: this.sessionManager.getSessionId(),
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
 			}
 			this._resolveRetry();
 			if (!compactionWillRetry) {
