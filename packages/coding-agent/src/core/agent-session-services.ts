@@ -226,10 +226,14 @@ export async function createAgentSessionFromServices(
 	installAgentTraceUpload(options.sessionManager, {
 		authStorage: options.services.authStorage,
 		settingsManager: options.services.settingsManager,
-		semanticEdgesLedgerPath: semanticEdgeLedgerPath({
-			rlmSessionDir: options.rlmSessionDir,
-			sessionArtifactDir: options.sessionManager.getSessionArtifactDir(),
-		}),
+		// A non-persisted session (an in-memory root and its RLM descendants) must leave
+		// nothing on disk, so the ledger is only wired up when persistence is allowed.
+		semanticEdgesLedgerPath: options.sessionManager.allowsPersistence()
+			? semanticEdgeLedgerPath({
+					rlmSessionDir: options.rlmSessionDir,
+					sessionArtifactDir: options.sessionManager.getSessionArtifactDir(),
+				})
+			: undefined,
 	});
 	const result = await createAgentSession({
 		cwd: options.services.cwd,

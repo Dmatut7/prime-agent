@@ -1359,10 +1359,14 @@ export class AgentSession {
 		this._rlmParentNodeId = config.rlmParentNodeId;
 		this._rlmParentAgent = config.rlmParentAgent;
 		this._semanticEdges = new SemanticEdgeRecorder({
-			ledgerPath: semanticEdgeLedgerPath({
-				rlmSessionDir: this._rlmSessionDir,
-				sessionArtifactDir: this.sessionManager.getSessionArtifactDir(),
-			}),
+			// A non-persisted session (an in-memory root and its RLM descendants) must leave
+			// nothing on disk, so the ledger is only wired up when persistence is allowed.
+			ledgerPath: this.sessionManager.allowsPersistence()
+				? semanticEdgeLedgerPath({
+						rlmSessionDir: this._rlmSessionDir,
+						sessionArtifactDir: this.sessionManager.getSessionArtifactDir(),
+					})
+				: undefined,
 			sessionId: this.sessionManager.getSessionId(),
 			parentSessionId: config.semanticParentSessionId,
 			spawnedByRequestId: config.semanticSpawnedByRequestId,
