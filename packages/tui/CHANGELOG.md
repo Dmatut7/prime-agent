@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased]
+
+- Fixed input and rendering lag in long sessions written in CJK and other non-Latin scripts, where the terminal width cache was too small to hold a session's text and re-segmented it every frame.
+- Changed the fullscreen transcript and container rendering to reuse the previous frame's lines when no component changed, so cost tracks what moved instead of how long the session is.
+- Changed the editor to reuse word-wrapped lines across frames and keystrokes, so typing re-wraps only the edited line rather than the whole input.
+- Changed Ghostty inline images to use a safe text fallback by default, with explicit opt-in via `PI_ENABLE_GHOSTTY_IMAGES`.
+- Changed fullscreen mouse-wheel scrolling to move one transcript row per wheel step.
+- Capped the editor undo stack at 500 snapshots and the kill ring at 60 entries, and cleared undo on an empty `setText` so session resets cannot restore the previous buffer.
+- Stopped fallback-only image components from retaining their base64 payload after construction.
+- Recovered from stuck bracketed paste mode when `201~` never arrives, by timing out, capping the paste buffer, and treating Esc as an abort that flushes buffered text as ordinary input.
+- Recovered from stuck bracketed paste by discarding on Esc and emitting timeout or oversized pastes as one atomic paste instead of character-by-character input.
+- Added `TUI.isFullscreenReviewing()` so callers can tell live fullscreen follow from a scrolled-away review.
+- Discarded in-flight bracketed paste on session switch and stdin drain so a late `201~` cannot insert into the next session.
+- Treated two Escape presses within the sequence timeout as two `escape` keys instead of `ctrl+alt+[`, while keeping Esc+letter as `alt+letter`.
+- Interrupted an in-flight bracketed paste with Ctrl+C so the key is not swallowed for up to 30s.
+- Recognized a Kitty Esc abort split across paste chunks, and stopped discarding in-flight paste when a chunk ended in ESC before an ANSI sequence finished.
+- Kept keystrokes that follow a Kitty Esc abort inside a paste chunk, instead of discarding the rest of the chunk with the paste.
+- Moved remaining hardcoded editor, selector, and debug key checks into configurable TUI keybindings.
+- Fixed a double-Escape keypress from swallowing a following CSI sequence in the same stdin chunk, so Esc then an arrow key still moves the cursor instead of inserting `[A`.
+- Preserved editor undo across a manual empty `setText` (Ctrl+C / Esc clear) while still dropping undo on session reset and slash-command clears.
+
 ## [0.9.0] - 2026-09-01
 
 - Add an optional `transform` hook to `Markdown` so callers can rewrite markdown with the exact content width before rendering.
