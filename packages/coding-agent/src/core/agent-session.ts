@@ -8235,16 +8235,17 @@ export class AgentSession {
 
 	private _autoRefineAllowedForSession(): boolean {
 		if (!isPersistentHarnessStorageSupported() || this._rlmDepth !== 0) return false;
-		// One call, one local: this used to call _localHarnessStateDir() twice, the
-		// second time behind a non-null assertion, and each call can mkdir the session
-		// artifact directory.
-		const dir = this._localHarnessStateDir();
-		if (dir === undefined) return false;
+		// The cache is consulted before anything is resolved, so a hit costs no I/O at
+		// all: _localHarnessStateDir() can mkdir the session artifact directory, and
+		// loading the harness state walks every path segment and parses the whole local
+		// store. This runs on the event queue, several times per turn.
 		const probe = this._autoRefineWritableProbe;
 		if (probe !== undefined && Date.now() - probe.at < AUTO_REFINE_WRITABLE_PROBE_TTL_MS) return probe.allowed;
-		// This runs on the event queue, and loading the harness state walks every path
-		// segment and parses the whole local store, so it is probed at most once a
-		// minute rather than once per turn boundary.
+		// One call, one local: this used to call _localHarnessStateDir() twice, the
+		// second time behind a non-null assertion. A missing directory is deliberately
+		// not cached, because it can appear later.
+		const dir = this._localHarnessStateDir();
+		if (dir === undefined) return false;
 		let allowed = false;
 		try {
 			assertHarnessStateWritable(loadHarnessState(dir, "local"));
