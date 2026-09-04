@@ -37,6 +37,9 @@ export function awaitWithTimeout<T>(
 ): Promise<T> {
 	const { timeoutMs, signal, label } = options;
 	if (signal?.aborted) {
+		// The caller's promise still needs a handler: an unhandled rejection here is
+		// fatal in daemon mode, which exits the whole process on unhandledRejection.
+		void promise.catch(() => {});
 		return Promise.reject(new ExtensionAbortedError(label));
 	}
 
@@ -75,14 +78,16 @@ export function awaitWithTimeout<T>(
 		}
 
 		signal?.addEventListener("abort", onAbort, { once: true });
-		if (signal?.aborted) {
-			onAbort();
-			return;
-		}
 
+		// Attach the handlers before the already-aborted shortcut so the input promise
+		// always has one; finish() is idempotent, so the ordering is safe.
 		promise.then(
 			(value) => finish(() => resolve(value)),
 			(error: unknown) => finish(() => reject(error)),
 		);
+
+		if (signal?.aborted) {
+			onAbort();
+		}
 	});
 }

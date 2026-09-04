@@ -45,6 +45,32 @@ describe("awaitWithTimeout", () => {
 		});
 		await expect(pending).resolves.toBe("done");
 	});
+
+	it("keeps a handler on the input promise when the signal is already aborted", async () => {
+		// Daemon mode exits the whole process on unhandledRejection, so the early-abort
+		// path must leave the caller's promise handled even though it never settles it.
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown) => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const controller = new AbortController();
+			controller.abort();
+			let rejectInput: (error: Error) => void = () => {};
+			const input = new Promise<string>((_resolve, reject) => {
+				rejectInput = reject;
+			});
+			await expect(
+				awaitWithTimeout(input, { timeoutMs: 30_000, signal: controller.signal, label: "handler" }),
+			).rejects.toBeInstanceOf(ExtensionAbortedError);
+			rejectInput(new Error("handler failed after abort"));
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			expect(unhandled).toHaveLength(0);
+		} finally {
+			process.removeListener("unhandledRejection", onUnhandled);
+		}
+	});
 });
 
 describe("extension factory timeout", () => {
