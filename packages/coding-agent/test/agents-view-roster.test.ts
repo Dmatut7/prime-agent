@@ -178,6 +178,7 @@ describe("agents-view roster store", () => {
 			lastEventSequence: undefined,
 			lastEventCursor: undefined,
 			requestData: vi.fn(async () => ({ id: "root-active", sessionId: "root", activeSessionId: "root-active" })),
+			streamReconstructor: { seed: vi.fn(), clear: vi.fn(), hasPartial: vi.fn(() => false) },
 		}) as DaemonAgentConnection;
 
 		// The bar is an accessory: the session recovery must not fail with it.
