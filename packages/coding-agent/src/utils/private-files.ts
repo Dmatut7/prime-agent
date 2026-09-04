@@ -36,6 +36,31 @@ export function requireNoFollow(flag: number | undefined): number {
 const NONBLOCK_FLAG = constants.O_NONBLOCK ?? 0;
 const DIRECTORY_FLAG = constants.O_DIRECTORY ?? 0;
 
+const VALIDATED_DIRECTORY_LIMIT = 256;
+/** Approximates a 64KiB write batch; log lines are close enough to ASCII that chars do. */
+const WRITE_BATCH_CHARS = 64 * 1024;
+/**
+ * Private directories already validated in this process. Re-walking every
+ * ancestor on each append costs dozens of syscalls on paths that run per log
+ * line and per session entry. Only the ancestor walk and the directory mode
+ * re-assertion are memoized: the checks on the file being written stay per
+ * call, so a swapped or symlinked target is still refused, and a memo hit still
+ * lstat's the directory so a deleted one is recreated. The trade is that a
+ * directory whose mode is loosened externally after its first validation is not
+ * re-tightened until this entry is evicted.
+ */
+const validatedDirectories = new Set<string>();
+
+function rememberValidatedDirectory(resolvedPath: string): void {
+	if (validatedDirectories.size >= VALIDATED_DIRECTORY_LIMIT) {
+		// FIFO, not LRU: insertion order is cheap to evict and this is a bound, not a
+		// cache-hit optimisation.
+		const oldest = validatedDirectories.values().next().value;
+		if (oldest !== undefined) validatedDirectories.delete(oldest);
+	}
+	validatedDirectories.add(resolvedPath);
+}
+
 function pathExistsLexical(path: string): boolean {
 	try {
 		lstatSync(path);
@@ -109,6 +134,29 @@ export function assertRegularFileNoSymlink(path: string): void {
 }
 
 export function ensurePrivateDirectory(path: string): void {
+	const resolved = resolve(path);
+	if (validatedDirectories.has(resolved) && stillUsablePrivateDirectory(path)) return;
+	validatedDirectories.delete(resolved);
+	validatePrivateDirectory(path);
+	rememberValidatedDirectory(resolved);
+}
+
+/**
+ * One lstat on the memo fast path. It keeps the two properties a hit must not
+ * lose: a directory that disappeared is recreated by the full validation, and a
+ * directory swapped for a symlink or a non-directory is refused by it.
+ */
+function stillUsablePrivateDirectory(path: string): boolean {
+	try {
+		const stats = lstatSync(path);
+		return !stats.isSymbolicLink() && stats.isDirectory();
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+		throw error;
+	}
+}
+
+function validatePrivateDirectory(path: string): void {
 	ensureNoSymlinkPath(path, PRIVATE_DIRECTORY_MODE);
 	const stats = lstatSync(path);
 	if (stats.isSymbolicLink() || !stats.isDirectory()) {
@@ -238,7 +286,19 @@ export function writePrivateFileAtomicLines(
 			constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | requireNoFollow(constants.O_NOFOLLOW),
 			PRIVATE_FILE_MODE,
 		);
-		for (const line of lines) writeFileSync(fd, line);
+		// Batch the writes: callers pass a per-entry generator, so one syscall per
+		// line turns a 5000-entry session into 5000 syscalls. Atomicity is unchanged
+		// - the temp file is still fsynced and renamed, and a failure mid-batch leaves
+		// the finally block to remove the temp without renaming.
+		let batch = "";
+		for (const line of lines) {
+			batch += line;
+			if (batch.length >= WRITE_BATCH_CHARS) {
+				writeFileSync(fd, batch);
+				batch = "";
+			}
+		}
+		if (batch.length > 0) writeFileSync(fd, batch);
 		fsyncSync(fd);
 		if (metadata && process.platform !== "win32") fchownSync(fd, metadata.uid, metadata.gid);
 		closeSync(fd);
@@ -267,8 +327,13 @@ export function appendPrivateFile(path: string, content: string, options: { priv
 		fd = openRegularFileNoSymlink(path, constants.O_WRONLY | constants.O_APPEND);
 	}
 	try {
-		if (!fstatSync(fd).isFile()) throw new Error(`Refusing to use non-regular private file: ${path}`);
-		setPrivateFileMode(fd, path, PRIVATE_FILE_MODE);
+		const stats = fstatSync(fd);
+		if (!stats.isFile()) throw new Error(`Refusing to use non-regular private file: ${path}`);
+		// The fstat is already paid for, so only chmod when the mode actually drifted.
+		// win32 keeps the unconditional chmod: its mode bits do not report 0600.
+		if (process.platform === "win32" || (stats.mode & 0o777) !== PRIVATE_FILE_MODE) {
+			setPrivateFileMode(fd, path, PRIVATE_FILE_MODE);
+		}
 		writeFileSync(fd, content);
 	} finally {
 		closeSync(fd);
