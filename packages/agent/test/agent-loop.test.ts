@@ -2087,11 +2087,105 @@ describe("empty assistant turn retry", () => {
 		expect(assistant.usage.output).toBe(10 * (1 + 2 + 3));
 		expect(assistant.usage.cost.total).toBeCloseTo(0.0011 * (1 + 2 + 3), 12);
 		// Input, cacheRead, cacheWrite and totalTokens stay at the final attempt's
-		// values: inflating input would make isContextOverflow misfire on an ordinary
-		// empty response and route it to compaction instead of a retry.
+		// values: they describe the context that attempt actually occupied, and summing
+		// them would report a context size no single request ever had.
 		expect(assistant.usage.input).toBe(3000);
 		expect(assistant.usage.cacheRead).toBe(0);
 		expect(assistant.usage.totalTokens).toBe(3030);
+	});
+
+	it("carries discarded empty turns onto a later attempt that succeeds", async () => {
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const withUsage = (message: AssistantMessage, n: number): AssistantMessage => {
+			message.usage = {
+				...message.usage,
+				input: 1000 * n,
+				output: 10 * n,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1010 * n,
+				cost: { input: 0.001 * n, output: 0.0001 * n, cacheRead: 0, cacheWrite: 0, total: 0.0011 * n },
+			};
+			return message;
+		};
+		const attempts = [
+			withUsage(createAssistantMessage([{ type: "thinking", thinking: "attempt 1" }]), 1),
+			withUsage(createAssistantMessage([{ type: "thinking", thinking: "attempt 2" }]), 2),
+			withUsage(createAssistantMessage([{ type: "text", text: "done" }]), 3),
+		];
+		const { streamFn, requests } = streamFnReturning(attempts);
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			() => {},
+			undefined,
+			streamFn,
+		);
+		const assistant = messages.find((message) => message.role === "assistant") as AssistantMessage;
+
+		expect(requests.length).toBe(3);
+		// The successful turn terminates the loop, so it is the only message that reaches
+		// message_end: without the carry, attempts 1 and 2 vanish from every accounting
+		// that reads usage off the transcript.
+		expect(assistant.stopReason).not.toBe("error");
+		expect(assistant.usage.output).toBe(10 * (1 + 2 + 3));
+		expect(assistant.usage.cost.total).toBeCloseTo(0.0011 * (1 + 2 + 3), 12);
+		// Same rule as the exhausted case: context-occupancy fields stay at the terminal
+		// attempt's own values.
+		expect(assistant.usage.input).toBe(3000);
+		expect(assistant.usage.cacheRead).toBe(0);
+		expect(assistant.usage.totalTokens).toBe(3030);
+	});
+
+	it("keeps a passing-through overflow turn recognizable after discards", async () => {
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const discardedAttempt = createAssistantMessage([{ type: "thinking", thinking: "attempt 1" }]);
+		discardedAttempt.usage = {
+			...discardedAttempt.usage,
+			input: 100,
+			output: 10,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 110,
+			cost: { input: 0.001, output: 0.0001, cacheRead: 0, cacheWrite: 0, total: 0.0011 },
+		};
+		// An empty turn that is also a length-stop overflow passes through untouched so
+		// compaction recovery can see it. contextWindow is 8192, so input alone clears the
+		// 99% threshold that the overflow check requires.
+		const overflowAttempt = createAssistantMessage([{ type: "thinking", thinking: "attempt 2" }]);
+		overflowAttempt.stopReason = "length";
+		overflowAttempt.usage = {
+			...overflowAttempt.usage,
+			input: 8200,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 8200,
+			cost: { input: 0.0082, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.0082 },
+		};
+		const { streamFn, requests } = streamFnReturning([discardedAttempt, overflowAttempt]);
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			() => {},
+			undefined,
+			streamFn,
+		);
+		const assistant = messages.find((message) => message.role === "assistant") as AssistantMessage;
+
+		expect(requests.length).toBe(2);
+		expect(assistant.stopReason).toBe("length");
+		// The spend of the discarded attempt is still carried, but as cost only: adding its
+		// output tokens would lift usage.output off zero, which is the very signal the
+		// overflow check keys on, and callers downstream re-run that check on this message.
+		expect(assistant.usage.output).toBe(0);
+		expect(assistant.usage.input).toBe(8200);
+		expect(assistant.usage.cost.total).toBeCloseTo(0.0082 + 0.0011, 12);
+		expect(assistant.usage.cost.output).toBeCloseTo(0.0001, 12);
 	});
 
 	it("does not mark other turns as empty-turn exhaustion", async () => {

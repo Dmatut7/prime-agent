@@ -536,12 +536,14 @@ async function streamAssistantResponse(
 	// not an overflow-misfire one - the terminal message is an error turn, and
 	// isContextOverflow's token branch only runs for stop-length turns, so inflating
 	// the fields here could not have reached the compaction path anyway.
-	const discarded = { cost: { ...EMPTY_USAGE.cost }, output: 0 };
+	const discarded = { cost: { ...EMPTY_USAGE.cost }, output: 0, attempts: 0 };
 	for (let attempt = 1; ; attempt++) {
 		const message = await streamAssistantResponseAttempt(context, config, signal, emit, streamFn);
 		// Overflow turns must pass through untouched so compaction recovery can see them.
-		if (isEmptyAssistantTurn(message) && !isContextOverflow(message, config.model.contextWindow)) {
+		const overflow = isContextOverflow(message, config.model.contextWindow);
+		if (isEmptyAssistantTurn(message) && !overflow) {
 			if (attempt < MAX_EMPTY_TURN_ATTEMPTS) {
+				discarded.attempts += 1;
 				discarded.output += message.usage.output;
 				discarded.cost.input += message.usage.cost.input;
 				discarded.cost.output += message.usage.cost.output;
@@ -556,9 +558,19 @@ async function streamAssistantResponse(
 			message.stopReason = "error";
 			message.stopReasonRaw = EMPTY_TURN_RETRY_EXHAUSTED_STOP_REASON_RAW;
 			message.errorMessage = `Model returned an empty response (no output content or tool calls) ${MAX_EMPTY_TURN_ATTEMPTS} times in a row`;
+		}
+		if (discarded.attempts > 0) {
+			// Carry the discarded spend onto whichever message ends the loop: the synthesized
+			// error, or a later attempt that succeeded. Without this the successful case loses
+			// every discarded attempt, because only the terminal message reaches message_end.
+			//
+			// Output tokens are added only when the terminal is not an overflow turn. Case 3 of
+			// isContextOverflow keys on usage.output === 0, and callers downstream re-run that
+			// check on this same message, so inflating it here would hide an overflow from
+			// compaction recovery. Cost has no such reader and is always carried.
 			message.usage = {
 				...message.usage,
-				output: message.usage.output + discarded.output,
+				output: overflow ? message.usage.output : message.usage.output + discarded.output,
 				cost: {
 					input: message.usage.cost.input + discarded.cost.input,
 					output: message.usage.cost.output + discarded.cost.output,
