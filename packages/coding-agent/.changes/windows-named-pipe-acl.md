@@ -1,1 +1,1 @@
-- Restricted the Windows daemon named pipe to the current user SID via a per-user pipe name and owner DACL. Windows hardware ACL application is not verified in CI.
+- Added a per-user Windows daemon pipe name and applied an owner-only DACL after listen; the DACL is best-effort, is not verified on Windows hardware, and is not a substitute for client authentication.

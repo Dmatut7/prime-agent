@@ -1,1 +1,1 @@
-- Kernel process stderr now lands in `kernel-stderr.log` in the session artifact directory (rotated at kernel start), and the in-memory diagnostics tail is bounded instead of growing for the kernel's lifetime.
+- Added a per-session kernel stderr log: kernel process stderr lands in `kernel-stderr.log` in the session artifact directory (rotated at kernel start), and the in-memory diagnostics tail is bounded instead of growing for the kernel's lifetime.
