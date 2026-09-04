@@ -2151,9 +2151,12 @@ describe("empty assistant turn retry", () => {
 			totalTokens: 110,
 			cost: { input: 0.001, output: 0.0001, cacheRead: 0, cacheWrite: 0, total: 0.0011 },
 		};
-		// An empty turn that is also a length-stop overflow passes through untouched so
-		// compaction recovery can see it. contextWindow is 8192, so input alone clears the
-		// 99% threshold that the overflow check requires.
+		// A length turn is never an empty turn - isEmptyAssistantTurn excludes error, aborted
+		// and length up front - so this one passes through the retry loop on its stopReason,
+		// not through the overflow gate (that gate exists for silent overflows that arrive
+		// with a normal stop reason). contextWindow is 8192, so input alone clears the 99%
+		// threshold the overflow check requires, and output is 0, which is what its case 3
+		// keys on.
 		const overflowAttempt = createAssistantMessage([{ type: "thinking", thinking: "attempt 2" }]);
 		overflowAttempt.stopReason = "length";
 		overflowAttempt.usage = {

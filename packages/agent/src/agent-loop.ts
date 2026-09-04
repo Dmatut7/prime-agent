@@ -532,10 +532,15 @@ async function streamAssistantResponse(
 	// forward onto the terminal message. Input tokens, cacheRead, cacheWrite and
 	// totalTokens are deliberately left at the final attempt's values: they describe
 	// the context that attempt actually occupied, and summing attempts would report a
-	// context size no single request ever had. Note this is a data-semantics reason,
-	// not an overflow-misfire one - the terminal message is an error turn, and
-	// isContextOverflow's token branch only runs for stop-length turns, so inflating
-	// the fields here could not have reached the compaction path anyway.
+	// context size no single request ever had.
+	//
+	// That is a data-semantics rule, and it is the only reason that holds on every
+	// terminal shape. The carry below runs for whichever message ends the loop, so the
+	// terminal may be the synthesized error, a successful stop turn, or a length turn
+	// passing through - and on the latter two the overflow check is live: its case 2
+	// reads input + cacheRead on stop turns and its case 3 reads output on length
+	// turns. Inflating the context fields would therefore misclassify a real stop turn
+	// as an overflow, which is why they are never summed on any path.
 	const discarded = { cost: { ...EMPTY_USAGE.cost }, output: 0, attempts: 0 };
 	for (let attempt = 1; ; attempt++) {
 		const message = await streamAssistantResponseAttempt(context, config, signal, emit, streamFn);
@@ -568,6 +573,12 @@ async function streamAssistantResponse(
 			// isContextOverflow keys on usage.output === 0, and callers downstream re-run that
 			// check on this same message, so inflating it here would hide an overflow from
 			// compaction recovery. Cost has no such reader and is always carried.
+			//
+			// The guard is deliberately wider than the harm: only case 3 reads output, so a
+			// stop-turn overflow terminal also forgoes the discarded output tokens. That
+			// under-reports tokens on a path where the money is still carried in full, which
+			// is the conservative direction; narrowing it to stopReason === "length" would buy
+			// minor precision at the cost of tracking the check's internals here.
 			message.usage = {
 				...message.usage,
 				output: overflow ? message.usage.output : message.usage.output + discarded.output,
