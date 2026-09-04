@@ -337,6 +337,12 @@ deps 线一条都没动的实证：`actions/checkout` 仍 pin `v7.0.0`（#1576 �
 | #1157 | feat(swarm): provider-neutral role policy | sethkarten | 不碰 → — | base 是 `perf/c01-identity-fencing`，依赖的 4 个 sha 对本地全部 `--is-ancestor` = NO；撞 `agent-session.ts`（17 hunk，本地 29 提交）与 `daemon-mode.ts`（+304）。 |
 | #1169 | N01: incremental structured-output streaming parser | sethkarten | 不碰 → — | base 是未合的 #1115（`9d9cf28d`，`--is-ancestor` = NO）；`compact-session-stream.ts` 与本地 `c72b9940f` 同一起点 blob `d8e5cb2b8` 双向分叉；丢帧语义与本地 FIX-Q6「自请 resync」反向。 |
 
+
+> **【R3 全面审查更正（X2(k)）：上表 #1947 那行的「已摘」是忠实摘取于 *所取版本*，不是忠实于 *活的 PR*】**
+> 本 fork 摘的是 **#1947 的 2026-09-02 版（`ca7f26ca5`）**。上游在 **09-04 把同一处重设计**了（head `56982582b`，**仍 OPEN**、当天还被推了 5 个 commit）：改成 **pipe + host 转发 + 5MiB 写预算 + `StringDecoder` + exit-drain + 等 close**。这些是上游第 4-9 个 commit 的内容，**本 fork 未摘 —— 不是删除**。
+> ⇒ **后果**：一旦上游把 #1947 合进 main，本 fork 的 `wireChild` / `openStderrLogFd` / `waitForReady` / `cleanupResources` **四处必冲突**；而按「已摘」跳过的同步车道会让这 6 条差异永久沉淀。
+> ⇒ **下一轮任务 B**：#1947 合并进 upstream main、或下一轮同步启动（以先到者为准）时，按 head `56982582b` **重取**；届时 pipe-path 的 `StringDecoder`/drain/last-words 与 `M3(k)`（无 per-spawn 写预算 + `.old` 长存）一并解决，`M1(pr)` 的 tail 挤压自动消失。
+> ⇒ **方法论（已进 S9）**：行级对账证明的是「忠实于本地 pr-* 快照」，**不是**「忠实于活的 PR」。缺的一步是：行级对账之后必须 `gh pr view <n> --json headRefOid,state,mergedAt,updatedAt,commits`，把 `headRefOid` 与 fork 末次 cherry-pick 的 SHA 比、`commits[].committedDate` 与 fork uptake 的 `%cI`（换 UTC）比。另：`git log --all --grep="#NNNN"` 会捞到 **fork 自己仓**的同号 PR（`b6b7fafdd #2027` 就是 fork 仓的）⇒ 审计里引 `#NNNN` 必须写明是哪个仓。
 > 「冲突」口径全部来自 lane B 的**场景 B 实测**（`base = upstream/main:<path>`、`theirs = base + PR diff`、`ours = HEAD:<path>`、`git merge-file --diff3`），即「先同步 40 提交，再看 PR 与本地 172 提交撞不撞」——本 fork 真实的集成顺序。状态词：`CLEAN` / `LOCAL_ABSENT_add` / `CONFLICT_n` / `STALE_unappliable_on_main` / `ALREADY_IN_main` / `NOOP`。
 
 ### 1.3 翻案 4 条 + 校准结论
@@ -420,7 +426,7 @@ deps 线一条都没动的实证：`actions/checkout` 仍 pin `v7.0.0`（#1576 �
   `expect(result.errors).toHaveLength(1)` 实得 2（`AssertionError: expected [ { …(2) }, { …(2) } ] to have a length of 1 but got 2`）。
   **merge 之前就红**：在独立 scratch worktree `/tmp/r3-base` @ `0c504e475` 上逐字同样失败（同文件同行同断言同消息），跑完 `git worktree remove --force`（残留 0、本树 status 0 行、主仓哨兵 ` M`=4）。⇒ 进已知红清单第 6 项（父代理 2026-09-04 裁定新增），**不是本轮的账，但需有人认领**。
   性质：本地独有的 extension factory 超时测试（`320b720f0` “time out hung extension handlers so sessions stay live” 家族），其期望与 `src/core/extensions/timeout.ts` 现语义已不符 —— `loadExtensions([hangPath, okPath], tempDir, undefined, 40)` 现在**两条都进 errors**（超时 40ms 太紧，正常那条也超时），而测试仍期望「只有 hang 那条进 errors、ok 那条正常加载」（`:103-105` 还断言 `result.errors[0].error` 含 `"timed out"`、`result.extensions[0].path === okPath`）。
-  修法方向（二选一，都要能跑测试的车道）：① 放宽超时预算并把「ok 那条必须加载成功」钉成独立断言；② 若现语义是「同批任一超时则整批判失败」，则重写测试断言这个语义并补一条「预算充足时只 hang 那条失败」的正例。**先读 `src/core/extensions/timeout.ts` 全文再定**，不要只改数字。
+  **R3 全面审查已实测（L11 / 父代理裁定：不修、据此关闭或重审 F75）**：这条红是**既有 extension-loading 家族红**，红因在 `loadExtensionModule` 的实现，**不在 `loader.ts` / `timeout.ts` 两个模块** —— 证据：把 `src/core/extensions/timeout.ts` 换回 B1 修复**之前**的原文（`git show HEAD:` 取，sha256 `9c0814a6309f2870`）重跑，`test:102` **逐字同样红**（`errors` 实得 2 vs 期望 1）⇒ 与 B1 无因果。代码层佐证：`loader.ts:427-456` 是串行加载、超时只包住 `factory(api)`、**转译在超时之外**，所以 40ms 预算不可能让一个同步的 `ok.ts` 失败。⇒ **别改测试断言**（把正确行为钉成错误行为）；要动就转 `loadExtensionModule` 的实现。
 
 - [ ] **F76 `WINDOWS_NAMED_PIPE_ACL_UNVERIFIED` 是死导出**（文档漂移 / 未覆盖面记录，P3 级；**既有，非本轮造成**）
   `src/modes/daemon/windows-named-pipe.ts:6`：
@@ -431,6 +437,10 @@ deps 线一条都没动的实证：`actions/checkout` 仍 pin `v7.0.0`（#1576 �
   不是本轮造成的：`git diff --stat 0c504e475 HEAD -- <该文件>` **无输出**（本轮 merge 未改该文件），且 `0c504e475` 版里 `grep -c` 同样是 1。
   性质：一段「CI 里没有真硬件验证 Windows 命名管道 ACL」的免责声明常量，从措辞看原本大概是要被测试或文档引用的。无行为影响（纯字符串），但属**无人认领的 dead export**，且它与本文件 F4（`2637973c1`，标注「Windows 未实机验证」）是同一条未覆盖面。
   修法方向：**建议接不建议删** —— 把它接进 `test/windows-named-pipe.test.ts` 作为一条显式 caveat（例如非 win32 平台的 `it.skipIf` 说明或注释引用它），因为删了等于丢掉一条已知的未覆盖面记录。若决定删，须同时把这条未覆盖面写进 `FORK_NOTES.md` 的待办与本文件的 F4 备注。
+  **R3 全面审查（review-modules）补的三条事实（H3 处置：R3 只降级文档口径，不做 token 握手）**：
+  ① **win32 侧没有第二道闸**：`daemon-mode.ts:3277` 的 `handleConnection` 对主 daemon 一律 `authenticated: true`，全仓没有 peer credential / token 握手；POSIX 侧还有 `daemon-socket.ts:186` 的 `chmod 0600` 兜底，**win32 无对应兜底** ⇒ ACL 是唯一鉴权闸门。
+  ② **ACL 的作用范围与继承都未验证**：ACL 是在 `listen()` 回调里用 `SetNamedSecurityInfo` 打在「当时那个实例」上（`daemon-mode.ts:667` / `daemon-supervisor.ts:827`），而 libuv 建后续 pipe 实例时传的是 `NULL` `SECURITY_ATTRIBUTES`，**Windows 没有文档保证 ACL 会被后续实例继承**。
+  ③ **下一轮任务口径**：win32 共享密钥握手 + capability + `DAEMON_PROTOCOL_VERSION`/`DAEMON_SCHEMA_REVISION` + 双向兼容测试 + 真机验证，**仍是收口前提**；R3 不做（协议门改动不该塞进收口批），只把 `.changes/windows-named-pipe-acl.md` 的完成态断言降级为 best-effort。
 
 - [x] **F77 `agents-view-roster` attach 测试往开发者真实 `~/.prime/agent/logs/agent.jsonl` 写日志**（测试卫生 / 哨兵污染，P2 级） — 已修，落点：`bd35d1287`
   现场（p12 在真验证 P0-A 时撞出来，真实 agent 日志里凭空多出 2 行，时间正落在施工窗口内）：
@@ -463,6 +473,20 @@ R3 合并后的现行落点（行号已漂，按符号给）：服务端强制 =
 4. Windows 命名管道 ACL 未真机验证 = F4 备注 + F76。
 5. F15/F17 窄时序窗（W9 留档，k3 实证可达性极低）、F27e 次要内存项、k3 终审 7 条低危仍未动。
 6. 门 2 的「54 个本地独有测试文件」是**文件级**口径，本轮已证它抓不到两类红（见 §四.4）。收口那次跑了全量（320 collected 自洽），但**下一轮若只跑文件级口径就会漏**。
+
+7. **【R3 全面审查新增 · 已知缺口记账（下一轮输入）】**
+   - **M3(k)**：kernel stderr 日志**无 per-spawn 写预算**（单 spawn 内磁盘无界，rotation 只在下次 open 触发）+ `.old` 长存。**A 批明确不半迁移**（不加预算：fd-direct 下只能 `fstat`、语义与上游完全不同 = 第三种没人审的设计）⇒ 归**下一轮任务 B**（按 #1947 head `56982582b` 重取时一并解决）。
+   - **B1 放大器**：`daemon-mode.ts:637-642` 把**任何** `unhandledRejection` 变成 `process.exit(1)`（杀 daemon + 所有会话）。B1 只修了 `timeout.ts` 这一个源头，**放大器策略本身 R3 不改**（`:630-632` 注释表明它是有意的 fail-fast：先抓栈再让进程下去）。**daemon 该 `exit(1)` 还是 log-and-isolate 是可靠性设计决策**，留老板 / 下一轮。
+   - **H2 调用方排序无自动 red-first 钉子**：`interactive-mode.ts` 的 `handleShareCommand` 是私有方法，且被 `spawnSync("gh", ["auth","status"])` 与 TUI 挡住 ⇒ 无法单测「预检必须在导出之后」这条排序。现有覆盖 = **缺口钉子**（`share-session.test.ts`：密钥只在导出附加部分时，扫 proxy = `[]`、扫导出 = `["API key (sk-)"]`，证明缺口为真）+ **制品层核**（预检在 `exportToHtml` 之后、读 `readPrivateFile(tmpFile)`、取消分支清临时目录）。**若要可测需把 `handleShareCommand` 重构出可注入的边界 = 超出本轮范围**；按封顶规矩这条**不算 red 验证过**。
+   - **M5(s) digest 口径扩展 = 下一轮**：`DAEMON_SCHEMA_ID` 的摘要输入不覆盖 capability 集合与 `DAEMON_COMMAND_COMPATIBILITY`/`DAEMON_COMMAND_PLANE`，而 R3 的改动语义一半正在那里。**R3 不做**：重算 ID 会让所有在跑 daemon 立刻判 stale（`daemon-launch.ts:74-80` 的 `isCurrentDaemonHello` 比 `DAEMON_SCHEMA_ID`；`:344-347` 忙会话直接 `refusing to replace stale daemon`），属 schema-script 方法论改动。**下一轮做时的三条纪律**：M5+M6 必须同一提交；实跑验证必须在**隔离 agent dir** 下（否则 `:346` 会被自己的会话触发）；ID 用 `/tmp/r3_schema_digest.mjs` 重算、**绝不手写**。R3 本轮只改了 `daemon-protocol.ts` 的**注释**（27 已消费 → 下一个是 28；24 不是"first unambiguous revision"），**未动 `DAEMON_PROTOCOL_VERSION`/`DAEMON_SCHEMA_REVISION`/`DAEMON_SCHEMA_ID`**（提交后核过 diff 非注释行 = 0）。
+   - **semantic-edges 双守卫的精确边界**：`bdd5bcd82` 的两处守卫（recorder 侧与 services 侧）**都必要、都 fail-closed**，堵的是**不同目录的不同写点**；其中 **`materializeSessionFile` 之后 services 侧守卫是唯一防线**（recorder 侧那条路径此时已过）。清理时**任一处都不能删**。
+
+7. **【R3 全面审查新增 · 已知缺口记账（下一轮输入）】**
+   - **M3(k)**：kernel stderr 日志**无 per-spawn 写预算**（单 spawn 内磁盘无界，rotation 只在下次 open 触发）+ `.old` 长存。A 批**明确不半迁移**（不加预算：fd-direct 下只能 `fstat`、语义与上游完全不同 = 第三种没人审的设计）⇒ 归**下一轮任务 B**（按 #1947 head `56982582b` 重取时一并解决）。
+   - **B1 放大器**：`daemon-mode.ts:637-642` 把**任何** `unhandledRejection` 变成 `process.exit(1)`（杀 daemon + 所有会话）。B1 只修了 `timeout.ts` 这一个源头，**放大器策略本身 R3 不改**（`:630-632` 注释表明它是有意的 fail-fast：先抓栈再让进程下去）。**daemon 该 `exit(1)` 还是 log-and-isolate 是可靠性设计决策**，留老板 / 下一轮。
+   - **H2 调用方排序无自动 red-first 钉子**：`interactive-mode.ts` 的 `handleShareCommand` 是私有方法，且被 `spawnSync("gh", ["auth","status"])` 与 TUI 挡住 ⇒ 无法单测「预检必须在导出之后」这条排序。现有覆盖 = **缺口钉子**（`share-session.test.ts`：密钥只在导出附加部分时，扫 proxy = `[]`、扫导出 = `["API key (sk-)"]`，证明缺口为真）+ **制品层核**（预检在 `exportToHtml` 之后、读 `readPrivateFile(tmpFile)`、取消分支清临时目录）。**若要可测需把 `handleShareCommand` 重构出可注入的边界 = 超出本轮范围**；按封顶规矩这条**不算 red 验证过**。
+   - **M5(s) digest 口径扩展 = 下一轮**：`DAEMON_SCHEMA_ID` 的摘要输入不覆盖 capability 集合与 `DAEMON_COMMAND_COMPATIBILITY`/`DAEMON_COMMAND_PLANE`，而 R3 的改动语义一半正在那里。**R3 不做**：重算 ID 会让所有在跑 daemon 立刻判 stale（`daemon-launch.ts:74-80` 的 `isCurrentDaemonHello` 比 `DAEMON_SCHEMA_ID`；`:344-347` 忙会话直接 `refusing to replace stale daemon`），属 schema-script 方法论改动。**下一轮做时的三条纪律**：M5+M6 必须同一提交；实跑验证必须在**隔离 agent dir** 下（否则 `:346` 会被自己的会话触发）；ID 用 `/tmp/r3_schema_digest.mjs` 重算、**绝不手写**。R3 本轮只改了 `daemon-protocol.ts` 的**注释**（27 已消费 → 下一个是 28；24 不是"first unambiguous revision"），**未动 `DAEMON_PROTOCOL_VERSION`/`DAEMON_SCHEMA_REVISION`/`DAEMON_SCHEMA_ID`**（提交后核过 diff 非注释行 = 0）。
+   - **semantic-edges 双守卫的精确边界**：`bdd5bcd82` 的两处守卫（recorder 侧与 services 侧）**都必要、都 fail-closed**，堵的是**不同目录的不同写点**；其中 **`materializeSessionFile` 之后 services 侧守卫是唯一防线**（recorder 侧那条路径此时已过）。清理时**任一处都不能删**。
 
 ## 三、路径纠错 3 条（任务书/派单给的是裸文件名，实际路径与直觉不同）
 

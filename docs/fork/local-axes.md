@@ -105,3 +105,4 @@
 4. 碰 `agent-session.ts` 的 compaction 段 → 按 §二.2 的四路矩阵核，别按 `compactionLeafId` 这个名字 grep。
 5. 任何用 `Object.create(DaemonSupervisor.prototype)` / `Object.create(DaemonAgentConnection.prototype)` 的假件 → 核它走的路径是否已改读 roster、是否经过 `reseedStreamReconstructor`；缺桩的表现是**误导性错误信息**（指向 selector 而不指向缺失成员）。
 6. 任何会走真 `appendRotatingLog`/`getAgentLogPath` 的测试 → 必须隔离 `ENV_AGENT_DIR`（F77）。
+7. 碰 `daemon-mode.ts` 的 roster/streaming 段 → **行号更正（R3 全面审查）**：客户端活点在 `src/modes/agents-view/agents-view-mode.ts:217-230`，**不是** `daemon-mode.ts:1898`（那是 cron）；本文档 §一.1 的表本来就是对的，错的是派单文本。**启用前陷阱**：`daemon-mode.ts:4184-4185` 无条件继承上轮的 `streamingMessage`，启用 `omitStreamingMessages` 前必须改成 `summary.isStreaming ? previous.get(...) : undefined`，否则 omit 期间结束的 turn 会把大对象永久钉在 roster 上。
