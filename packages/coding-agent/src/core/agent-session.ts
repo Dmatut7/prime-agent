@@ -1954,8 +1954,7 @@ export class AgentSession {
 				this._actionStore.releaseTerminal(action);
 			}
 		}
-		this._pendingNextTurnMessages.unshift(...restorableMessages);
-		if (this._hasDeferredRlmTerminalNotices()) this._markRlmTerminalNoticeDeferred();
+		this._unshiftPendingNextTurnMessages(...restorableMessages);
 		if (actions.length > 0) this._notifySessionInputCheckpointChange();
 		return actions;
 	}
@@ -5095,6 +5094,22 @@ export class AgentSession {
 		return deferredSince !== undefined && now - deferredSince >= RLM_TERMINAL_NOTICE_ABANDON_AFTER_MS;
 	}
 
+	/**
+	 * The only way messages enter the next-turn queue. Stamping the deferral here makes
+	 * "a queued terminal notice always has a timestamp" structural rather than something
+	 * each re-injection path has to remember: without a timestamp no abandonment timer is
+	 * armed and the staleness predicate never fires, so the session stays pinned forever.
+	 */
+	private _pushPendingNextTurnMessages(...messages: CustomMessage[]): void {
+		this._pendingNextTurnMessages.push(...messages);
+		if (messages.some((message) => this._isRlmTerminalNotice(message))) this._markRlmTerminalNoticeDeferred();
+	}
+
+	private _unshiftPendingNextTurnMessages(...messages: CustomMessage[]): void {
+		this._pendingNextTurnMessages.unshift(...messages);
+		if (messages.some((message) => this._isRlmTerminalNotice(message))) this._markRlmTerminalNoticeDeferred();
+	}
+
 	/** Record that terminal notices are deferred, and arm the abandonment driver. */
 	private _markRlmTerminalNoticeDeferred(): void {
 		this._rlmTerminalNoticeDeferredSince ??= Date.now();
@@ -5217,8 +5232,7 @@ export class AgentSession {
 		if (!fence) return;
 		try {
 			if (this._disposed || this._disposing) return;
-			this._pendingNextTurnMessages.push(cloneCustomMessage(message));
-			this._markRlmTerminalNoticeDeferred();
+			this._pushPendingNextTurnMessages(cloneCustomMessage(message));
 			this._flushDeferredRlmTerminalNotices();
 		} finally {
 			fence.release();
@@ -5233,9 +5247,8 @@ export class AgentSession {
 		for (const action of actions) {
 			if (!this._isRlmTerminalNoticeAction(action)) continue;
 			const message = primaryDeliveryRecord(action).message;
-			if (message.role === "custom") this._pendingNextTurnMessages.push(cloneCustomMessage(message));
+			if (message.role === "custom") this._pushPendingNextTurnMessages(cloneCustomMessage(message));
 		}
-		if (this._hasDeferredRlmTerminalNotices()) this._markRlmTerminalNoticeDeferred();
 		const ids = new Set(actions.map((action) => action.id));
 		this._cancelSessionActions(
 			(action) => ids.has(action.id),
@@ -5299,8 +5312,7 @@ export class AgentSession {
 			});
 			admissionFence.release();
 			if (!result.accepted || !result.ticket) {
-				if (prefixMessages) this._pendingNextTurnMessages.unshift(...prefixMessages);
-				if (this._hasDeferredRlmTerminalNotices()) this._markRlmTerminalNoticeDeferred();
+				if (prefixMessages) this._unshiftPendingNextTurnMessages(...prefixMessages);
 				reportPreflight(false, false);
 				return;
 			}
@@ -5465,8 +5477,7 @@ export class AgentSession {
 				});
 				commitFence?.release();
 				if (!result.accepted || !result.ticket) {
-					if (prefixMessages) this._pendingNextTurnMessages.unshift(...prefixMessages);
-					if (this._hasDeferredRlmTerminalNotices()) this._markRlmTerminalNoticeDeferred();
+					if (prefixMessages) this._unshiftPendingNextTurnMessages(...prefixMessages);
 					reportPreflight(false, false);
 					return;
 				}
@@ -6456,8 +6467,7 @@ export class AgentSession {
 		if (!firstTurn) return;
 		const executionPolicy = firstTurn.payload.executionPolicy;
 		const restoreNextTurnContext = () => {
-			this._pendingNextTurnMessages.unshift(...nextTurnMessages);
-			if (this._hasDeferredRlmTerminalNotices()) this._markRlmTerminalNoticeDeferred();
+			this._unshiftPendingNextTurnMessages(...nextTurnMessages);
 			nextTurnMessages = [];
 		};
 		try {
@@ -6568,8 +6578,7 @@ export class AgentSession {
 			this._forgetConsumedPostCompactionContinuations(turns.map((action) => primaryDeliveryRecord(action).message));
 		} catch (error) {
 			const delivered = new Set(this.agent.state.messages);
-			this._pendingNextTurnMessages.unshift(...nextTurnMessages.filter((message) => !delivered.has(message)));
-			if (this._hasDeferredRlmTerminalNotices()) this._markRlmTerminalNoticeDeferred();
+			this._unshiftPendingNextTurnMessages(...nextTurnMessages.filter((message) => !delivered.has(message)));
 			for (const action of actions) {
 				if (action.payload.kind === "turn") {
 					action.payload.records = action.payload.records.filter((record) => record.role !== "next_turn");
@@ -6716,8 +6725,7 @@ export class AgentSession {
 			timestamp: Date.now(),
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
-			this._pendingNextTurnMessages.push(appMessage);
-			if (this._hasDeferredRlmTerminalNotices()) this._markRlmTerminalNoticeDeferred();
+			this._pushPendingNextTurnMessages(appMessage);
 		} else if (this.isStreaming) {
 			const normalized = normalizeMessageContent(message.content);
 			if (options?.deliverAs === "followUp") {
@@ -7465,10 +7473,7 @@ export class AgentSession {
 	}
 
 	restorePendingNextTurnMessages(messages: readonly CustomMessage[]): void {
-		this._pendingNextTurnMessages.push(...messages.map((message) => cloneCustomMessage(message)));
-		if (messages.some((message) => this._isRlmTerminalNotice(message))) {
-			this._markRlmTerminalNoticeDeferred();
-		}
+		this._pushPendingNextTurnMessages(...messages.map((message) => cloneCustomMessage(message)));
 		this._flushDeferredRlmTerminalNotices();
 	}
 
