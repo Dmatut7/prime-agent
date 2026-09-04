@@ -5869,6 +5869,17 @@ export class InteractiveMode {
 	}
 
 	private startAssistantStreamingMessage(message: AssistantMessage): void {
+		// An empty-turn retry emits a fresh message_start per attempt and no message_end
+		// for the dropped one, so settle the previous component here instead of leaving
+		// it streaming in the chat tree (same edge agent_end covers).
+		if (this.streamingComponent) {
+			if (this.streamingMessage) {
+				this.streamingComponent.updateContent(this.streamingMessage, false);
+			} else {
+				this.chatContainer.removeChild(this.streamingComponent);
+			}
+			this.streamingComponent = undefined;
+		}
 		this.streamingComponent = new AssistantMessageComponent(
 			undefined,
 			this.hideThinkingBlock,

@@ -1,0 +1,1 @@
+- Fixed an empty final model turn being silently abandoned instead of retried, and the fork stall path emitting a duplicate message_end for it.
