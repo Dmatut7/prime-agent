@@ -13,6 +13,7 @@ import { PassThrough } from "node:stream";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DaemonSocketClient } from "../../../src/modes/daemon/active-session-state.js";
+import type { AgentRosterEntry } from "../../../src/modes/daemon/agent-roster.js";
 import {
 	CompactAssistantStreamReconstructor,
 	createCompactAssistantDelta,
@@ -78,6 +79,24 @@ function summaryRow(): SessionSummary {
 		messageCount: 1,
 		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 	};
+}
+
+/**
+ * Upstream moved matchWorkers from worker.summaries to the roster store, so a
+ * fake supervisor has to carry the row there or findWorker matches nothing and
+ * throws "Unknown active session". The roster row type drops streamingMessage;
+ * attach seeding reads that off the cached snapshot summary instead, so the
+ * fixture loses nothing by going through the roster shape.
+ */
+function rosterStub(workerId: string, row: SessionSummary): () => { values: () => AgentRosterEntry[] } {
+	const { sessionActions: _sessionActions, diagnostics: _diagnostics, ...slim } = row;
+	const entry: AgentRosterEntry = {
+		agentId: row.sessionId,
+		workerId,
+		status: "idle",
+		summary: slim as AgentRosterEntry["summary"],
+	};
+	return () => ({ values: () => [entry] });
 }
 
 function attachResult(): DaemonAttachResult {
@@ -316,6 +335,7 @@ describe("FIX-Q7 attach seeding never rewinds or corrupts reconstruction", () =>
 			clients: new Set([client]),
 			streamReconstructor: { seed, clear, hasPartial: vi.fn(() => true) },
 			syncWorkerExtensionUi: vi.fn(async () => {}),
+			roster: rosterStub(worker.descriptor.workerId, summary),
 		}) as {
 			attachClient(client: unknown, command: { type: "attach"; activeSessionId: string }): Promise<unknown>;
 		};
@@ -355,6 +375,7 @@ describe("FIX-Q7 attach seeding never rewinds or corrupts reconstruction", () =>
 			clients: new Set([client]),
 			streamReconstructor: { seed, clear, hasPartial: vi.fn(() => false) },
 			syncWorkerExtensionUi: vi.fn(async () => {}),
+			roster: rosterStub(worker.descriptor.workerId, summary),
 		}) as {
 			attachClient(client: unknown, command: { type: "attach"; activeSessionId: string }): Promise<unknown>;
 		};
