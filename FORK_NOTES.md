@@ -75,8 +75,15 @@ fork 工作文档统一搬入 `docs/fork/`：审计总账 `audit-findings.md`、
 | `13f623676` | 修 merge 引入的红：`agents-view-roster` 假 connection 缺 `streamReconstructor`（F74） |
 | `bdd5bcd82` | 修 merge 引入的红：非持久化会话不再落 `semantic-edges.jsonl`（F72） |
 | `bd35d1287` | 修测试污染：`agents-view-roster` attach 测试隔离 agent 日志目录（F77） |
+| `b20f16427` | S7 摘 **#1896**：空终回合重试（最多 3 次，空的那次弹出、不进 provider 上下文与 transcript，第 3 次连续空当回合错误上报）+ **2 处 fork 适配** |
+| `7a6e74c57` | 碎片归并：空回合重试的 2 个碎片合成每包 1 个 |
 
-**#1896（空回合重试）未摘**，等解锁窗口。预判已完成（`/tmp/r3_receipt_p11.md` §4/§10）：需补 2 处 fork 适配——本地 stall 路径会**双发 `message_end`**；重试会在 TUI 留最多 2 个未 settle 的孤儿组件。
+**#1896 已摘（`b20f16427`，6 文件自动合并零冲突，+235 −13）**，预判的两处 fork 适配都落地了：
+
+1. `packages/agent/src/agent-loop.ts`：本地 stream-stall 返回路径（`finishStalledMessage`）在重试 wrapper 接管 `message_end` 发射之后仍保留自己那次 emit ⇒ 一个 stall 回合**双发 `message_end`**（`appendMessage` 无去重 ⇒ 同一条助手消息落盘两次，扩展 handler 与 telemetry usage 双触发）。删掉内层 emit，与 PR 处理 `finishAbortedMessage` 的方式对齐。
+2. `packages/coding-agent/src/modes/interactive/interactive-mode.ts`：每次重试都发一个新的 `message_start`、被丢弃那次没有 `message_end`，而 `startAssistantStreamingMessage` 无条件覆盖 `this.streamingComponent` ⇒ 前一次的组件留在聊天树里未 settle。改成**先 settle（或移除）前一个组件**，对齐 `agent_end` 边的做法（这正是 lane B 风险 R5 预言的幽灵气泡）。
+
+另记一笔（p11 实测）：`agent-session.ts` 那个 hunk 在本 fork 的生产路径里是**惰性**的——本地 F70（`f98d84ada`）的终错通知已经先回了父代理并 bump `_parentReplyCount`，而那正是该 hunk 的守卫条件。仍整取，因为上游的 recursion pin 用不带 agent-message controller 的夹具走它。
 
 ### schema 23/24/25/26 四层撞号 → 升 27 的由来
 
@@ -124,13 +131,12 @@ merge 后 wire 是两侧并集，**哪个 26 的 digest 都不匹配**；本地�
 1. **F71**：`src/core/semantic-edges.ts` 的写入改走 `src/utils/private-files.ts`（0700 / 0600 / no-follow）。`bdd5bcd82` 只挡住了非持久化会话，**持久化会话的 ledger 仍是裸 `node:fs` 写的**（`:357` `mkdirSync` 无 mode、`:363`/`:367` `appendFileSync`）。
 2. **F75**：修或重写 `test/extensions-timeout.test.ts:102`——本地独有测试的期望与 `src/core/extensions/timeout.ts` 现语义已不符（`loadExtensions([hangPath, okPath])` 现在两条都进 errors）。
 3. **F76**：`WINDOWS_NAMED_PIPE_ACL_UNVERIFIED` 死导出接进 `test/windows-named-pipe.test.ts`（**建议接不建议删**：它承载「这条安全面未真机验证」这个事实，删了等于丢一条已知未覆盖面记录）。
-4. **#1896** 摘取（等窗口；2 处 fork 适配已预判，见上）。
-5. `omitStreamingMessages` 休眠接缝二选一：给尾参找回生产调用者，或连唯一读者测试一起删。
-6. 门 2 口径扩三层（54 个本地独有文件 / 15 个官方新增测试文件 / 共有文件里的本地独有用例）——本轮 F72、F74 两条红都在文件级口径之外，只有全量跑才保险。
-7. R2 遗留里 **F5/F6 实际已在 R2 末期落地**（`96d3db580` + `7efe4b467` + `6e86b3929` + 测试 `6b8d2585b`；服务端强制点在 `daemon-supervisor.ts:1825`、`daemon-mode.ts:3655`，控制面分流在 `daemon-mode.ts:3558`），`audit-findings.md` 的 `[ ]` 本轮已按代码证据勾掉。仍开着的是：F15/F17 窄时序窗、F27e 次要内存项、Windows 管道 ACL 实机验证、k3 终审 7 条低危。
-8. 30 个新 PR 里 lane B 判「观察」的 7 个（#1928 / #1996 / #305 / #1177 / #1252 / #2028 / #1581）与 deps 线判 TAKE 的 5 条（#2018 / #2017 / #1576 / #1577 / #1579 改拿 18.0.10）**本轮一条都没动**（实测 `actions/checkout` 仍 v7.0.0、`actions/github-script` 仍 v7.0.1、`uv.lock` 零变化），下一轮按 `docs/fork/audit-findings.md` 的台账接着裁。
+4. `omitStreamingMessages` 休眠接缝二选一：给尾参找回生产调用者，或连唯一读者测试一起删。
+5. 门 2 口径扩三层（54 个本地独有文件 / 15 个官方新增测试文件 / 共有文件里的本地独有用例）——本轮 F72、F74 两条红都在文件级口径之外，只有全量跑才保险。
+6. R2 遗留里 **F5/F6 实际已在 R2 末期落地**（`96d3db580` + `7efe4b467` + `6e86b3929` + 测试 `6b8d2585b`；服务端强制点在 `daemon-supervisor.ts:1825`、`daemon-mode.ts:3655`，控制面分流在 `daemon-mode.ts:3558`），`audit-findings.md` 的 `[ ]` 本轮已按代码证据勾掉。仍开着的是：F15/F17 窄时序窗、F27e 次要内存项、Windows 管道 ACL 实机验证、k3 终审 7 条低危。
+7. 30 个新 PR 里 lane B 判「观察」的 7 个（#1928 / #1996 / #305 / #1177 / #1252 / #2028 / #1581）与 deps 线判 TAKE 的 5 条（#2018 / #2017 / #1576 / #1577 / #1579 改拿 18.0.10）**本轮一条都没动**（实测 `actions/checkout` 仍 v7.0.0、`actions/github-script` 仍 v7.0.1、`uv.lock` 零变化），下一轮按 `docs/fork/audit-findings.md` 的台账接着裁。
 
-## 还没做（R2 交棒时的清单；R3 之后的状态见上节 S9 待办第 7 条）
+## 还没做（R2 交棒时的清单；R3 之后的状态见上节 S9 待办第 6 条）
 
 - F5/F6 安全收口（W7，在跑）
 - F15/F17 窄时序窗（W9，留档）

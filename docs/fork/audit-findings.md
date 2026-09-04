@@ -294,7 +294,7 @@ exec-memory(A8 恢复) / exec-queue(Q3,Q4,Q5-7) / exec-security(S6-S9) / exec-tu
 
 | 裁定 | 数 | PR | 本轮动作 |
 | --- | --- | --- | --- |
-| **TAKE / 碰** | **9** | #2027、#1947、#1896、#1389、#2018、#2017、#1579（改拿 18.0.10）、#1577、#1576 | **#2027 已摘 `ebb26a3ac`**、**#1947 已摘 `7f5e1ba3a`**（+3 处 fork 适配）、**#1896 待**（预判完，2 处必修适配）；其余 6 条未动 |
+| **TAKE / 碰** | **9** | #2027、#1947、#1896、#1389、#2018、#2017、#1579（改拿 18.0.10）、#1577、#1576 | **三条全部已摘**：#2027 `ebb26a3ac`、#1947 `7f5e1ba3a`（+3 处 fork 适配）、#1896 `b20f16427`（+2 处 fork 适配，碎片归并 `7a6e74c57`）；其余 6 条未动 |
 | **可碰但只能拆分摘取** | **2** | #524（只摘 `src/core/session-import/*` 11 个新文件 + 自己接线）、#1994（只摘 `kernel/bootstrap.ts` 与 `utils/shell.ts`） | 未动 |
 | **观察** | **7** | #1928、#1996、#305、#1177、#1252、#2028、#1581 | 未动 |
 | **SKIP** | **6** | #525、#638、#1175、#1176、#1886（本地已有）、#1582 | — |
@@ -308,7 +308,7 @@ deps 线一条都没动的实证：`actions/checkout` 仍 pin `v7.0.0`（#1576 �
 | --- | --- | --- | --- | --- |
 | #2027 | cancel RLM subtrees through one iterative visited walk | snimu | TAKE（最高优先）→ **已摘 `ebb26a3ac`** | 本地 HEAD 已暴露同一指数病：`agent-session.ts` 三个 walker（`hasRunningRlmChildren`/`getRlmChildSession`/`deleteInactiveRlmSubagent`）在两个 map 上无 visited 集合递归，k 个已完成中间节点 = 2^k 次遍历；且 `hasRunningRlmChildren()` 在每次 roster/会话列表 flush 上跑 → fork 历史第一痛点（worker 228% CPU / 2GB）的第二个根因。 |
 | #1947 | persist kernel stderr to disk and bound the in-memory tail | snimu | TAKE → **已摘 `7f5e1ba3a`**（+3 处 fork 适配） | 零冲突（4 CLEAN + 1 新文件）；本地 `repl-manager.ts` 的 `kernelStderr` 字符串终身无界增长仍在。适配 = `openSync(path,"a",0o600)` + no-follow（否则重开 F3 的口子，lane B 风险 R6）；现行落点 `repl-manager.ts:21/:269/:271`。 |
-| #1896 | retry empty final turns instead of silently abandoning | snimu | TAKE（需补 fork 适配）→ **待** | agent-loop 部分白拿；`agent-session.ts` 那段与本地 F70（`f98d84ada`）治同一病、生产里是死代码但仍要整取。两处必修适配：① 本地 stall 路径会**双发 `message_end`**；② 每轮重试在 TUI 留最多 2 个未 settle 的孤儿组件（`interactive-mode.ts` 每个 `message_start` 都 new + addChild）。另：空的 faux 固定响应会被重试 3 次 → 回归面要跑。 |
+| #1896 | retry empty final turns instead of silently abandoning | snimu | TAKE（需补 fork 适配）→ **已摘 `b20f16427`** | agent-loop 部分白拿；`agent-session.ts` 那段与本地 F70（`f98d84ada`）治同一病、生产里是死代码但仍要整取。两处必修适配：① 本地 stall 路径会**双发 `message_end`**；② 每轮重试在 TUI 留最多 2 个未 settle 的孤儿组件（`interactive-mode.ts` 每个 `message_start` 都 new + addChild）。另：空的 faux 固定响应会被重试 3 次 → 回归面要跑。**本轮已摘（`b20f16427`，6 文件自动合并零冲突，+235 −13）**：两处适配都落地（`packages/agent/src/agent-loop.ts` 删掉 `finishStalledMessage` 的内层 `message_end` emit，否则 stall 回合双发 ⇒ 同一条助手消息落盘两次 + 扩展 handler 与 telemetry usage 双触发；`src/modes/interactive/interactive-mode.ts` 改成先 settle/移除前一个 `streamingComponent`，堵住 R5 的幽灵气泡）；`agent-session.ts` 那个 hunk 在本地生产路径**惰性**（F70 `f98d84ada` 已先回父代理并 bump `_parentReplyCount`，正是该 hunk 的守卫条件），仍整取因为上游 recursion pin 用不带 agent-message controller 的夹具走它。碎片归并 `7a6e74c57`。 |
 | #1389 | keep the original session running and listed when forking | snimu | 碰（巨型组里唯一推荐）→ 未动 | 10 CLEAN + 2 新文件、零冲突；与本地 F42 正交互补、与 F5/F6 capability 机制吻合。落地 4 步里第 ② 步必须在 `resolveForkTarget` 补回本地 F42 的 3 行，否则 F42 在 `fork()` 路径静默失效。 |
 | #524 | import coding harness sessions during onboarding | kevinjosethomas | 可碰但只摘新目录 → 未动 | 11 个 `src/core/session-import/*` 新文件零撞面；但接线面 `interactive-mode.ts` 16 hunk（本地 16 提交），且 `mkdirSync` 无 0700、不走 `private-files.ts`、`opencode.ts` 用 `node:sqlite` 打开外来 DB。 |
 | #1994 | harden native Windows runtime | sethkarten | 整体不碰，可单摘 2 文件 → 未动 | `session-lease.ts` 的 fail-closed 改写正面吃本地 `a807f3055`+`3a450907d`；`stdin-buffer.ts` 新增 paste 旁路不进本地 pasteMode/watchdog；只有 `kernel/bootstrap.ts` 与 `utils/shell.ts` 可白拿。base 是未合的 #1982。 |
@@ -370,7 +370,7 @@ deps 线一条都没动的实证：`actions/checkout` 仍 pin `v7.0.0`（#1576 �
 | --- | --- | --- | --- |
 | **R1** | 跟 Bun 线会**永久排除 3 个测试文件** | 拿 #1970/#1982/#1980/#1994 任一条 | #1970 的 `bunfig.toml` `[test] pathIgnorePatterns` 排除 `daemon-supervisor-process.test.ts`/`compiled-artifact-smoke.test.ts`/`daemon-supervisor-monitor.test.ts`；其中第三个属本地 F24/F25 回归面同区。**全量跑照样绿，只是断言永不执行** → 收工标准必须报 ignore/SKIP 数（本仓已有这条纪律） |
 | **R2** | Windows 线会**静默吃掉本地 4 条已修好的 bug** | 解 #1982/#1994 冲突时取 theirs | 本地 F4 `2637973c1`（管道 SID 名 + DACL + `daemonIpcListenOptions`）与 lease 双修 `a807f3055`+`3a450907d`，**这四条的测试文件也在 PR 改动面内**，会跟着被官方版本覆盖 → 跟 Windows 线之前必须先把这几条测试单独拎出来当守门 |
-| **R5** | #1896 的重试会在本地 TUI 留幽灵气泡 | 拿 #1896 且不补适配 | 两次 `message_start` 之间没有 `message_end`；本地 `interactive-mode.ts` 每个 `message_start` 都 `new AssistantMessageComponent` + `addChild` → 留一个 thinking-only、永不 settle 的气泡，直到 `enforceChatComponentCap` 重建才被清掉。**看起来像「模型在想但没输出」，不报错** |
+| **R5** | #1896 的重试会在本地 TUI 留幽灵气泡（**本轮已堵**：`b20f16427` 的 `interactive-mode.ts` 适配改成先 settle/移除前一个组件） | 拿 #1896 且不补适配 | 两次 `message_start` 之间没有 `message_end`；本地 `interactive-mode.ts` 每个 `message_start` 都 `new AssistantMessageComponent` + `addChild` → 留一个 thinking-only、永不 settle 的气泡，直到 `enforceChatComponentCap` 重建才被清掉。**看起来像「模型在想但没输出」，不报错** |
 
 其余风险（会红灯或已有对策）：R3（#1996 的平级会话躲开全部回收机制，只有 90 min idle 驱逐能收）、R4（#1928 搬走别 lane 正在改的 compat schema，严重度已实测下调）、R6（#1947 会重开 F3 的口子 → **本轮已在 `7f5e1ba3a` 补 `0o600` + no-follow 堵住**）、R7（schema 26 撞号 → **本轮已升 27 消解**）、R8（#525 会给每条车道加一道大概率红的门）、R9（#2027 拖着不拿，深链越多越容易冻 → **本轮已摘**）、R10（#305 自研的两个坑）。
 
