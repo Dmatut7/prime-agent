@@ -80,8 +80,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revisions 23, 24, 25 and 26 were each claimed twice: once by this fork's
 // lineage and once by upstream's, with a different wire shape on each side. The
 // merged lineage carries both meanings on the same number, so the number alone
-// no longer identifies the wire; DAEMON_SCHEMA_ID does. Do not reuse 23-26 for
-// anything new. The next wire change is revision 27, and its ID must be
+// no longer identifies the wire; DAEMON_SCHEMA_ID does. Revision 27 is consumed
+// too (the union of both sides' 24/25/26, listed below), so do not reuse 23-27
+// for anything new. The next wire change is revision 28, and its ID must be
 // recomputed over the union wire by the digest script, never hand-written.
 //   23 fork: omitStreamingMessages on list (LIST_WITHOUT_STREAMING_MESSAGES_COMMAND)
 //   23 upstream: on-demand worker agent-roster pull, list_agent_peers (ceb418049, #1861)
@@ -859,8 +860,13 @@ const SESSION_INPUT_PAUSE_COMMAND = {
 	minSchemaRevision: 19,
 	capability: "session_input_pause",
 } as const;
-// Both features claimed revision 23 in their own lineage; in the merged lineage
-// the first unambiguous revision is 24 (see DAEMON_SCHEMA_REVISION note above).
+// Both features claimed revision 23 in their own lineage, and 24 is claimed twice
+// in the merged lineage as well, so these floors are compatibility bounds rather
+// than wire identities; DAEMON_SCHEMA_ID is the identity (see the
+// DAEMON_SCHEMA_REVISION note above). AGENT_PEER_LIST_COMMAND deliberately carries
+// no capability: a pre-R3 daemon implements list_agent_peers but never advertises
+// "agent_roster", so gating on that capability would reject a daemon that can
+// actually serve the command.
 const LIST_WITHOUT_STREAMING_MESSAGES_COMMAND = {
 	minProtocol: 7,
 	minSchemaRevision: 24,
