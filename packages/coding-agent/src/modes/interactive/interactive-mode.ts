@@ -3168,8 +3168,12 @@ export class InteractiveMode {
 
 		const localSessionHost = this.getLocalSessionHost();
 		const createContext = (): ExtensionContext => ({
-			ui: this.createExtensionUIContext(),
-			hasUI: true,
+			// The runner already holds the dialog-tracking wrapper that bindExtensions
+			// installed, and extension handlers get their UI context from it. Building a
+			// fresh one here left the shortcut path uncounted, so a dialog opened by a
+			// shortcut handler did not pause the stall watchdog.
+			ui: extensionRunner.hasUI() ? extensionRunner.getUIContext() : this.createExtensionUIContext(),
+			hasUI: extensionRunner.hasUI(),
 			cwd: this.getCurrentCwd(),
 			sessionManager: localSessionHost.getSessionManager(),
 			modelRegistry: this.modelRegistry,
