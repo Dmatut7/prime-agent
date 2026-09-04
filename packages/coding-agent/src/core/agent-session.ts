@@ -5081,8 +5081,8 @@ export class AgentSession {
 	 * and a read path must not flush notices, admit a turn action, or discard a
 	 * child's terminal report. Equivalent to the old flush-then-recheck shape, which
 	 * always ended up false once the threshold had passed. The abandonment itself is
-	 * driven by its own timer (see _armRlmTerminalNoticeAbandonTimer) and by the
-	 * quiescence race, not by whoever happens to read activity.
+	 * driven by its own timer (see _armRlmTerminalNoticeAbandonTimer), not by whoever
+	 * happens to read activity.
 	 */
 	private _hasActionableDeferredRlmTerminalNotices(): boolean {
 		return this._hasDeferredRlmTerminalNotices() && !this._isDeferredRlmTerminalNoticeStale();

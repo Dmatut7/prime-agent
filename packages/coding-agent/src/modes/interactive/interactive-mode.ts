@@ -9247,9 +9247,20 @@ export class InteractiveMode {
 			);
 			return;
 		}
-		const confirmed = await confirmShareIfSecrets(exportedHtml, (title, message) =>
-			this.showExtensionConfirm(title, message),
-		);
+		let confirmed: boolean;
+		try {
+			confirmed = await confirmShareIfSecrets(exportedHtml, (title, message) =>
+				this.showExtensionConfirm(title, message),
+			);
+		} catch (error: unknown) {
+			// Building the confirm dialog can throw; without this the export would be
+			// left on disk, since every other exit in this method removes it.
+			fs.rmSync(temp.directory, { recursive: true, force: true });
+			this.showError(
+				`Failed to check the session export for secrets: ${error instanceof Error ? error.message : "Unknown error"}`,
+			);
+			return;
+		}
 		if (!confirmed) {
 			// The export already exists at this point, so cancelling must remove it.
 			fs.rmSync(temp.directory, { recursive: true, force: true });

@@ -96,7 +96,7 @@ fork 工作文档统一搬入 `docs/fork/`：审计总账 `audit-findings.md`、
 | 25 | `streaming_deltas` + `assistant_stream_delta`（`c72b9940f`） | 直连 worker peer transport（`173d845a5`, #1926） |
 | 26 | 服务端 capability 强制 + `control_plane` + `declare_client_capabilities`（`96d3db580`） | 会话行 usage 合计（`d74a75fea`, #2003） |
 
-merge 后 wire 是两侧并集，**哪个 26 的 digest 都不匹配**；本地握手是 `schemaId + appVersion` 精确匹配、无协商降级 → 不升号则本地客户端把官方 daemon 判 stale、反之亦然。处置：`DAEMON_SCHEMA_REVISION = 27`，digest 用仓内算法重算（sha256 三段切片取前 12 hex = `589a2219bc8b`，**禁手写**），6 个切片锚点复验「各命中 1 次且严格递增」，公式对三个基线（本地 `31fb64b6f4ee` / 上游 `962b8b4c5e35` / 分叉点 `649fe649d15e`）逐一复现。**23-26 四个号永久退役**，撞号表与两侧 digest 已写进 `daemon-protocol.ts:79-105` 的注释。
+merge 后 wire 是两侧并集，**哪个 26 的 digest 都不匹配**；本地握手是 `schemaId + appVersion` 精确匹配、无协商降级 → 不升号则本地客户端把官方 daemon 判 stale、反之亦然。处置：`DAEMON_SCHEMA_REVISION = 27`，digest 用仓内算法重算（sha256 三段切片取前 12 hex = `589a2219bc8b`，**禁手写**），6 个切片锚点复验「各命中 1 次且严格递增」，公式对三个基线（本地 `31fb64b6f4ee` / 上游 `962b8b4c5e35` / 分叉点 `649fe649d15e`）逐一复现。**23-27 五个号永久退役**（27 已被本轮 R3 的并集 wire 消费，`DAEMON_SCHEMA_REVISION = 27`、下一个可用号是 **28**；下一轮取号前必须先读 `daemon-protocol.ts` 的头注，否则会出现第五次撞号），撞号表与两侧 digest 已写进 `daemon-protocol.ts:79-108` 的注释（行号会漂，按 "Revisions 23, 24, 25 and 26 were each claimed twice" 这句 grep 定位）。
 
 ### 丢了哪些本地实现（有意取舍，均带依据）
 

@@ -83,7 +83,8 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // no longer identifies the wire; DAEMON_SCHEMA_ID does. Revision 27 is consumed
 // too (the union of both sides' 24/25/26, listed below), so do not reuse 23-27
 // for anything new. The next wire change is revision 28, and its ID must be
-// recomputed over the union wire by the digest script, never hand-written.
+// recomputed over the union wire by the digest assertions in
+// test/daemon-protocol.test.ts, never hand-written.
 //   23 fork: omitStreamingMessages on list (LIST_WITHOUT_STREAMING_MESSAGES_COMMAND)
 //   23 upstream: on-demand worker agent-roster pull, list_agent_peers (ceb418049, #1861)
 //   24 fork: renumbered fork merge, carries both rev-23 features (bf542ce7e)
