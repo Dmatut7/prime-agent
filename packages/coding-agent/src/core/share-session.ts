@@ -40,11 +40,17 @@ export function formatShareSecretWarning(types: readonly string[]): { title: str
 		title: "Share session",
 		message:
 			`This session looks like it contains secrets:\n${list}\n\n` +
-			"/share uploads the full session (messages, system prompt, and tools) as a private GitHub gist.\n\n" +
+			"/share uploads the exported session (messages, system prompt, tools, and the\n" +
+			"working-directory context the exporter adds) as a private GitHub gist.\n\n" +
 			"Upload anyway?",
 	};
 }
 
+/**
+ * Gate an upload on a secret scan of `content`. Callers must pass the bytes that
+ * will actually be uploaded, not a proxy for them: a narrower shape silently
+ * passes every secret that lives outside it.
+ */
 export async function confirmShareIfSecrets(
 	content: string,
 	confirm: (title: string, message: string) => Promise<boolean>,

@@ -9226,18 +9226,6 @@ export class InteractiveMode {
 			return;
 		}
 
-		const [messages, systemPrompt] = await Promise.all([
-			this.agentConnection.getMessages(),
-			this.agentConnection.getSystemPrompt(),
-		]);
-		const confirmed = await confirmShareIfSecrets(JSON.stringify({ messages, systemPrompt }), (title, message) =>
-			this.showExtensionConfirm(title, message),
-		);
-		if (!confirmed) {
-			this.showStatus("Share cancelled");
-			return;
-		}
-
 		const temp = createShareTempHtmlFile();
 		const tmpFile = temp.path;
 		try {
@@ -9245,6 +9233,29 @@ export class InteractiveMode {
 		} catch (error: unknown) {
 			fs.rmSync(temp.directory, { recursive: true, force: true });
 			this.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
+			return;
+		}
+
+		// Scan the bytes that are actually uploaded. The HTML export also carries the
+		// tool definitions and the working-directory context the exporter adds, so
+		// scanning the raw messages instead would pass secrets it never looks at.
+		let exportedHtml: string;
+		try {
+			exportedHtml = readPrivateFile(tmpFile, "utf-8");
+		} catch (error: unknown) {
+			fs.rmSync(temp.directory, { recursive: true, force: true });
+			this.showError(
+				`Failed to read the session export: ${error instanceof Error ? error.message : "Unknown error"}`,
+			);
+			return;
+		}
+		const confirmed = await confirmShareIfSecrets(exportedHtml, (title, message) =>
+			this.showExtensionConfirm(title, message),
+		);
+		if (!confirmed) {
+			// The export already exists at this point, so cancelling must remove it.
+			fs.rmSync(temp.directory, { recursive: true, force: true });
+			this.showStatus("Share cancelled");
 			return;
 		}
 

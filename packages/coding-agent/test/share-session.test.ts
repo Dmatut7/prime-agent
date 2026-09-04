@@ -43,7 +43,7 @@ describe("confirmShareIfSecrets", () => {
 		const confirm = vi.fn(async (title: string, message: string) => {
 			expect(title).toBe("Share session");
 			expect(message).toContain("API key (sk-)");
-			expect(message).toContain("full session");
+			expect(message).toContain("exported session");
 			expect(message).not.toContain(secret);
 			return false;
 		});
@@ -62,6 +62,35 @@ describe("formatShareSecretWarning", () => {
 		const warning = formatShareSecretWarning(["API key (sk-)"]);
 		expect(warning.message).toContain("- API key (sk-)");
 		expect(warning.message).not.toMatch(/sk-[A-Za-z0-9]/);
+	});
+
+	it("describes what is actually uploaded, not a narrower proxy", () => {
+		const { message } = formatShareSecretWarning(["API key (sk-)"]);
+		expect(message).toContain("exported session");
+		expect(message).toContain("tools");
+		expect(message).toContain("working-directory context");
+	});
+});
+
+describe("share preflight content", () => {
+	it("catches a secret that only the uploaded export carries", () => {
+		// The preflight used to scan JSON.stringify({ messages, systemPrompt }) while
+		// the upload is the HTML export, which also carries the tool definitions and
+		// the working-directory context the exporter adds. A secret in those extra
+		// parts is invisible to the proxy and visible in the bytes actually uploaded.
+		const messages = [{ role: "user", content: "hello" }];
+		const systemPrompt = "you are helpful";
+		const proxy = JSON.stringify({ messages, systemPrompt });
+		const uploadedExport = [
+			"<html><body>",
+			JSON.stringify(messages),
+			"<pre>cwd: /work",
+			"env: sk-LIVEKEY1234567890</pre>",
+			"</body></html>",
+		].join("\n");
+
+		expect(findShareSecretHits(proxy)).toEqual([]);
+		expect(findShareSecretHits(uploadedExport)).toEqual(["API key (sk-)"]);
 	});
 });
 
