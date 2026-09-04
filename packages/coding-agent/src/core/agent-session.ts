@@ -1220,7 +1220,11 @@ export class AgentSession {
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
-	/** Open extension dialogs. A turn blocked on one is waiting for the user, not stalled. */
+	/**
+	 * Open extension dialogs. A turn blocked on one is waiting for the user, not stalled.
+	 * A dialog that never settles keeps this above zero; the watchdog's pause budget
+	 * (maxPausedMs) bounds how long that can silence escalation.
+	 */
 	private _pendingUiDialogs = 0;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
 	private _extensionShutdownHandler?: ShutdownHandler;
@@ -8264,6 +8268,11 @@ export class AgentSession {
 		// One call, one local: this used to call _localHarnessStateDir() twice, the
 		// second time behind a non-null assertion. A missing directory is deliberately
 		// not cached, because it can appear later.
+		//
+		// A false verdict is cached too. Re-probing at every turn boundary is what this
+		// cache exists to avoid, and the cost of a stale false is at most one TTL of
+		// skipped auto-refine; the hard preflight before an actual refine still catches a
+		// genuinely unwritable store.
 		const dir = this._localHarnessStateDir();
 		if (dir === undefined) return false;
 		let allowed = false;
@@ -9534,11 +9543,17 @@ export class AgentSession {
 			};
 			return wrapped as F;
 		};
-		// Every member that returns a promise and settles only on user input has to be
-		// counted; missing one leaves the turn abortable while a dialog is open. That is
+		// Every member that can hang indefinitely waiting for the user has to be counted;
+		// missing one leaves the turn abortable while a dialog is open. That is
 		// select/confirm/input, plus editor (multi-line editor) and custom (a component
 		// that takes keyboard focus and settles through its done callback). notify is
 		// fire-and-forget and every other member is synchronous, so they are left alone.
+		//
+		// Members that also accept opts.timeout or opts.signal are counted too, because a
+		// caller may omit both and the daemon can cancel a session-level dialog out from
+		// under it - "settles only on user input" is not what decides this, "can hang" is.
+		// On the daemon and rpc hosts custom resolves immediately, so counting it there is
+		// a harmless no-op.
 		return {
 			...uiContext,
 			select: counted(uiContext.select),

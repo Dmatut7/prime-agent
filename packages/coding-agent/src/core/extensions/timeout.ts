@@ -79,8 +79,12 @@ export function awaitWithTimeout<T>(
 
 		signal?.addEventListener("abort", onAbort, { once: true });
 
-		// Attach the handlers before the already-aborted shortcut so the input promise
-		// always has one; finish() is idempotent, so the ordering is safe.
+		// Defensive only: the shortcut below cannot fire, because this function already
+		// returned at the top when signal.aborted was set and nothing awaits in between.
+		// Handlers are attached before it regardless, so the input promise always has one
+		// if that ever changes; finish() is idempotent, so the ordering is safe. The
+		// load-bearing half of the abort fix is the `void promise.catch(() => {})` at the
+		// top of this function.
 		promise.then(
 			(value) => finish(() => resolve(value)),
 			(error: unknown) => finish(() => reject(error)),
