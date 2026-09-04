@@ -2,7 +2,8 @@ import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ENV_AGENT_DIR } from "../src/config.js";
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import { buildAgentsViewRows } from "../src/modes/agents-view/agents-view-state.js";
 import { AgentsViewRosterStore } from "../src/modes/agents-view/roster-store.js";
@@ -21,8 +22,22 @@ import { RlmSpawnLedger } from "../src/modes/daemon/rlm-ledger.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 
 const tempDirs: string[] = [];
+// A degraded roster attach logs through appendRotatingLog(getAgentLogPath()), and
+// getAgentDir() reads this env at call time: unisolated, the suite appends
+// roster-attach lines to the real ~/.prime/agent/logs/agent.jsonl, where anyone
+// reading that log as a sentinel eats a vitest false positive.
+let inheritedAgentDir: string | undefined;
+
+beforeEach(() => {
+	inheritedAgentDir = process.env[ENV_AGENT_DIR];
+	const agentDir = mkdtempSync(join(tmpdir(), "prime-agents-view-roster-agent-dir-"));
+	tempDirs.push(agentDir);
+	process.env[ENV_AGENT_DIR] = agentDir;
+});
 
 afterEach(() => {
+	if (inheritedAgentDir === undefined) delete process.env[ENV_AGENT_DIR];
+	else process.env[ENV_AGENT_DIR] = inheritedAgentDir;
 	vi.restoreAllMocks();
 	for (const directory of tempDirs.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
