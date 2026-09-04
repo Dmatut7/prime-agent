@@ -120,7 +120,6 @@ describe("extension UI dialogs pause the stall watchdog", () => {
 
 		vi.useFakeTimers();
 		try {
-			const stages: string[] = [];
 			const watchdog = internals._stallWatchdog;
 			expect(watchdog).toBeDefined();
 
@@ -134,7 +133,6 @@ describe("extension UI dialogs pause the stall watchdog", () => {
 			// state stays "armed" instead of escalating to "warned".
 			await vi.advanceTimersByTimeAsync(1500);
 			expect(watchdog?.state).toBe("armed");
-			expect(stages).toEqual([]);
 
 			// The dialog settles, the count drops, and the next window escalates for real: the
 			// pause was the only thing holding it back.
