@@ -29,12 +29,12 @@
 
 ## P1 — 确认的中危缺陷
 
-- [ ] **F5 capability 门只在客户端侧**（协议兼容，双代理互证）（W7 在跑）
+- [x] **F5 capability 门只在客户端侧**（协议兼容，双代理互证） — 已修（W7），落点：`96d3db580` + `7efe4b467` + `6e86b3929`，测试 `6b8d2585b`（R3 复核勾掉，证据见本文件末「R2 遗留状态纠正」节）
   supervisor/worker 不校验入站命令的 capability，客户端侧门控被绕过即可越用新命令。
-  证据：`daemon-supervisor.ts:1409-1422` vs `daemon-client.ts:304-327`
-- [ ] **F6 shutdown/restart/prepare_update_restart 无鉴权**（失败路径）（W7 在跑）
+  证据（原行号，R3 后已漂）：`daemon-supervisor.ts:1409-1422` vs `daemon-client.ts:304-327`；现行落点：`daemon-supervisor.ts:1825` 与 `daemon-mode.ts:3655` 的 `missingDeclaredCommandCapability(...)`
+- [x] **F6 shutdown/restart/prepare_update_restart 无鉴权**（失败路径） — 已修（W7），落点同 F5 三条 + `6b8d2585b`（含 `test/suite/regressions/w7-capability-control-plane.test.ts` 246 行）
   任何能连 socket、能写合法 protocol-7 envelope 的进程即可关停 daemon；无控制面/会话面分流。默认 0700 socket 把威胁限制在同 uid，但同 uid 任意进程（如恶意扩展）可 DoS 全部会话。
-  证据：`daemon-supervisor.ts:1819-1827, 1085`；`daemon-protocol.ts:1084-1105`
+  证据（原行号）：`daemon-supervisor.ts:1819-1827, 1085`；`daemon-protocol.ts:1084-1105`；现行控制面/会话面分流落点：`daemon-mode.ts:3558` 的 `isSessionPlaneDaemonCommand(parsed.type)` 闸
 - [x] **F7 流式事件载荷 O(n²)**（资源） — 已修，落点：c72b9940f（streaming_deltas, schema 25）
   `message_update` 每个 token 把整条 message 推上公开 JSONL（compact delta 只在 worker→supervisor 一跳生效）；长消息总成本平方级。`omitStreamingMessages` 能力可缓解但需客户端主动协商。
   证据：`daemon-extension-binding.ts:33-68`；`agent-loop.ts:533-541`；`daemon-supervisor.ts:4660-4664`
@@ -148,7 +148,7 @@ F1（队列卡死唤醒）、F4（Windows 管道 ACL）、F14（ACP EOF complete
 ## 内核合并记录（merge/repl-kernel @ bf542ce7e）
 - upstream/main 18 提交已并入，含内核四连 #1684-#1687 + 修复 #1835/#1836/#1838/#1839
 - 冲突 2 个文件已解：schema 撞号升 24（新 ID protocol-7-schema-24-3e65c87439aa，内容哈希对齐测试）；删本地 roster 推送法吃 upstream 拉模型；保留风暴节流调度器
-- #1886 fixture 修复（protocol 2→3）已手动应用
+- #1886 fixture 修复（protocol 2→3）已手动应用（R3 lane B 复核实测 `ALREADY_IN_main` ×2，见末节台账）
 - npm run check 全绿；daemon-protocol/streaming-list/agents-view/repl-kernel 测试 117/117 绿
 - 注意：新内核废除 %%bash/%cd/%env/! 魔法单元（改 bash()/os.chdir/os.environ）；旧 kernel venv 下次启动自动重建（无 ipykernel，更瘦）
 
@@ -279,3 +279,238 @@ exec-memory(A8 恢复) / exec-queue(Q3,Q4,Q5-7) / exec-security(S6-S9) / exec-tu
 - review-glm（daemon 层）：两大区复核无误（B2/R5-R6/Q1/Q3/S10/S11/cron/#1700/#1864/#1858/#1845/#1847）。候选 2 条：①commit 路径内存 checkpoint 残留=已留档的 k3 第⑥条（独立再发现，维持留档）；②W8 Windows 管道 listen→onListening 的 ACL 窗口（TOCTOU，窄，Node API 限制，补入 W8 未验证备注）。
 
 - review-grok（TUI/内核/MCP 层）：6 候选——4 条立项修复中（C1 T8 双 ESC 误吞 CSI、C2 K1 restoreFailed 闩死→改隔离+恢复写、C3 codex catch 退避不走 cap、C4 setText 清 undo 范围收窄）；2 条留档：E1 超时后 handler 迟到的副作用留在 runtime（JS 无法取消挂起 Promise，需扩展失败态门控，工作量中等）、W3 仅 rlm.run 认 AbortSignal（其余 host 请求靠 5s drain，可接受）。windows rename 覆盖行为列「待 Windows 实机验证」。
+
+---
+
+# 2026-09-04 R3 上游同步追加：新 PR 台账 + F71-F77 + 路径纠错 + 门方法论
+
+> 基线：`merge/repl-kernel` @ `0c504e475`（本地 **172** 个自研提交）→ 施工树 `sync/upstream-r3`（merge upstream `d74a75fea`，**40** 个上游提交，197 文件 / +18437 −1704；冲突 **43 块 / 18 文件**全手工解）。
+> 证据全文：任务书 `docs/fork/sync-upstream-r3.md` + `-appendix.md`（**本轮起任务书入仓**，`daemon-protocol.ts` 的 schema 注释直接引用其 S5.1 表）；lane B 的 30 PR 全文 `/tmp/sync_b_newprs.md`（含只读 cherry-pick 模拟器）；12 份车道回执 `/tmp/r3_receipt_p{1..12}.md`；收口门 `/tmp/r3_closure_commands.md`。`/tmp` 会清，所以本节把结论自足地抄进仓里。
+> 本地轴（哪条还活、哪条休眠、谁是唯一读者）单独记在 `docs/fork/local-axes.md`。
+
+## 一、30 个「新出现」open PR 的裁定台账（lane B，只读评估）
+
+### 1.1 统计与本轮动作
+
+| 裁定 | 数 | PR | 本轮动作 |
+| --- | --- | --- | --- |
+| **TAKE / 碰** | **9** | #2027、#1947、#1896、#1389、#2018、#2017、#1579（改拿 18.0.10）、#1577、#1576 | **#2027 已摘 `ebb26a3ac`**、**#1947 已摘 `7f5e1ba3a`**（+3 处 fork 适配）、**#1896 待**（预判完，2 处必修适配）；其余 6 条未动 |
+| **可碰但只能拆分摘取** | **2** | #524（只摘 `src/core/session-import/*` 11 个新文件 + 自己接线）、#1994（只摘 `kernel/bootstrap.ts` 与 `utils/shell.ts`） | 未动 |
+| **观察** | **7** | #1928、#1996、#305、#1177、#1252、#2028、#1581 | 未动 |
+| **SKIP** | **6** | #525、#638、#1175、#1176、#1886（本地已有）、#1582 | — |
+| **不碰** | **6** | #2025、#1970、#1982、#1980、#1157、#1169 | — |
+
+deps 线一条都没动的实证：`actions/checkout` 仍 pin `v7.0.0`（#1576 要 7.0.1）、`actions/github-script` 仍 pin `v7.0.1`（#1577 要 9.0.0）、`uv.lock` 零变化（#2018/#2017）、`marked` 未动（#1579）。
+
+### 1.2 30 行台账
+
+| PR | 标题 | 作者 | 裁定 → 本轮动作 | 理由（一句话，全文见 lane B） |
+| --- | --- | --- | --- | --- |
+| #2027 | cancel RLM subtrees through one iterative visited walk | snimu | TAKE（最高优先）→ **已摘 `ebb26a3ac`** | 本地 HEAD 已暴露同一指数病：`agent-session.ts` 三个 walker（`hasRunningRlmChildren`/`getRlmChildSession`/`deleteInactiveRlmSubagent`）在两个 map 上无 visited 集合递归，k 个已完成中间节点 = 2^k 次遍历；且 `hasRunningRlmChildren()` 在每次 roster/会话列表 flush 上跑 → fork 历史第一痛点（worker 228% CPU / 2GB）的第二个根因。 |
+| #1947 | persist kernel stderr to disk and bound the in-memory tail | snimu | TAKE → **已摘 `7f5e1ba3a`**（+3 处 fork 适配） | 零冲突（4 CLEAN + 1 新文件）；本地 `repl-manager.ts` 的 `kernelStderr` 字符串终身无界增长仍在。适配 = `openSync(path,"a",0o600)` + no-follow（否则重开 F3 的口子，lane B 风险 R6）；现行落点 `repl-manager.ts:21/:269/:271`。 |
+| #1896 | retry empty final turns instead of silently abandoning | snimu | TAKE（需补 fork 适配）→ **待** | agent-loop 部分白拿；`agent-session.ts` 那段与本地 F70（`f98d84ada`）治同一病、生产里是死代码但仍要整取。两处必修适配：① 本地 stall 路径会**双发 `message_end`**；② 每轮重试在 TUI 留最多 2 个未 settle 的孤儿组件（`interactive-mode.ts` 每个 `message_start` 都 new + addChild）。另：空的 faux 固定响应会被重试 3 次 → 回归面要跑。 |
+| #1389 | keep the original session running and listed when forking | snimu | 碰（巨型组里唯一推荐）→ 未动 | 10 CLEAN + 2 新文件、零冲突；与本地 F42 正交互补、与 F5/F6 capability 机制吻合。落地 4 步里第 ② 步必须在 `resolveForkTarget` 补回本地 F42 的 3 行，否则 F42 在 `fork()` 路径静默失效。 |
+| #524 | import coding harness sessions during onboarding | kevinjosethomas | 可碰但只摘新目录 → 未动 | 11 个 `src/core/session-import/*` 新文件零撞面；但接线面 `interactive-mode.ts` 16 hunk（本地 16 提交），且 `mkdirSync` 无 0700、不走 `private-files.ts`、`opencode.ts` 用 `node:sqlite` 打开外来 DB。 |
+| #1994 | harden native Windows runtime | sethkarten | 整体不碰，可单摘 2 文件 → 未动 | `session-lease.ts` 的 fail-closed 改写正面吃本地 `a807f3055`+`3a450907d`；`stdin-buffer.ts` 新增 paste 旁路不进本地 pasteMode/watchdog；只有 `kernel/bootstrap.ts` 与 `utils/shell.ts` 可白拿。base 是未合的 #1982。 |
+| #1928 | refresh models from a hosted catalog | sethkarten | 观察 → 未动 | 零文本冲突但**正面撞别 lane 未提交改动**（同一 base blob `4ebf6c3b8d`）：它整块删掉 `model-registry.ts` 的 `OpenAICompletionsCompatSchema` 搬去 `packages/ai/src/model-compat-schema.ts`，而别 lane 正往那块加 4 个字段。严重度实测下调（新 schema 非严格变体 `additionalProperties:true`，`models.json` 不会变 invalid），代价是 4 个字段退化成「允许但无类型校验」。且 fork 纪律是精确模型选择器，不接受 built-in 列表随远端漂。 |
+| #1996 | let root agents create sibling sessions | sethkarten | 观察 → 未动 | 它造出的 `lifecycle:"resident"` depth-0 会话**不进 `_activeRlmChildRuns`/`_rlmChildSessions`** → 躲开 #2027 迭代器、本地 F2、`waitForRlmQuiescence`、abort 级联；PR diff 里 grep `quota`/`budget` = 0 命中，也不受 `RLM_MAX_DEPTH` 约束；`RUNTIME_READY_CHECK` 新增 `assert callable(rlm.create_session)` 是硬闸。 |
+| #305 | add plan mode (kernel-enforced no-edit toggle) | kevinjosethomas | 观察（当设计参考自研）→ 未动 | 价值最高的一个（现在「全程只读」只靠提示词），但 7 月的 PR 早于内核换血：9 文件 STALE（补丁在 main 上全打不上）+ 6 文件部分 hunk 被拒，TS 侧要重做，不能 cherry-pick。自研要先想清楚两个坑：macOS `sandbox-exec` 已被 Apple 弃用 → fallback 白名单是主路径；`_FALLBACK_GIT_SUBCOMMANDS` 要逐条核是否覆盖 `cat-file`/`merge-tree`/`rev-parse`/`ls-tree`。 |
+| #1177 | preserve typed system-prompt provenance | sethkarten | 观察 → 未动 | 标题骗人：commit 列表里的 sleep/简明英语提示词改动**已被作者自己删掉**（diff grep 0 命中，且那两条已在本地 `prompts/rlm.ts:17/:24`）；剩下的是纯 provenance 类型化，本地没报过这个 bug。 |
+| #1252 | handle clipboard helper failures | sethkarten | 观察（白拿级）→ 未动 | 本机 macOS 走 `pbcopy`，收益几乎为零；真正收益在 Linux/Wayland。可作为本地 F11/F46「子进程生命周期归属」族的参考实现。 |
+| #2028 | move the semantic-edge ledger onto the event-log substrate | snimu | 观察（跟同步链一起拿）→ 未动 | 5 文件全 LOCAL_ABSENT（依赖 #1885/#1987）；它的「未终止尾行 = 未提交 append」裁定与本地 F39/F58 同方向，可互证口径。 |
+| #1581 | bump esbuild 0.28.1 → 0.28.2 | dependabot | 观察 → 未动 | 满足 7 天（11.55 d）；5 个修复里本 fork 对 4 个零暴露，第 5 个（top-level await）在禁跑构建前提下无法证伪；且与 #1970 互斥（Bun 换掉 esbuild 执行路径）。 |
+| #525 | harden dependency supply chain | kevinjosethomas | SKIP → — | fork 不发 release、不跑官方 CI；而它把 `check:dependencies` 串进 `npm run check`（fork 每条车道的强制门），本地 lock 已漂（228 hunk 拒 34）→ 大概率当场红；且与 #1970 互斥（#1970 删 `package-lock.json`，#525 修它的 integrity）。 |
+| #638 | add trace sharing feature hint | kevinjosethomas | SKIP → — | Bugbot 自己的摘要就写了它与既有 `trace-sharing` hint 指向同一命令 → 纯重复；且与本地 F62（`0092dd04a` /share 上传前脱敏 + 确认）取向相反。 |
+| #1175 | [v0.8 MCP 1/4] generic MCP transport foundation | sethkarten | SKIP（已被 main 超越）→ — | 本地 HEAD 已有 `rlm/mcp.py:507 list_tools`/`:511 call_tool`、`mcp_base.py:254/:277`、`mcp-manager.ts:236` 的 generic kernel API；且它是 4 个一叠的第 1 个，单拿留半截。 |
+| #1176 | [v0.8 Release 1/3] bind artifacts to immutable source commits | sethkarten | SKIP → — | 作者自述 “Draft only: no reviewer requests and not ready for review yet”；fork 不打 release、不跑 `build-binaries.yml`。 |
+| #1886 | kernel test fixtures speak protocol 3 | snimu | SKIP（本地已有）→ — | 实测 `ALREADY_IN_main` ×2：本地两处夹具已是 `protocol: 3`（`ipython-provisioner.test.ts:76`、`repl-kernel-protocol-corruption.test.ts:35,38`），`repl-manager.ts:53` 是 3；本文件也记过「已手动应用」。 |
+| #1582 | bump @types/node 22.20.1 → 26.2.0 | dependabot | SKIP → — | 满足 7 天（12.64 d），但 `engines.node` 仍是 `>=22.8.0`/`>=20.0.0` → 类型面与运行时地板缺口拉到 2 个真实 major；`undici-types` 跨大版本会打在本地改动最密的 fetch 面上；目标版本已落后（合规最新 26.4.0）。 |
+| #2018 | bump mcp 2.0.0 → 2.1.1 (runtime) | dependabot | TAKE → 未动 | 零冲突（`uv.lock` blob 与 PR base 逐字节相同）；满足 7 天（8.71 d）；2.0.0→2.1.1 零源码模块删除、本地 5 处 mcp import 全在、`pyproject.toml:7` 约束 `mcp>=2,<3`；Bun 线不影响 `uv.lock`。 |
+| #2017 | bump tyro 1.0.15 → 1.0.16 (runtime) | dependabot | TAKE → 未动 | 零冲突；满足 7 天（11.33 d）；唯一行为变更只作用于「root 级 subcommand 是**类**」，本地 `tyro.cli(func,...)` 传的是函数。 |
+| #1579 | bump marked 18.0.7 → 18.0.9 | dependabot | TAKE（**改拿 18.0.10**）→ 未动 | 满足 7 天（16.19 d）；修复正打在 fork 唯一 marked 消费者手写的 em/strong/blockquote 嵌套逻辑上（`packages/tui/src/components/markdown.ts`，本地 F27a 改过）；18.0.10 已 17.0 d 合规且多 3 个修复（含 `keep the em/strong mask the same length as the source`）。这条要留给能跑测试的车道。 |
+| #1577 | bump actions/github-script 7.0.1 → 9.0.0 | dependabot | TAKE → 未动 | 满足 7 天（132.43 d）；v9 三条 breaking change 本地一条都不碰，SHA pin `3a2844b7…` 经 tag deref 核验一致；主要收益是把与官方的 workflow diff 面压到最小。 |
+| #1576 | bump actions/checkout 7.0.0 → 7.0.1 | dependabot | TAKE → 未动 | 8 个里最干净：3/3 文件 blob 逐字节相同、6 处 checkout 全覆盖、SHA pin `3d3c42e5…` 核验一致；含 `--unset` 转义这类 git config 注入加固。 |
+| #2025 | add sandbox-backed session foundations | sethkarten | 不碰 → — | 作者自述 “Draft. Do not merge yet.”；把 `RlmSubagentRuntime` union 化 → 本地三处直接访问 `.session` 类型层不成立；撞本地刚落地的 F5/F6 capability 闸。`gh pr diff` 返回 HTTP 406（+170636 行），只有 100 条文件清单。 |
+| #1970 | build: make Bun the primary runtime | sethkarten | 不碰 → — | 对 main 已 CONFLICTING/DIRTY；21 文件冲突（含 5 个 `vitest.config.ts` 被删）；删 `package-lock.json` 与 `.npmrc`（7 天规则迁到 `bunfig.toml: minimumReleaseAge = 604800`，语义保留）；**`bunfig.toml` 的 `pathIgnorePatterns` 永久排除 3 个测试文件**（风险 R1）。 |
+| #1982 | feat: add native Windows support | sethkarten | 不碰 → — | 22 文件冲突；官方 per-user 管道名与本地 F4（`2637973c1`）的 SID 名 + DACL + `daemonIpcListenOptions` 互不兼容；取 theirs 会让本地 F4 与 lease 双修变死代码，**且这四条的测试文件也在 PR 改动面内 → 不红灯**（风险 R2）。base 是未合的 #1970。 |
+| #1980 | build: prepare provisional Prime Intellect Bun packages | sethkarten | 不碰（排最后）→ — | 全仓 `@earendil-works/pi-*` → `@prime-intellect/prime-agent-*` 重命名；本地 554 个文件引用 `@earendil-works`，与本地自改文件交集 81 个，且撞主仓当前 4 个在途未提交文件。diff 超限（HTTP 406）。 |
+| #1157 | feat(swarm): provider-neutral role policy | sethkarten | 不碰 → — | base 是 `perf/c01-identity-fencing`，依赖的 4 个 sha 对本地全部 `--is-ancestor` = NO；撞 `agent-session.ts`（17 hunk，本地 29 提交）与 `daemon-mode.ts`（+304）。 |
+| #1169 | N01: incremental structured-output streaming parser | sethkarten | 不碰 → — | base 是未合的 #1115（`9d9cf28d`，`--is-ancestor` = NO）；`compact-session-stream.ts` 与本地 `c72b9940f` 同一起点 blob `d8e5cb2b8` 双向分叉；丢帧语义与本地 FIX-Q6「自请 resync」反向。 |
+
+> 「冲突」口径全部来自 lane B 的**场景 B 实测**（`base = upstream/main:<path>`、`theirs = base + PR diff`、`ours = HEAD:<path>`、`git merge-file --diff3`），即「先同步 40 提交，再看 PR 与本地 172 提交撞不撞」——本 fork 真实的集成顺序。状态词：`CLEAN` / `LOCAL_ABSENT_add` / `CONFLICT_n` / `STALE_unappliable_on_main` / `ALREADY_IN_main` / `NOOP`。
+
+### 1.3 翻案 4 条 + 校准结论
+
+| 上轮裁定 | PR | 现在的事实 | 翻案后 |
+| --- | --- | --- | --- |
+| SKIP（理由「+2308 新子系统」） | **#1885** ACP semantic-edges-v1 provenance producer | 官方已合 `1768ace56`，在本轮同步的 40 提交里；而且官方在它上面**又盖了三层**：`1c07eaad5`(#1984)、`6950bc88a`(#2021)、`118c1d90d`(#1987)，#2028 是第四层 | 不用裁了，跟 40 提交白拿。当初 SKIP 的真实代价不是「少一个子系统」，是**链上每一环都要单独 rebase** |
+| SKIP | **#1842** single-source the interactive queue state | 官方已合，且**本地已吸收**（`bab124212`） | 无需动作。但要记一笔：上轮判 SKIP 的同时，本地 F1/F43（`d9364b034`）在治同一族问题 = 自修了一个官方已给答案的东西 |
+| SKIP | **#1864** enforce session ownership when joining an in-flight open | 官方已合，而且**它就是本 fork 的分叉点** `5b6c0e94e`；本地 F16 记的就是「已修，落点 `5b6c0e94e`（#1864）+ `1597ef8c3`」 | 不算翻案，算已吸收。说明上轮 SKIP 名单里混进了「本地其实已经依赖它」的条目 → 判定流程漏了一步「先查它是不是已在本地历史里」 |
+| 条件观察 | **#1631** replace TUI process after update | 官方已合 `083c68dc0`，在 40 提交里 | 跟着同步白拿，**但要复核交互面**：它动 update 后替换 TUI 进程，与本地 update-restart 家族（F38 `e5eea4a6b`、F66 `f384214e3`）同区 |
+| SKIP | **#1633** | #1928 的 body 第一行明写 `Supersedes #1633` | #1633 作废，改评 #1928（判观察） |
+
+另：上轮「条件观察」的 #1756 / #1845 / #1859 也已被官方合并且本地已吸收（`ee8fd6996` / `c0334a176` / `dab03c00c`）。
+
+**校准结论（一句话）：上轮的偏差主要是「漏扫」，不是「判错」。**
+- 漏扫 **17 个**（这 30 个里有 17 个在上轮审计日 2026-08-29 之前就存在，上轮那份「72 个 open PR 全扫」没覆盖到）：#305(07-01)、#524/#525(07-23)、#638(08-05)、#1157/#1169/#1175/#1176/#1177(全部 08-10 同一天)、#1252(08-11)、#1389(08-14)、5 个 dependabot(全部 08-20 同一批)、#1886(08-28)。
+- 漏扫的形状很有规律：**按作者 + 按栈 + 按 label 就能一次捞干净**（`sethkarten` 的 5 个 v0.8 成栈 PR、`kevinjosethomas` 的 4 个老 PR、dependabot 的 `dependencies`/`javascript`/`github_actions`/`python:uv` label），而不是按 PR 号增量扫。
+- 真正判错的只有 **#1885** 一条。
+- **反向校准**：上轮 TAKE 的 9 个（#1882 / #367 / #1700 / #413 / #1249 / #1253 / #1251 / #1519 / #887）本轮**无一反证** → TAKE 判据可靠，偏的只是 SKIP/观察那半边（偏向「按规模与新颖度筛」，漏了「按链条与 base 筛」）。
+
+### 1.4 三条新判据（下一轮评估前先跑，都是一两行只读命令）
+
+1. **「+N 行新子系统」不是 SKIP 的充分理由。** 先问：**它是不是官方演进链的基座？** 可查信号：作者是不是 staff（`sethkarten`/`snimu`/`kevinjosethomas` 三人包了本轮 30 个里的 23 个）、body 里有没有 Linear 号（#2027 `RES-1265`、#1947 `RES-1246`、#1996 `RES-1256`、#1896 `ENG-5795`、#1928 `ENG-5435`）、有没有后续 PR 明写 `Supersedes`/`Depends on`/`Part of` 指向它。**有链的，SKIP 的代价会复利。**
+2. **「base 不是 main」应该是第一道筛子，比行数更早用。** `gh pr view <n> --json baseRefName` → base 不是 `main` 的先跑 `git merge-base --is-ancestor <base-sha> <本地分支>`，NO 就直接判「不碰（需先吞整条未合栈）」，**不用再读 diff**。本轮 9 个巨型 PR 里 5 个靠这一步就出局（#1982/#1980 base = #1970，#1994 base = #1982，#1169 base = #1115 head `9d9cf28d`，#1157 base = `perf/c01-identity-fencing`；四个 perf sha 对本地全部 `--is-ancestor` = NO）。行数反而最不重要：#2025 那 +170636 行绝大部分是新文件，撞面比 #1994 的 +2073 还小。
+3. **把「官方会自己合」当默认假设，并加一道「是否已在本地历史」的前置检查。** 官方在 09-01~09-03 三天内新开 8 个 PR，全部出自两位 staff → fork「官方合得太慢，不等了」的窗口比上轮更窄。评估每个 PR 前先跑两行：`git log --oneline <本地分支> --grep "(#<n>)"` 与 `git log --oneline upstream/main --grep "(#<n>)"`。本轮 #1886 靠这个直接出局（`ALREADY_IN_main` + 本地夹具已是 `protocol: 3`），上轮 #1864/#1842 就是漏了这步。
+4. **（方法论，不是判据）冲突判定用可复跑的三方合并模拟，不要靠人读 diff 猜。** lane B 的模拟器 30 个 PR 全跑一遍只要几十秒，且能区分「文本冲突」/「PR 落后打不上」/「已在 main」/「本地没这个文件」四种完全不同的情况；脚本逻辑抄在 `/tmp/sync_b_newprs.md` 附录 A。
+
+### 1.5 三条「不会红灯」的风险（已进 S8 收口清单，下一轮碰这些 PR 前必读）
+
+| # | 风险 | 触发条件 | 为什么不红灯 |
+| --- | --- | --- | --- |
+| **R1** | 跟 Bun 线会**永久排除 3 个测试文件** | 拿 #1970/#1982/#1980/#1994 任一条 | #1970 的 `bunfig.toml` `[test] pathIgnorePatterns` 排除 `daemon-supervisor-process.test.ts`/`compiled-artifact-smoke.test.ts`/`daemon-supervisor-monitor.test.ts`；其中第三个属本地 F24/F25 回归面同区。**全量跑照样绿，只是断言永不执行** → 收工标准必须报 ignore/SKIP 数（本仓已有这条纪律） |
+| **R2** | Windows 线会**静默吃掉本地 4 条已修好的 bug** | 解 #1982/#1994 冲突时取 theirs | 本地 F4 `2637973c1`（管道 SID 名 + DACL + `daemonIpcListenOptions`）与 lease 双修 `a807f3055`+`3a450907d`，**这四条的测试文件也在 PR 改动面内**，会跟着被官方版本覆盖 → 跟 Windows 线之前必须先把这几条测试单独拎出来当守门 |
+| **R5** | #1896 的重试会在本地 TUI 留幽灵气泡 | 拿 #1896 且不补适配 | 两次 `message_start` 之间没有 `message_end`；本地 `interactive-mode.ts` 每个 `message_start` 都 `new AssistantMessageComponent` + `addChild` → 留一个 thinking-only、永不 settle 的气泡，直到 `enforceChatComponentCap` 重建才被清掉。**看起来像「模型在想但没输出」，不报错** |
+
+其余风险（会红灯或已有对策）：R3（#1996 的平级会话躲开全部回收机制，只有 90 min idle 驱逐能收）、R4（#1928 搬走别 lane 正在改的 compat schema，严重度已实测下调）、R6（#1947 会重开 F3 的口子 → **本轮已在 `7f5e1ba3a` 补 `0o600` + no-follow 堵住**）、R7（schema 26 撞号 → **本轮已升 27 消解**）、R8（#525 会给每条车道加一道大概率红的门）、R9（#2027 拖着不拿，深链越多越容易冻 → **本轮已摘**）、R10（#305 自研的两个坑）。
+
+### 1.6 一条 fork 可以自研、不必等官方的 deps 修复
+
+上游 main 有一个既存的 **`@types/node` split-brain**：lock 里装着 4 份 `@types/node`（root 22.20.1 + 三个子包 24.13.3）与 4 份 `undici-types`（6.21.0 + 三个 7.18.2），因为 root 声明 `^22.10.5` 与子包 `^24.3.0` 不兼容、npm 无法 hoist。而 `tsconfig.base.json:21` 是 `"types": ["node"]` → **`npm run check` 按 root 的 Node 22 类型检查全部四个包的源码，`npm run build` 按各包的 Node 24 类型检查**。对齐到 CI 实际跑的 22.x 即可，与 Bun 线无关、不需要跑 tsgo 也能判方向。**本轮未动。**
+
+## 二、本轮新缺陷 F71-F77（接 F70c 续号）
+
+状态栏沿用本文件口径：`[ ]` 未处理 / `[~]` 进行中 / `[x]` 已修。
+
+- [ ] **F71 semantic-edges ledger 绕过本地私有文件硬化**（密钥与日志 / 权限边界，P1 级）
+  官方新模块 `src/core/semantic-edges.ts` 只 import 裸 `node:fs`（`:2`），写入是 `mkdirSync(dirname(this._ledgerPath), { recursive: true })`（**`:357`，无 mode**）+ `appendFileSync`（`:363`/`:367`）；而本地 `src/utils/private-files.ts` 的口径是 `PRIVATE_DIRECTORY_MODE = 0o700`（`:24`）/ `PRIVATE_FILE_MODE = 0o600`（`:25`）+ `ensureNoSymlinkPath` + 原子写。⇒ 新盘上产物**目录非 0700、文件非 0600、无 no-follow**，与本地 #1249/#1105（F3 `e4bb3f3cf`）的私有存储投资方向相反。
+  ledger 路径 = `semanticEdgeLedgerPath({rlmSessionDir, sessionArtifactDir})`（`:98-103`）= `join(rlmSessionDir ?? sessionArtifactDir, "semantic-edges.jsonl")`（`:32`）。
+  内容敏感度：semantic edge 事件带 sessionId / parentSessionId / spawnedByRequestId 与请求级 provenance，不是密钥，但落在与 session jsonl 同一棵目录树里、按 F3 的口径应当同权。
+  修法方向：把 `_append()` 的建目录与追加改走 `private-files.ts`（`ensurePrivateDirectory` + 带 mode 的 append + no-follow）。**不动官方模块的语义**，只换 IO 原语；改完要复跑官方 `test/semantic-edges.test.ts`（52）与 `test/agent-session-semantic-edges.test.ts`（23）。
+  备注：F72 的修复（`bdd5bcd82`）只挡住了非持久化会话，**持久化会话的 ledger 仍走这条非硬化路径** → 本条独立成立，是 S9 待办第 1 项。
+
+- [x] **F72 临时 RLM 后代在盘上留 `semantic-edges.jsonl`，打破本地非持久化不变量**（隐私 / 会话生命周期，P1 级） — 已修，落点：`bdd5bcd82`
+  本地不变量：root 非持久化 ⇒ 后代全在内存、`session_dir` 不落 `.jsonl`（本地独有回归 `test/agent-session-recursion.test.ts` “keeps RLM descendants in memory when the root session is non-persisted”，断言 `:394` `readdirSync(childHandle.session_dir).some(name => name.endsWith(".jsonl")) === false`）。
+  机制：`semantic-edges.ts` **零持久化判定**（`grep "allowsPersistence|inMemory|isPersisted|persist"` = 0 命中），`_append()`（`:351-370`）只判 `_disabled` 与 `_ledgerPath`；而临时 RLM 子会话正好有 `rlmSessionDir` ⇒ 必写。调用侧 `agent-session-services.ts` 无条件传路径。实测现场：
+  ```
+  DIAG child session_dir entries      = ["semantic-edges.jsonl","sub-4040233a"]
+  DIAG grandchild session_dir entries = ["semantic-edges.jsonl"]
+  ```
+  同段另两条断言（`allowsPersistence() === false`、`sessionFile === undefined`）**仍绿** → 会话本体没落盘，只是多了这个 ledger。
+  归因（四个提交点逐个实跑，独立 scratch worktree，跑完已删）：`0c504e475` **1 passed** → `3367d85c4`(merge) **1 failed** → `e59a452ce` 1 failed → `f22e65312` 1 failed ⇒ **merge 本身引入**，与 S7/p9/p11 后续提交无关。
+  修法（采 lane 建议的 (a)，不改官方模块）：两处 wiring 都加 `SessionManager.allowsPersistence()` 守卫 —— recorder 本体 `agent-session.ts:1364`、trace-outbox 注册 `agent-session-services.ts:231`（后者否则会把一个永不存在的文件标成 pending sync）。`SemanticEdgeRecorder.ledgerPath` 本就 optional、append 路径已判它 ⇒ 传 `undefined` 即干净停用。
+  验证：持久化会话面不变（`agent-session-semantic-edges` 23 / `semantic-edges` 52 / agent-traces 54 全绿），本地独有那条回归由红转绿。
+  另一条路（未采）：收窄本地断言、接受新行为 = **用户可见变更**，需补碎片 bullet 并进行为变更清单。
+
+- [x] **F73 `fixq5-q7` 假 supervisor 缺 roster 桩**（merge 后果 / 测试面，P2 级） — 已修，落点：`f22e65312`（+21 / −0，纯新增）
+  红因：`Error: Unknown active session: active-seed-integrity`，抛自 `daemon-supervisor.ts` 的 `findWorker`，链 `attachClient` → 测试 `:323`/`:362`。`local_base`（`0c504e475`）上该文件 `✓ 4 tests` 全绿 ⇒ **本轮 merge 引入**。
+  机制：上游把 `matchWorkers` 的遍历源从 `for (const worker of this.workers.values())` 换成 `for (const entry of this.roster().values())`（`entry.workerId` → `this.workers.get(...)`，summary 由 `sessionSummaryFromRosterEntry(entry)` 生成）。该本地测试用 `Object.assign(Object.create(DaemonSupervisor.prototype), { workers, clients, streamReconstructor, syncWorkerExtensionUi })` 造假 supervisor，**只 seed `worker.summaries`（新代码完全不读）**、无 roster ⇒ 惰性建出**空 roster** ⇒ 0 匹配 ⇒ 兜底 `refreshWorkerSummaries` 撞上假 worker 的 `client: {}`（无 `request`）⇒ 抛错被 `.catch(() => undefined)` 吞 ⇒ 仍 0 ⇒ `Unknown active session`。
+  这就是铁律 9 预言的事故类型：**本地独有测试不参与三方合并，git 一句话不说**。
+  修法：加 `rosterStub(workerId, row)` helper（现 `:91`）返回 `{ values: () => AgentRosterEntry[] }`，在两处 `Object.assign` 里 shadow 私有 `roster()`（现 `:338`/`:378`），与该测试既有造假风格一致；roster 行类型 `RosterSessionSummary = Omit<SessionSummary, "streamingMessage" | "sessionActions" | "diagnostics">`（`agent-roster.ts:40`）⇒ 夹具走 roster 形状**什么都不丢**。
+  验证：`✓ 4 tests`；收口重跑 54 个本地独有文件从 `3 failed|197 passed` 变 `1 failed|199 passed`。
+  **同类风险的收口扫描建议**（p9 提，已采纳为待办）：`grep -rn "Object.create(DaemonSupervisor.prototype)" test/` 逐个核它走的路径是否经过 `matchWorkers`/`handleList`/其他已改读 roster 的方法；凡经过的，只 seed `worker.summaries` 就会**静默 0 匹配**（不是崩，是走到兜底再抛「Unknown active session」这类**指向 selector 而不指向缺失 roster** 的误导性错），排查成本高于普通回归。本轮实测：该模式 11 个文件里**只有 fixq5-q7 一处成真**，其余 10 个要么不走已改读 roster 的方法、要么本来就 seed 了 roster（`daemon-peer-transport.test.ts:465` 用真 `AgentRoster`，是正面例子）。
+
+- [x] **F74 `agents-view-roster` 假 connection 缺 `streamReconstructor`**（merge 后果 / 跨轴对撞，P2 级） — 已修，落点：`13f623676`（+1 / −0）
+  红因：`keeps a recovered session attach alive when the roster subscribe fails` 失败，栈 `reseedStreamReconstructor`（`daemon-agent-connection.ts:2323`）← `attach`（`:451`）← 测试 `:184`（现 `:200`）。
+  定性：**上游独有测试文件 × 本地独有 src 接缝**。上游新测试用 `Object.create(DaemonAgentConnection.prototype)`（现 `:188`）调真 `attach()`，但 `reseedStreamReconstructor` 溯源到本地 `c72b9940f` + `72942804b`（streaming_deltas / seed 完整性），上游假件里没有 `streamReconstructor` 成员 ⇒ 读 `undefined.hasPartial` 抛。
+  修法：假件补 1 行 `streamReconstructor: { seed: vi.fn(), clear: vi.fn(), hasPartial: vi.fn(() => false) }`（现 `:196`）。**不走 src 侧加容错**（那是 fail-open，会吞真故障）。
+  验证：该文件 `✓ 8 tests`；15 个官方新增测试文件整体 `15 files / 153 tests` 全绿。connection-seam 类全仓**只有这一处**，已闭合。
+
+- [ ] **F75 `test/extensions-timeout.test.ts:102` 既有红**（测试面 / 本地独有，P2 级；**不属本轮**）
+  `expect(result.errors).toHaveLength(1)` 实得 2（`AssertionError: expected [ { …(2) }, { …(2) } ] to have a length of 1 but got 2`）。
+  **merge 之前就红**：在独立 scratch worktree `/tmp/r3-base` @ `0c504e475` 上逐字同样失败（同文件同行同断言同消息），跑完 `git worktree remove --force`（残留 0、本树 status 0 行、主仓哨兵 ` M`=4）。⇒ 进已知红清单第 6 项（父代理 2026-09-04 裁定新增），**不是本轮的账，但需有人认领**。
+  性质：本地独有的 extension factory 超时测试（`320b720f0` “time out hung extension handlers so sessions stay live” 家族），其期望与 `src/core/extensions/timeout.ts` 现语义已不符 —— `loadExtensions([hangPath, okPath], tempDir, undefined, 40)` 现在**两条都进 errors**（超时 40ms 太紧，正常那条也超时），而测试仍期望「只有 hang 那条进 errors、ok 那条正常加载」（`:103-105` 还断言 `result.errors[0].error` 含 `"timed out"`、`result.extensions[0].path === okPath`）。
+  修法方向（二选一，都要能跑测试的车道）：① 放宽超时预算并把「ok 那条必须加载成功」钉成独立断言；② 若现语义是「同批任一超时则整批判失败」，则重写测试断言这个语义并补一条「预算充足时只 hang 那条失败」的正例。**先读 `src/core/extensions/timeout.ts` 全文再定**，不要只改数字。
+
+- [ ] **F76 `WINDOWS_NAMED_PIPE_ACL_UNVERIFIED` 是死导出**（文档漂移 / 未覆盖面记录，P3 级；**既有，非本轮造成**）
+  `src/modes/daemon/windows-named-pipe.ts:6`：
+  ```ts
+  export const WINDOWS_NAMED_PIPE_ACL_UNVERIFIED = "Windows named-pipe ACL application is not hardware-verified in CI";
+  ```
+  全仓 `--include=*.ts --include=*.md` 命中 **1**（只有它自己的声明行）；其**值字符串**也没被任何地方以字面量引用；`test/windows-named-pipe.test.ts` 里也**没有**这条 caveat。
+  不是本轮造成的：`git diff --stat 0c504e475 HEAD -- <该文件>` **无输出**（本轮 merge 未改该文件），且 `0c504e475` 版里 `grep -c` 同样是 1。
+  性质：一段「CI 里没有真硬件验证 Windows 命名管道 ACL」的免责声明常量，从措辞看原本大概是要被测试或文档引用的。无行为影响（纯字符串），但属**无人认领的 dead export**，且它与本文件 F4（`2637973c1`，标注「Windows 未实机验证」）是同一条未覆盖面。
+  修法方向：**建议接不建议删** —— 把它接进 `test/windows-named-pipe.test.ts` 作为一条显式 caveat（例如非 win32 平台的 `it.skipIf` 说明或注释引用它），因为删了等于丢掉一条已知的未覆盖面记录。若决定删，须同时把这条未覆盖面写进 `FORK_NOTES.md` 的待办与本文件的 F4 备注。
+
+- [x] **F77 `agents-view-roster` attach 测试往开发者真实 `~/.prime/agent/logs/agent.jsonl` 写日志**（测试卫生 / 哨兵污染，P2 级） — 已修，落点：`bd35d1287`
+  现场（p12 在真验证 P0-A 时撞出来，真实 agent 日志里凭空多出 2 行，时间正落在施工窗口内）：
+  ```
+  3105:[2026-09-04T08:58:55.200Z] roster-attach: attach degraded: Error: roster_subscribe failed: subscribe timed out
+  3106:[2026-09-04T08:59:56.570Z] roster-attach: attach degraded: Error: roster_subscribe failed: subscribe timed out
+  ```
+  溯源：`subscribe timed out` 这个字符串**全仓只在 `test/agents-view-roster.test.ts:178` 出现**（fake client 的返回值）；该测试用 `Object.create(DaemonAgentConnection.prototype)` 调真 `connection.attach()` ⇒ 走真 `attachRosterStore("attach")` ⇒ `appendRotatingLog(getAgentLogPath(), ...)`，而 `getAgentLogPath()` 用 `getAgentDir()`；测试**没有**隔离 `PRIME_AGENT_CODING_AGENT_DIR`（同文件只给 `defaultSessionConfig` 传了 `agentDir`，管不到日志路径）。
+  后果：谁拿 `roster-attach: attach degraded:` 当 P0-A（铁律 6 响亮化）的哨兵去 grep 真实日志，都会被 vitest 跑出**假阳性**（p12 当场差点把它当成「修法没生效」）。这类污染还会让「本地跑测试」与「真实现场取证」两条证据链互相串味。
+  修法：该测试文件 `beforeEach` 里 `process.env[ENV_AGENT_DIR] = mkdtempSync(...)`、`afterEach` 还原（现 `:6` import `ENV_AGENT_DIR`、`:25-40` 隔离与还原，含 `inheritedAgentDir === undefined ? delete : 还原` 两支）。
+  通用规则（进 S8）：**任何会走真 `appendRotatingLog`/`getAgentLogPath` 的测试都必须隔离 agent dir**；判据不是「测试有没有写文件断言」，而是「被测路径上有没有日志副作用」。
+
+### 2.1 R2 遗留状态纠正（本轮按代码证据勾掉 F5/F6）
+
+本文件 P1 节的 **F5**（capability 门只在客户端侧）与 **F6**（shutdown/restart/prepare_update_restart 无鉴权）此前标 `[ ]（W7 在跑）`，`FORK_NOTES.md` 也把它列在「还没做（下轮）」。实测这两条**已在 R2 末期落地**：
+
+- `96d3db580` fix: add `declare_client_capabilities` and `control_plane` to the daemon protocol（`daemon-protocol.ts` +86）
+- `7efe4b467` fix: enforce declared daemon capabilities on supervisor **and worker**（`daemon-client.ts` +40 / `daemon-mode.ts` +27 / `daemon-supervisor.ts` +29）
+- `6e86b3929` fix: declare session vs control capabilities on first-party clients
+- `6b8d2585b` test: cover server-side capability gating and control-plane auth（+366，含 `test/suite/regressions/w7-capability-control-plane.test.ts` 246 行）
+
+R3 合并后的现行落点（行号已漂，按符号给）：服务端强制 = `daemon-supervisor.ts:1825` 与 `daemon-mode.ts:3655` 的 `missingDeclaredCommandCapability(...)`；控制面/会话面分流 = `daemon-mode.ts:3558` 的 `isSessionPlaneDaemonCommand(parsed.type)` 闸（直连 peer transport 上非会话面命令一律拒）。这两条在 R3 的 43 块手工解里都被点名保住（p3/p5 回执 + `/tmp/r3_closure_commands.md` §14.2：`declare_client_capabilities` src 13 / test 10 命中）。
+⇒ 本节已把 F5/F6 改成 `[x]` 并补落点。若认为 W7 还有未收口的残留范围（例如控制面需要独立 token 而不只是 capability 分流），请回滚这一处并说明残留判据。
+
+### 2.2 已知未覆盖面（R3 收口时的实况，任务书 S8.4 要求写进 S9）
+
+1. `interactive-mode.ts` 未深审（本轮只核了与 #1896 相关的 `message_start`/`addChild`/`enforceChatComponentCap` 一条链）。
+2. 三个核查脚本是新写的，自身未经验证（本轮靠正控/负控兜：`/tmp/r3_posctrl.txt` 证明冲突标记门能数到三类标记）。
+3. `test/extensions-timeout.test.ts:102` = F75，既有红未修。
+4. Windows 命名管道 ACL 未真机验证 = F4 备注 + F76。
+5. F15/F17 窄时序窗（W9 留档，k3 实证可达性极低）、F27e 次要内存项、k3 终审 7 条低危仍未动。
+6. 门 2 的「54 个本地独有测试文件」是**文件级**口径，本轮已证它抓不到两类红（见 §四.4）。收口那次跑了全量（320 collected 自洽），但**下一轮若只跑文件级口径就会漏**。
+
+## 三、路径纠错 3 条（任务书/派单给的是裸文件名，实际路径与直觉不同）
+
+铁律 7 点名的「7 个本地独有新模块」里有两个路径不在 `src/core/`；派单里还有一处把 `rlm-ledger.ts` 写成 `src/core/`。全部实测 `git cat-file -e upstream/main:<path>` = 不存在 ⇒ 确为本地独有。
+
+| 模块 | 派单/直觉路径 | **真实路径** | 导出符号数 |
+| --- | --- | --- | --- |
+| private-files | `src/core/private-files.ts` | **`packages/coding-agent/src/utils/private-files.ts`** | 10 |
+| windows-named-pipe | `src/core/windows-named-pipe.ts` | **`packages/coding-agent/src/modes/daemon/windows-named-pipe.ts`** | 11 |
+| rlm-ledger | `src/core/rlm-ledger.ts`（**不存在**） | **`packages/coding-agent/src/modes/daemon/rlm-ledger.ts`** | — |
+| stall-watchdog | — | `packages/coding-agent/src/core/stall-watchdog.ts` | 6 |
+| share-session | — | `packages/coding-agent/src/core/share-session.ts` | 6 |
+| session-tool-pair | — | `packages/coding-agent/src/core/session-tool-pair.ts` | 1 |
+| stall-diagnostics | — | `packages/coding-agent/src/core/stall-diagnostics.ts` | 1 |
+| extensions/timeout | — | `packages/coding-agent/src/core/extensions/timeout.ts` | 4 |
+
+教训：**派单给裸文件名时，施工代理第一步应当是 `git ls-files "**/<name>.ts"` 定位，而不是按直觉拼路径**；拼错路径的失败模式是「grep 0 命中 → 误判该资产不存在/已丢」，本轮 `rlm-ledger.ts` 就差点被误判成「派单点名的文件不存在」。
+
+## 四、门方法论 4 条（本轮实测出来的，全部带出处）
+
+1. **「零调用者/孤儿符号」扫描必须做两遍，否则误报率 93%。**
+   biome 的 `correctness/noUnusedImports` 对未使用 import **不报**、零调用者函数也不报，`esbuild --format=esm` 只是语法门 ⇒ 孤儿判断只能靠逐符号 grep 计数。本轮扫 7 个本地独有模块的 **39 个导出符号**：第一遍数「声明文件之外」的 src/test 引用 → 疑似 **6 个零调用者 + 8 个仅测试引用**；第二遍对疑似者数「**声明文件内部**」的引用 → **13/14 是假阳性**（都在声明文件内部被用，导出是为了可测或类型面），例：`StallWatchdogStage`(:30,:191)、`SHARE_SECRET_PATTERNS`(:27)、`isWindowsSid`(:18,:27)、`applyWindowsNamedPipeSddl`(:139)、`parseWhoamiUserSid`(:46)。真孤儿只有 1 个 = **F76**。
+   ⇒ 规则：**「零调用者」判定必须做文件内引用的第二遍**；只报第一遍结果的审计会把「导出给测试用的 helper」与「内部用的类型」大面积误判成死代码，进而误删。
+2. **负控脚本里 `$?` 会被命令替换覆盖 —— 退码必须先存变量。**
+   p6 第一版负控写成 `esbuild ... ; echo "$(basename $f) EXIT=$?"`：`$(basename $f)` 在展开 `$?` **之前**执行，把退码覆盖成 basename 的 0 ⇒ **5 个负控全部假报 EXIT=0**，看起来像「esbuild 对括号也零牙」，正好会得出与事实相反的结论。改成 `rc=$?` 先存再打印后，4 个结构负控立刻变 EXIT=1。
+   ⇒ 规则：任何「靠退码判定门有没有牙」的脚本，退码必须**紧接命令**存进变量；同一行里不许有命令替换、管道或第二个命令。同族纪律：`bash()` 是 `/bin/sh`，不支持 `<(...)` 进程替换；空 stdout 被 `||` 兜底会读成假结论（本仓全局 memory 已记）。
+3. **biome 不能用于 `/tmp` 副本负控 —— 那是假负控。**
+   `biome.json` 的 `files.includes` 只收 `packages/*/src/**/*.ts`、`packages/*/test/**/*.ts`、`packages/coding-agent/examples/**/*.ts`；`/tmp` 路径被直接忽略，输出 `Checked 0 files` + `No files were processed in the specified paths`，**EXIT=1 但那是「没检查」不是「检查出错」**，会被误读成负控成功（p3、p8 各自独立撞到）。
+   ⇒ 有效做法两条：① 变异体放**仓内真实路径**（事后删除、别提交）；② 在 `/tmp` 复刻一棵最小配置树（`cp biome.json /tmp/xxx/` + `mkdir -p /tmp/xxx/packages/coding-agent/src/...` 放副本，`cd` 进去用仓里的 `node_modules/.bin/biome check <相对路径>`），相对路径命中 `files.includes` ⇒ 配置生效、负控有牙、仓内零写入。
+   ⇒ 配套：交活前每个文件都跑一次**不带 `--write`** 的 `biome check` 且 0 fix，等价于预先证明「带 `--write` 的 pre-commit 钩子对我这些文件是无操作」——否则交付形状会在 commit 那一刻被静默改写且没人复核。
+4. **文件级门抓不到「共有文件里的本地独有用例」→ 收口必须跑全量。**
+   S8 门 2 的口径是「54 个本地独有测试文件」（`comm -23` 文件级差集）。本轮两条红都在这个口径之外：
+   - **F72** = 本地独有测试**用例**活在双方**共有**文件里（`git show d74a75fea:test/agent-session-recursion.test.ts` 无此 `it`，`0c504e475` 里在 `:377`）→ 文件级 `comm -23` 看不见；
+   - **F74** = **官方独有**新文件（15 个之一）→ 也不在 54 里。
+   ⇒ 门 2 应扩成三层：① 54 个本地独有文件 ② 15 个官方新增测试文件 ③ 共有文件里的本地独有用例（case 级 `comm -23`，或干脆全量跑一次）。①+② 已覆盖本轮全部已知红，**③ 只有全量跑才保险**。
+   ⇒ 另一条规则：**谁动了 src，就把引用它的共有测试文件一并跑**（F72 就是这么被抓到的：S7 动了 `agent-session.ts`，收口顺手跑了 4 个 `agent-session-*` 共有测试）。
+   ⇒ 对账口径沿用本仓纪律：先 `--collect-only` 核 `collected == passed + failed + skipped`（本轮 320 = 319 + 1 + 0，分项 205 + kernel 5 + agent 3 + ai 5 + tui 107 自洽），SKIP 非 0 必须说明对照面为什么不在场；`EXIT=9` 或整数秒腰斩先疑看门狗。
+
+### 4.1 单文件门的能力边界（本轮 12 份回执反复复现，一并记档）
+
+| 门 | 有牙的层 | **盲区** |
+| --- | --- | --- |
+| 冲突标记 ERE `grep -c -E "^<<<<<<<\|^=======\|^>>>>>>>"` | 残留标记 | 必须配正控（解前该文件 >0；人造孤立 `=======` 文件 =1）。**BSD grep 的 BRE 里 `$` 落在 `\|` 分支中间会被当字面量** ⇒ 数标记一律用 ERE |
+| `esbuild --format=esm <file>` | **结构层**（括号/语法） | 删「融合出的新形参」「新局部名」「omit 声明」→ EXIT=0（NC5/NC6/NC7 实测） |
+| `biome check <file>`（仓内路径） | **风格 + unused**（`noUnusedImports`/`noUnusedVariables`） | 同样抓不到符号语义；且对仓外路径是假负控（见 §四.3） |
+| `tsgo --noEmit`（全仓） | **类型层**（含 `expect(x.success).toBe(true)` 不是类型守卫这类） | 「三参外壳」类融合：形参与调用点都在非冲突区、只有中间透传在块内 ⇒ esbuild/biome/**tsgo 三者全绿**，但被透传的能力静默失效 |
+| 文件级测试口径 | 本地独有文件 | 共有文件里的本地独有用例、官方新增文件（见 §四.4） |
+
+⇒ **符号正确性只能靠配对表**（本轮 p3/p8 各自独立发明、结论一致）：① import 三向（ours/theirs/merged）逐符号声明↔使用配对，查 0 未定义名与 0 重复声明（TS2300/TS2440/TS2451 类）；② **调用点实参直方图 ↔ 被调函数形参个数**（判据不是「形参有没有被用」，而是「块外调用点传了几个实参 ↔ 块内有没有透传到位」；p3 用它把「`omitStreamingMessages` 尾参恒 false」从担心变成硬结论：src 侧 11 个外部调用点实参全 ≤3）；③ 接口成员与 import 名的重复检查；④ 方法体三方 diff（`merged − theirs` 应全是 ours 半边、`merged − ours` 应全是官方半边）。
+
+---

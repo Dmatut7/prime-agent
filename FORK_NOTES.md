@@ -54,7 +54,83 @@ upstream/main 新增 15 个 squash commit，已并入（`71eeb5629`）。含 #17
 
 fork 工作文档统一搬入 `docs/fork/`：审计总账 `audit-findings.md`、R1 任务书 `fix-plan-r1.md`（原 `FIX_PLAN_20260829.md`）、R2 任务书 `fix-plan-r2.md`。`FORK_NOTES.md` 保持为简洁入口（`acd9b3ed1`）。
 
-## 还没做（下轮）
+## R3 上游同步（2026-09-04）
+
+分支：`sync/upstream-r3`（施工树 `/Users/a1/Desktop/_wt_prime/sync-r3`），基线 `merge/repl-kernel` @ `0c504e475`。任务书本轮起随代码入仓：`docs/fork/sync-upstream-r3.md` + `docs/fork/sync-upstream-r3-appendix.md`（`daemon-protocol.ts` 的 schema 注释直接引用其中的 S5.1 表）。
+
+### 同步了什么
+
+一次 `git merge upstream/main`（`d74a75fea`，**40 个上游提交**，197 文件 / +18437 −1704）：本地 **172** 个自研提交对上官方 0.9.x 线。冲突 **43 块 / 18 文件**全部手工解，每块记「取了谁、为什么、翻回把手」（12 份车道回执 + `/tmp/r3_conflict_receipts.md`）。
+
+| 提交 | 内容 |
+| --- | --- |
+| `3367d85c4` | merge commit（2 parent：`0c504e475` + `d74a75fea`） |
+| `2f72fe3d1` | S5：`DAEMON_SCHEMA_REVISION` 26 → **27**，digest 重算为 `589a2219bc8b` |
+| `ea68ff750` → `9ee1ea51c` | S6：先重建 4 个包的 CHANGELOG Unreleased（101 行），后按 AGENTS.md「不手改 CHANGELOG」**revert**，改走碎片单一真相流程 |
+| `e59a452ce` | 碎片格式修正：#1249 碎片补 issue 引用、#1229 bullet 收口 |
+| `bc012cfb2` | rlm-ledger `replayCache` 失效与克隆隔离的白盒钉（A-2 变体 A） |
+| `ebb26a3ac` | S7 摘 **#2027**：RLM 子树取消改一次迭代 visited 遍历（治本地 `hasRunningRlmChildren` 等三个 walker 的 2^k 重走） |
+| `7f5e1ba3a` | S7 摘 **#1947**：kernel stderr 落每会话日志文件 + fork 适配 3 处（`0o600` + no-follow，堵住 lane B 风险 R6 重开 F3 的口子） |
+| `f22e65312` | 修 merge 引入的红：`fixq5-q7` 假 supervisor 缺 roster 桩（F73） |
+| `13f623676` | 修 merge 引入的红：`agents-view-roster` 假 connection 缺 `streamReconstructor`（F74） |
+| `bdd5bcd82` | 修 merge 引入的红：非持久化会话不再落 `semantic-edges.jsonl`（F72） |
+| `bd35d1287` | 修测试污染：`agents-view-roster` attach 测试隔离 agent 日志目录（F77） |
+
+**#1896（空回合重试）未摘**，等解锁窗口。预判已完成（`/tmp/r3_receipt_p11.md` §4/§10）：需补 2 处 fork 适配——本地 stall 路径会**双发 `message_end`**；重试会在 TUI 留最多 2 个未 settle 的孤儿组件。
+
+### schema 23/24/25/26 四层撞号 → 升 27 的由来
+
+分叉点 `5b6c0e94e` 是 rev 23。此后**本地与上游各自把 23/24/25/26 用了一遍**，同号不同 wire：
+
+| rev | fork 侧 | 上游侧 |
+| --- | --- | --- |
+| 23 | `omitStreamingMessages` on list | `list_agent_peers`（`ceb418049`, #1861） |
+| 24 | 重编号，含 rev-23 两特征（`bf542ce7e`） | roster 订阅与推送（`1d2e91d3b`, #1900） |
+| 25 | `streaming_deltas` + `assistant_stream_delta`（`c72b9940f`） | 直连 worker peer transport（`173d845a5`, #1926） |
+| 26 | 服务端 capability 强制 + `control_plane` + `declare_client_capabilities`（`96d3db580`） | 会话行 usage 合计（`d74a75fea`, #2003） |
+
+merge 后 wire 是两侧并集，**哪个 26 的 digest 都不匹配**；本地握手是 `schemaId + appVersion` 精确匹配、无协商降级 → 不升号则本地客户端把官方 daemon 判 stale、反之亦然。处置：`DAEMON_SCHEMA_REVISION = 27`，digest 用仓内算法重算（sha256 三段切片取前 12 hex = `589a2219bc8b`，**禁手写**），6 个切片锚点复验「各命中 1 次且严格递增」，公式对三个基线（本地 `31fb64b6f4ee` / 上游 `962b8b4c5e35` / 分叉点 `649fe649d15e`）逐一复现。**23-26 四个号永久退役**，撞号表与两侧 digest 已写进 `daemon-protocol.ts:79-105` 的注释。
+
+### 丢了哪些本地实现（有意取舍，均带依据）
+
+| 本地轴 | 处置 | 依据 |
+| --- | --- | --- |
+| 刷新节流轴：`scheduleWorkerSummaryRefresh` / `CoalescedSummaryRefresh` / `SUMMARY_REFRESH_MIN_INTERVAL_MS` / `lastSummaryRefreshAt` | **删净**（全仓 0 命中，无孤儿） | 上游 #1897 + #1900 改 roster 事件驱动 + delta 推送，「按 token 拉全量摘要」的路径本身消失 |
+| `handleList` 每次向所有 worker 各拉一遍 list | **删**（取官方 roster 遍历，`handleList` 零 worker 往返） | 留 ours = 把 #1897/#1900 的收益原地废掉；本地轴「客户端 list 必拿新鲜数据」改由 roster 推送 + `scheduleRosterRepairPull` 兜（见 `docs/fork/local-axes.md` 第 3 条） |
+| `propagateHeartbeatStateToAncestors`（祖先行 running 提升） | **删**（随官方 #1967 `d72beaf9e` 有意删除，不恢复调用点） | `git log -S` 双侧 + base 三方定位确认是上游有意删；官方改「心跳会话是普通会话」 |
+| `syncAgentPeers`「名单没变不重发」 | 早在 `bf542ce7e`（R1 上游合并）就没了 | 本轮才把 README 表格里这条过期项删掉 |
+| `omitStreamingMessages` 的 supervisor↔worker 半边 | **保留但休眠**（尾参恒 `false`，唯一读者是一个本地测试） | 根代理裁定 (A) 保持现状；风险与清理触发条件记 `docs/fork/local-axes.md` 第 1 条 |
+
+### 已知红清单（任务书 S8.4 的 5 项）与消红
+
+| 红项 | 从哪一步开始红 | 消红于 |
+| --- | --- | --- |
+| H1 的 PLANE 总量表破口（核查脚本第 3 项 = 1） | S1.2 第 6 步 | 同步消红（v2 已把 S2.3 并进第 6 步） |
+| `test/daemon-protocol.test.ts` 的 schema digest 自检 | S1.2 第 6 步（块 1 临时取 ours 的 26） | **S5 `2f72fe3d1`**（该文件 28 passed / 0 failed） |
+| `test/daemon-supervisor-streaming-list.test.ts` | merge 那一刻（静默存活成必炸文件） | **S4**（p9 重写，把上游「`handleList` 不再转发」钉成 `expect(requests).toEqual([])`） |
+| `npm run check` 因 `grok-mermaid@0.2.3` 未装而编译不过 | merge commit 落地那一刻 | `npm install` 之后（门1 实测 EXIT=0，Checked 1022 files，`--write` 零改写） |
+| `tsgo --noEmit` 因 `mermaid.ts` 解析失败而红（与上一条同源） | 同上 | 同上 |
+
+父代理裁定新增的第 6 项**不属本轮**：`test/extensions-timeout.test.ts:102` 在 merge 之前就红（`0c504e475` 上逐字同失败，独立 scratch worktree 对照实测）→ 记 **F75**，S9 待办认领。
+
+本轮 54 个本地独有测试文件的收口总账：collected **320** = passed **319** + failed **1**（= F75）+ skipped **0**（205 + kernel 5 + agent 3 + ai 5 + tui 107，自洽）。
+
+### 本轮新缺陷
+
+7 条续 F 编号记入 `docs/fork/audit-findings.md`：**F71-F77**（接 F70c）。4 条已修（F72 `bdd5bcd82` / F73 `f22e65312` / F74 `13f623676` / F77 `bd35d1287`），3 条待办（F71 / F75 / F76）。同文件另记：30 个新 PR 的裁定台账与 3 条新判据、3 条路径纠错、4 条门方法论。
+
+### S9 待办清单
+
+1. **F71**：`src/core/semantic-edges.ts` 的写入改走 `src/utils/private-files.ts`（0700 / 0600 / no-follow）。`bdd5bcd82` 只挡住了非持久化会话，**持久化会话的 ledger 仍是裸 `node:fs` 写的**（`:357` `mkdirSync` 无 mode、`:363`/`:367` `appendFileSync`）。
+2. **F75**：修或重写 `test/extensions-timeout.test.ts:102`——本地独有测试的期望与 `src/core/extensions/timeout.ts` 现语义已不符（`loadExtensions([hangPath, okPath])` 现在两条都进 errors）。
+3. **F76**：`WINDOWS_NAMED_PIPE_ACL_UNVERIFIED` 死导出接进 `test/windows-named-pipe.test.ts`（**建议接不建议删**：它承载「这条安全面未真机验证」这个事实，删了等于丢一条已知未覆盖面记录）。
+4. **#1896** 摘取（等窗口；2 处 fork 适配已预判，见上）。
+5. `omitStreamingMessages` 休眠接缝二选一：给尾参找回生产调用者，或连唯一读者测试一起删。
+6. 门 2 口径扩三层（54 个本地独有文件 / 15 个官方新增测试文件 / 共有文件里的本地独有用例）——本轮 F72、F74 两条红都在文件级口径之外，只有全量跑才保险。
+7. R2 遗留里 **F5/F6 实际已在 R2 末期落地**（`96d3db580` + `7efe4b467` + `6e86b3929` + 测试 `6b8d2585b`；服务端强制点在 `daemon-supervisor.ts:1825`、`daemon-mode.ts:3655`，控制面分流在 `daemon-mode.ts:3558`），`audit-findings.md` 的 `[ ]` 本轮已按代码证据勾掉。仍开着的是：F15/F17 窄时序窗、F27e 次要内存项、Windows 管道 ACL 实机验证、k3 终审 7 条低危。
+8. 30 个新 PR 里 lane B 判「观察」的 7 个（#1928 / #1996 / #305 / #1177 / #1252 / #2028 / #1581）与 deps 线判 TAKE 的 5 条（#2018 / #2017 / #1576 / #1577 / #1579 改拿 18.0.10）**本轮一条都没动**（实测 `actions/checkout` 仍 v7.0.0、`actions/github-script` 仍 v7.0.1、`uv.lock` 零变化），下一轮按 `docs/fork/audit-findings.md` 的台账接着裁。
+
+## 还没做（R2 交棒时的清单；R3 之后的状态见上节 S9 待办第 7 条）
 
 - F5/F6 安全收口（W7，在跑）
 - F15/F17 窄时序窗（W9，留档）
@@ -66,4 +142,4 @@ fork 工作文档统一搬入 `docs/fork/`：审计总账 `audit-findings.md`、
 
 ---
 
-细节文档：审计总账 `docs/fork/audit-findings.md`、R1 任务书 `docs/fork/fix-plan-r1.md`、R2 迭代任务书 `docs/fork/fix-plan-r2.md`。
+细节文档：审计总账 `docs/fork/audit-findings.md`、本地轴清单 `docs/fork/local-axes.md`、R1 任务书 `docs/fork/fix-plan-r1.md`、R2 迭代任务书 `docs/fork/fix-plan-r2.md`、R3 同步任务书 `docs/fork/sync-upstream-r3.md` + `-appendix.md`。
