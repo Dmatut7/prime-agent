@@ -527,11 +527,25 @@ async function streamAssistantResponse(
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
 ): Promise<AssistantMessage> {
+	// A discarded attempt emits no message_end, so its spend would vanish from any
+	// accounting that reads usage off the transcript. Carry cost and output tokens
+	// forward onto the terminal message. Input tokens, cacheRead, cacheWrite and
+	// totalTokens are deliberately left at the final attempt's values:
+	// isContextOverflow compares input + cacheRead against the context window, so
+	// inflating them would turn an ordinary empty response into a false overflow and
+	// route it to compaction instead of a retry.
+	const discarded = { cost: { ...EMPTY_USAGE.cost }, output: 0 };
 	for (let attempt = 1; ; attempt++) {
 		const message = await streamAssistantResponseAttempt(context, config, signal, emit, streamFn);
 		// Overflow turns must pass through untouched so compaction recovery can see them.
 		if (isEmptyAssistantTurn(message) && !isContextOverflow(message, config.model.contextWindow)) {
 			if (attempt < MAX_EMPTY_TURN_ATTEMPTS) {
+				discarded.output += message.usage.output;
+				discarded.cost.input += message.usage.cost.input;
+				discarded.cost.output += message.usage.cost.output;
+				discarded.cost.cacheRead += message.usage.cost.cacheRead;
+				discarded.cost.cacheWrite += message.usage.cost.cacheWrite;
+				discarded.cost.total += message.usage.cost.total;
 				// Drop the empty attempt so it is neither resent to the provider nor
 				// finalized as a transcript turn (message_end is what makes it durable).
 				context.messages.pop();
@@ -540,6 +554,17 @@ async function streamAssistantResponse(
 			message.stopReason = "error";
 			message.stopReasonRaw = EMPTY_TURN_RETRY_EXHAUSTED_STOP_REASON_RAW;
 			message.errorMessage = `Model returned an empty response (no output content or tool calls) ${MAX_EMPTY_TURN_ATTEMPTS} times in a row`;
+			message.usage = {
+				...message.usage,
+				output: message.usage.output + discarded.output,
+				cost: {
+					input: message.usage.cost.input + discarded.cost.input,
+					output: message.usage.cost.output + discarded.cost.output,
+					cacheRead: message.usage.cost.cacheRead + discarded.cost.cacheRead,
+					cacheWrite: message.usage.cost.cacheWrite + discarded.cost.cacheWrite,
+					total: message.usage.cost.total + discarded.cost.total,
+				},
+			};
 		}
 		await emit({ type: "message_end", message });
 		return message;

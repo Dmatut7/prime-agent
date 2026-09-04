@@ -2054,6 +2054,46 @@ describe("empty assistant turn retry", () => {
 		expect(isEmptyTurnRetryExhausted(assistant)).toBe(true);
 	});
 
+	it("accounts for discarded empty turns without inflating input tokens", async () => {
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const attempts = [1, 2, 3].map((n) => {
+			const message = createAssistantMessage([{ type: "thinking", thinking: `attempt ${n}` }]);
+			message.usage = {
+				...message.usage,
+				input: 1000 * n,
+				output: 10 * n,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1010 * n,
+				cost: { input: 0.001 * n, output: 0.0001 * n, cacheRead: 0, cacheWrite: 0, total: 0.0011 * n },
+			};
+			return message;
+		});
+		const { streamFn, requests } = streamFnReturning(attempts);
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			() => {},
+			undefined,
+			streamFn,
+		);
+		const assistant = messages.find((message) => message.role === "assistant") as AssistantMessage;
+
+		expect(requests.length).toBe(3);
+		expect(assistant.stopReason).toBe("error");
+		// All three attempts were really billed, so the spend must not be lost.
+		expect(assistant.usage.output).toBe(10 * (1 + 2 + 3));
+		expect(assistant.usage.cost.total).toBeCloseTo(0.0011 * (1 + 2 + 3), 12);
+		// Input, cacheRead, cacheWrite and totalTokens stay at the final attempt's
+		// values: inflating input would make isContextOverflow misfire on an ordinary
+		// empty response and route it to compaction instead of a retry.
+		expect(assistant.usage.input).toBe(3000);
+		expect(assistant.usage.cacheRead).toBe(0);
+		expect(assistant.usage.totalTokens).toBe(3030);
+	});
+
 	it("does not mark other turns as empty-turn exhaustion", async () => {
 		const { assistant } = await runOnce(createAssistantMessage([{ type: "text", text: "done" }]));
 		expect(assistant.stopReasonRaw).toBeUndefined();
