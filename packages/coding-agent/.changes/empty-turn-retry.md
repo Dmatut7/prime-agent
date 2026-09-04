@@ -1,1 +1,2 @@
 - Surfaced an RLM child whose final turn ended in an error (e.g. exhausted empty-response retries) to the parent as a child failure message instead of a bare completed-without-reply notice.
+- Fixed an empty final model turn being silently abandoned instead of retried, and the fork stall path emitting a duplicate message_end for it.
