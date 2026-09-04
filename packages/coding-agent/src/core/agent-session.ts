@@ -12,6 +12,7 @@ import {
 	type AgentState,
 	type AgentTool,
 	type GetContinuationMessagesContext,
+	isEmptyTurnRetryExhausted,
 	type ShouldStopAfterTurnContext,
 	type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
@@ -11504,6 +11505,10 @@ export class AgentSession {
 
 		const contextWindow = this.model?.contextWindow ?? 0;
 		if (isContextOverflow(message, contextWindow)) return false;
+
+		// The agent loop already retried this in-place; a session-level retry would
+		// resend the whole context on every attempt without ever reaching compaction.
+		if (isEmptyTurnRetryExhausted(message)) return false;
 
 		if (this._isFauxProviderQueueExhausted(message)) {
 			return false;

@@ -8,7 +8,13 @@ import {
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
-import { agentLoop, agentLoopContinue, runAgentLoop } from "../src/agent-loop.js";
+import {
+	agentLoop,
+	agentLoopContinue,
+	EMPTY_TURN_RETRY_EXHAUSTED_STOP_REASON_RAW,
+	isEmptyTurnRetryExhausted,
+	runAgentLoop,
+} from "../src/agent-loop.js";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.js";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -2042,6 +2048,17 @@ describe("empty assistant turn retry", () => {
 		expect(requests.length).toBe(3);
 		expect(assistant.stopReason).toBe("error");
 		expect(assistant.errorMessage).toMatch(/empty response/i);
+		// The terminal case carries a machine-readable marker so a caller can tell it
+		// apart from a provider error that is still worth retrying.
+		expect(assistant.stopReasonRaw).toBe(EMPTY_TURN_RETRY_EXHAUSTED_STOP_REASON_RAW);
+		expect(isEmptyTurnRetryExhausted(assistant)).toBe(true);
+	});
+
+	it("does not mark other turns as empty-turn exhaustion", async () => {
+		const { assistant } = await runOnce(createAssistantMessage([{ type: "text", text: "done" }]));
+		expect(assistant.stopReasonRaw).toBeUndefined();
+		expect(isEmptyTurnRetryExhausted(assistant)).toBe(false);
+		expect(isEmptyTurnRetryExhausted(createAssistantMessage([], "error"))).toBe(false);
 	});
 
 	it("does not retry turns with visible content, a length stop, or a silent overflow", async () => {

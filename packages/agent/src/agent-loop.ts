@@ -494,6 +494,18 @@ async function runLoop(
 const MAX_EMPTY_TURN_ATTEMPTS = 3;
 
 /**
+ * Synthetic `stopReasonRaw` for a turn that exhausted the empty-response retries.
+ * This is not a provider value: callers use it to tell this terminal case apart
+ * from a provider error that is worth retrying.
+ */
+export const EMPTY_TURN_RETRY_EXHAUSTED_STOP_REASON_RAW = "empty_response_retry_exhausted";
+
+/** Whether a message is the terminal empty-turn-retry failure. */
+export function isEmptyTurnRetryExhausted(message: AssistantMessage): boolean {
+	return message.stopReason === "error" && message.stopReasonRaw === EMPTY_TURN_RETRY_EXHAUSTED_STOP_REASON_RAW;
+}
+
+/**
  * A final turn with no tool calls and no non-thinking content. Providers occasionally
  * end a stream like this with a normal stop reason; treating it as completion would
  * silently abandon the task, so it is retried instead. Error, abort, and length turns
@@ -526,6 +538,7 @@ async function streamAssistantResponse(
 				continue;
 			}
 			message.stopReason = "error";
+			message.stopReasonRaw = EMPTY_TURN_RETRY_EXHAUSTED_STOP_REASON_RAW;
 			message.errorMessage = `Model returned an empty response (no output content or tool calls) ${MAX_EMPTY_TURN_ATTEMPTS} times in a row`;
 		}
 		await emit({ type: "message_end", message });
