@@ -992,6 +992,223 @@ describe("Editor component", () => {
 		});
 	});
 
+	describe("Word wrap with unbreakable wide graphemes", () => {
+		// A single grapheme wider than the layout width cannot be split further.
+		// Re-wrapping it used to recurse with identical arguments until the stack
+		// blew up ("RangeError: Maximum call stack size exceeded"), which took the
+		// whole TUI down for e.g. a CJK character or an emoji typed in a narrow
+		// tmux split. These tests pin both halves of the fix: the narrow region
+		// terminates and keeps every code point, and the region where every
+		// grapheme fits the width is untouched.
+		it("keeps a lone wide grapheme whole instead of recursing", () => {
+			assert.deepStrictEqual(wordWrapLine("中", 1), [{ text: "中", startIndex: 0, endIndex: 1 }]);
+			assert.deepStrictEqual(wordWrapLine("😀", 1), [{ text: "😀", startIndex: 0, endIndex: 2 }]);
+			assert.deepStrictEqual(wordWrapLine("世界", 1), [
+				{ text: "世", startIndex: 0, endIndex: 1 },
+				{ text: "界", startIndex: 1, endIndex: 2 },
+			]);
+			assert.deepStrictEqual(wordWrapLine("한글", 1), [
+				{ text: "한", startIndex: 0, endIndex: 1 },
+				{ text: "글", startIndex: 1, endIndex: 2 },
+			]);
+		});
+
+		it("keeps a ZWJ emoji sequence whole instead of splitting or dropping it", () => {
+			const line = "👨\u200d👩\u200d👧\u200d👦 zwj";
+			const chunks = wordWrapLine(line, 1);
+
+			assert.deepStrictEqual(
+				chunks.map((chunk) => chunk.text),
+				["👨\u200d👩\u200d👧\u200d👦", " ", "z", "w", "j"],
+			);
+			assert.strictEqual(chunks[0]!.endIndex, 11);
+			assert.strictEqual(chunks.map((chunk) => chunk.text).join(""), line);
+		});
+
+		it("keeps a tab whole when the layout is narrower than a tab stop", () => {
+			// visibleWidth("\t") is 3, so a one or two column layout hit the same recursion.
+			assert.deepStrictEqual(
+				wordWrapLine("tab\there", 1).map((chunk) => chunk.text),
+				["t", "a", "b", "\t", "h", "e", "r", "e"],
+			);
+			assert.deepStrictEqual(
+				wordWrapLine("tab\there", 2).map((chunk) => chunk.text),
+				["ta", "b", "\t", "he", "re"],
+			);
+		});
+
+		it("wraps mixed ascii and CJK text one grapheme per line at width 1", () => {
+			const line = "hello 世界";
+			const chunks = wordWrapLine(line, 1);
+
+			assert.deepStrictEqual(
+				chunks.map((chunk) => chunk.text),
+				["h", "e", "l", "l", "o", " ", "世", "界"],
+			);
+			assert.deepStrictEqual(
+				chunks.map((chunk) => [chunk.startIndex, chunk.endIndex]),
+				[
+					[0, 1],
+					[1, 2],
+					[2, 3],
+					[3, 4],
+					[4, 5],
+					[5, 6],
+					[6, 7],
+					[7, 8],
+				],
+			);
+		});
+
+		it("preserves every code point of the input at every narrow width", () => {
+			const lines = [
+				"中",
+				"😀",
+				"世界",
+				"日本語",
+				"한글",
+				"hello 世界",
+				"👨\u200d👩\u200d👧\u200d👦 zwj",
+				"tab\there",
+				"a中b界c",
+			];
+
+			for (const line of lines) {
+				for (let width = 1; width <= 6; width++) {
+					const chunks = wordWrapLine(line, width);
+					const label = `wordWrapLine(${JSON.stringify(line)}, ${width})`;
+					const joined = chunks.map((chunk) => chunk.text).join("");
+
+					// Restoration by concatenation and by index, code point for code
+					// point. Truncating the wide grapheme, dropping it, or replacing it
+					// with a placeholder all fail here.
+					assert.deepStrictEqual(Array.from(joined), Array.from(line), label);
+					assert.strictEqual(
+						chunks.map((chunk) => line.slice(chunk.startIndex, chunk.endIndex)).join(""),
+						line,
+						label,
+					);
+
+					let expected = 0;
+					for (const chunk of chunks) {
+						assert.strictEqual(chunk.startIndex, expected, `${label}: gap before ${JSON.stringify(chunk.text)}`);
+						assert.strictEqual(chunk.text, line.slice(chunk.startIndex, chunk.endIndex), label);
+						expected = chunk.endIndex;
+					}
+					assert.strictEqual(expected, line.length, `${label}: coverage`);
+				}
+			}
+		});
+
+		it("still splits an oversized atomic marker next to wide characters", () => {
+			const marker = "[paste #1 +20 lines]"; // 21 chars
+			const line = `中${marker}界`;
+			const segments: Intl.SegmentData[] = [
+				{ segment: "中", index: 0, input: line },
+				{ segment: marker, index: 1, input: line },
+				{ segment: "界", index: 1 + marker.length, input: line },
+			];
+
+			const chunks = wordWrapLine(line, 2, segments);
+
+			assert.deepStrictEqual(
+				chunks.map((chunk) => chunk.text),
+				["中", "[p", "as", "te", " ", "#1", " ", "+2", "0 ", "li", "ne", "s]", "界"],
+			);
+			for (const chunk of chunks) {
+				assert.ok(visibleWidth(chunk.text) <= 2, `chunk ${JSON.stringify(chunk.text)} exceeds width 2`);
+			}
+			assert.strictEqual(chunks.map((chunk) => chunk.text).join(""), line);
+		});
+
+		it("leaves wrapping untouched when every grapheme fits the width", () => {
+			// These expected values are the outputs from before the recursion guard:
+			// nothing may move where no grapheme overflows the width.
+			assert.deepStrictEqual(
+				wordWrapLine("hello world test", 8).map((chunk) => chunk.text),
+				["hello ", "world ", "test"],
+			);
+			assert.deepStrictEqual(
+				wordWrapLine("中文 mixed with ascii words here", 8).map((chunk) => chunk.text),
+				["中文 ", "mixed ", "with ", "ascii ", "words ", "here"],
+			);
+			assert.deepStrictEqual(
+				wordWrapLine("日本語のテキストです", 8).map((chunk) => chunk.text),
+				["日本語の", "テキスト", "です"],
+			);
+			assert.deepStrictEqual(
+				wordWrapLine("tab\there", 3).map((chunk) => chunk.text),
+				["tab", "\t", "her", "e"],
+			);
+			assert.deepStrictEqual(
+				wordWrapLine("中a界", 3).map((chunk) => chunk.text),
+				["中a", "界"],
+			);
+			assert.deepStrictEqual(
+				wordWrapLine("中文", 3).map((chunk) => chunk.text),
+				["中", "文"],
+			);
+			assert.deepStrictEqual(
+				wordWrapLine("世界", 4).map((chunk) => chunk.text),
+				["世界"],
+			);
+			assert.deepStrictEqual(
+				wordWrapLine("ab cd", 1).map((chunk) => chunk.text),
+				["a", "b", " ", "c", "d"],
+			);
+		});
+
+		it("renders wide characters in a narrow layout without crashing", () => {
+			const snapshots = [
+				{ text: "中", width: 1, lines: ["─", "中 ", "─"] },
+				{ text: "中", width: 2, lines: ["──", "中 ", "──"] },
+				{ text: "中", width: 3, lines: ["───", "中 ", "───"] },
+				{ text: "中", width: 6, lines: ["──────", "中    ", "──────"] },
+				{ text: "😀", width: 1, lines: ["─", "😀 ", "─"] },
+				{ text: "😀", width: 2, lines: ["──", "😀 ", "──"] },
+				{ text: "世界", width: 1, lines: ["─", "世", "界 ", "─"] },
+				{ text: "世界", width: 2, lines: ["──", "世", "界 ", "──"] },
+				{ text: "世界", width: 3, lines: ["───", "世 ", "界 ", "───"] },
+				{ text: "日本語", width: 2, lines: ["──", "日", "本", "語 ", "──"] },
+				{ text: "hello 世界", width: 3, lines: ["───", "he ", "ll ", "o  ", "世 ", "界 ", "───"] },
+				{ text: "hello 世界", width: 4, lines: ["────", "hel ", "lo  ", "世  ", "界  ", "────"] },
+			];
+
+			for (const snapshot of snapshots) {
+				const editor = new Editor(createTestTUI(), defaultEditorTheme);
+				editor.setText(snapshot.text);
+
+				// Used to throw RangeError: Maximum call stack size exceeded.
+				const rendered = editor.render(snapshot.width).map((line) => stripVTControlCharacters(line));
+
+				assert.deepStrictEqual(
+					rendered,
+					snapshot.lines,
+					`render(${snapshot.width}) of ${JSON.stringify(snapshot.text)}`,
+				);
+				assert.deepStrictEqual(Array.from(editor.getText()), Array.from(snapshot.text), "value survived rendering");
+				assert.deepStrictEqual(editor.getLines(), [snapshot.text], "value survived rendering");
+			}
+		});
+
+		it("survives typing wide characters into a narrow editor", () => {
+			for (const width of [1, 2, 3, 4, 5, 6]) {
+				const editor = new Editor(createTestTUI(), defaultEditorTheme);
+
+				editor.handleInput("中");
+				editor.handleInput("😀");
+				editor.render(width);
+				editor.handleInput("文");
+				editor.render(width);
+				editor.handleInput("\x7f"); // Backspace
+				editor.render(width);
+
+				assert.strictEqual(editor.getText(), "中😀", `width ${width}`);
+				assert.deepStrictEqual(Array.from(editor.getText()), ["中", "😀"], `width ${width}`);
+			}
+		});
+	});
+
 	describe("Kill ring", () => {
 		it("Ctrl+W saves deleted text to kill ring and Ctrl+Y yanks it", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);

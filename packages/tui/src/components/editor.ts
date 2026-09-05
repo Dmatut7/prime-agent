@@ -114,7 +114,9 @@ export interface TextChunk {
 /**
  * Split a line into word-wrapped chunks.
  * Wraps at word boundaries when possible, falling back to character-level
- * wrapping for words longer than the available width.
+ * wrapping for words longer than the available width. A single grapheme wider
+ * than maxWidth cannot be split at all, so it becomes one chunk that overflows
+ * the width rather than being truncated or dropped.
  *
  * @param line - The text line to wrap
  * @param maxWidth - Maximum visible width per chunk
@@ -174,10 +176,21 @@ export function wordWrapLine(line: string, maxWidth: number, preSegmented?: Intl
 		if (gWidth > maxWidth) {
 			// Single atomic segment wider than maxWidth (e.g. paste marker
 			// in a narrow terminal). Re-wrap it at grapheme granularity.
+			const subSegments = [...baseSegmenter.segment(grapheme)];
+			if (subSegments.length < 2) {
+				// A lone grapheme cluster (CJK character, emoji, tab) is already the
+				// smallest unit, so re-wrapping it would recurse on identical input
+				// forever. Keep it whole and let it overflow the line: the overflow
+				// check above force-breaks before the next grapheme, so no code point
+				// is dropped and the recursion always terminates on a shorter string.
+				currentWidth = gWidth;
+				wrapOppIndex = -1;
+				continue;
+			}
 
 			// The segment remains logically atomic for cursor
 			// movement / editing — the split is purely visual for word-wrap layout.
-			const subChunks = wordWrapLine(grapheme, maxWidth);
+			const subChunks = wordWrapLine(grapheme, maxWidth, subSegments);
 			for (let j = 0; j < subChunks.length - 1; j++) {
 				const sc = subChunks[j]!;
 				chunks.push({ text: sc.text, startIndex: charIndex + sc.startIndex, endIndex: charIndex + sc.endIndex });
