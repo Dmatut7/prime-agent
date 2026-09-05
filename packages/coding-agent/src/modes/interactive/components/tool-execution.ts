@@ -67,15 +67,18 @@ function createReplayBuiltInToolDefinition(
 }
 
 /**
- * Stable serialization of tool arguments, or undefined when they cannot be
- * serialized. An undefined signature never compares equal, so an exotic value
- * falls back to rebuilding unconditionally.
+ * One-shot probe for arguments JSON cannot represent. Only the constructor
+ * needs it: updateArgs detects changes by object identity, and an
+ * unserializable initial value opts the component out of identity comparison
+ * so it keeps rebuilding unconditionally (the old signature guard's fallback
+ * for exotic values).
  */
-function argsSignature(args: unknown): string | undefined {
+function argsComparable(args: unknown): boolean {
 	try {
-		return JSON.stringify(args) ?? "undefined";
+		JSON.stringify(args);
+		return true;
 	} catch {
-		return undefined;
+		return false;
 	}
 }
 
@@ -90,7 +93,7 @@ export class ToolExecutionComponent extends Container {
 	private toolName: string;
 	private toolCallId: string;
 	private args: any;
-	private argsSignature: string | undefined;
+	private readonly argsComparable: boolean;
 	private expanded = false;
 	private agentMessagesExpanded = false;
 	private editDiffsExpanded = false;
@@ -125,7 +128,7 @@ export class ToolExecutionComponent extends Container {
 		this.toolName = toolName;
 		this.toolCallId = toolCallId;
 		this.args = args;
-		this.argsSignature = argsSignature(args);
+		this.argsComparable = argsComparable(args);
 		this.toolDefinition = toolDefinition;
 		this.builtInToolDefinition = createReplayBuiltInToolDefinition(toolName, cwd, toolDefinition);
 		this.showImages = options.showImages ?? true;
@@ -237,14 +240,35 @@ export class ToolExecutionComponent extends Container {
 	 * A rebuild tears down and recreates the panel's child components and resets
 	 * their render caches, so re-highlighting an ipython cell that did not change
 	 * is pure waste. Compare first and rebuild only on a real change.
+	 *
+	 * On the streaming path - up to the final updateArgs of a tool call - no
+	 * code mutates an arguments object in place: providers re-parse the growing
+	 * partial JSON per tool-call delta, and the proxy/daemon reconstruction
+	 * paths do the same (unrelated text/thinking deltas never touch the
+	 * reference). Object identity is therefore an O(1) change signal that never
+	 * skips a real change, replacing the previous per-update JSON.stringify
+	 * comparison, which cost O(len(args)) on every delta (O(n^2) over a
+	 * stream). This is the same "a fresh reference means changed" convention
+	 * that LineAggregator relies on for rendered lines (tui.ts); a change on
+	 * either side must keep the other in mind.
+	 *
+	 * Known in-place writers outside that window (both only after the final
+	 * updateArgs, so the signal holds today): edit.ts prepareEditArguments can
+	 * rewrite args.edits while the tool executes, and validation.ts
+	 * validateToolArguments mutates only its own structuredClone (its
+	 * validateToolCall wrapper has no in-repo callers). If a future caller
+	 * re-delivers arguments after execution - e.g. reusing this component for
+	 * a completed tool - the identity signal silently goes stale and must be
+	 * revisited.
+	 *
+	 * A component constructed with unserializable arguments never skips,
+	 * matching the old guard's fallback.
 	 */
 	updateArgs(args: any): void {
-		const signature = argsSignature(args);
-		if (signature !== undefined && signature === this.argsSignature) {
+		if (args === this.args && this.argsComparable) {
 			return;
 		}
 		this.args = args;
-		this.argsSignature = signature;
 		this.updateDisplay();
 	}
 
