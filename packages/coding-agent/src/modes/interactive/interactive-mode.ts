@@ -48,6 +48,7 @@ import {
 	launchDaemonUpdateRestartCoordinator,
 	resolveDaemonUpdateRestartSocketPath,
 } from "../../cli/daemon-update-restart.js";
+import { type CliSubprocessLaunchSpec, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import {
 	APP_NAME,
 	APP_TITLE,
@@ -168,6 +169,7 @@ import type {
 	AgentConnectionToolDefinition,
 } from "../agent-connection/index.js";
 import { AgentConnectionPromptAdmissionError } from "../agent-connection/index.js";
+import type { SessionSummary } from "../daemon/daemon-session-list.js";
 import { getModelArgumentCompletions } from "../model-autocomplete.js";
 import {
 	checkForPackageUpdates,
@@ -207,6 +209,7 @@ import { FooterComponent } from "./components/footer.js";
 import { HeartbeatManagerComponent } from "./components/heartbeat-manager.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./components/injected-prompt-message.js";
 import { formatKeyText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.js";
+import { createMermaidMarkdownTransform } from "./components/mermaid.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
 import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
 import {
@@ -223,7 +226,11 @@ import {
 	styleSlashCommandText,
 } from "./components/slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "./components/slash-command-result-message.js";
-import { countDirectSubagentStatuses, SubagentSummaryLine } from "./components/subagent-summary-line.js";
+import {
+	countDirectSubagentStatuses,
+	countRosterSubagentStatuses,
+	SubagentSummaryLine,
+} from "./components/subagent-summary-line.js";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.js";
 import {
 	selectLatestToolExpandHint,
@@ -770,6 +777,53 @@ export function buildUpdateRelaunchArgs(args: readonly string[], sessionFile: st
 	return relaunchArgs;
 }
 
+type UpdateRelaunchExecve = (file: string, args: string[], environment: Record<string, string>) => never;
+
+interface UpdateRelaunchExecOptions {
+	platform: string;
+	nodeVersion: string;
+	cwd: string;
+	previousCwd: string;
+	environment: NodeJS.ProcessEnv;
+	chdir: (directory: string) => void;
+	execve?: UpdateRelaunchExecve;
+}
+
+function execveFailureThrows(nodeVersion: string): boolean {
+	// Before Node 26.1, a failed execve syscall aborts the process instead of throwing for the fallback below.
+	const match = /^(\d+)\.(\d+)\./.exec(nodeVersion);
+	if (!match) {
+		return false;
+	}
+	const major = Number(match[1]);
+	const minor = Number(match[2]);
+	return major > 26 || (major === 26 && minor >= 1);
+}
+
+export function tryExecUpdateRelaunch(launch: CliSubprocessLaunchSpec, options: UpdateRelaunchExecOptions): boolean {
+	// Process replacement preserves the shell job and foreground terminal without retaining the old TUI.
+	if (
+		!options.execve ||
+		options.platform === "win32" ||
+		options.platform === "os400" ||
+		!execveFailureThrows(options.nodeVersion)
+	) {
+		return false;
+	}
+	const environment = Object.fromEntries(
+		Object.entries(options.environment).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+	);
+	options.chdir(options.cwd);
+	try {
+		options.execve(launch.command, [launch.command, ...launch.args], environment);
+	} catch (error) {
+		// A thrown execve must not leave the fallback's process on a changed cwd.
+		options.chdir(options.previousCwd);
+		throw error;
+	}
+	return true;
+}
+
 export function buildUpdateChildArgs(args: readonly string[], daemonSocketPath: string): string[] {
 	return args.includes("--daemon-socket") ? [...args] : [...args, "--daemon-socket", daemonSocketPath];
 }
@@ -984,12 +1038,17 @@ export class InteractiveMode {
 	private subagentSummaryLine: SubagentSummaryLine;
 	private subagentSnapshots = new Map<string, AgentConnectionRlmChildAgentSnapshot>();
 	private rlmNodeId: string | undefined;
+	private rosterBar: { summaries(): SessionSummary[]; dispose(): Promise<void> } | undefined;
 
 	private toolOutputExpanded = false;
 	private agentMessagesExpanded = false;
 	private editDiffsExpanded = false;
 
 	private hideThinkingBlock = false;
+	private readonly mermaidMarkdownTransform = createMermaidMarkdownTransform({
+		getMode: () => this.settingsManager.getMermaidRenderingMode(),
+		theme,
+	});
 
 	private skillCommands = new Map<string, string>();
 	private connectionCommands: AgentConnectionSlashCommand[] = [];
@@ -2810,6 +2869,8 @@ export class InteractiveMode {
 	private async rebindCurrentSession(): Promise<void> {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		void this.rosterBar?.dispose();
+		this.rosterBar = undefined;
 		if (this.localSessionHost) {
 			this.uiServices = this.localSessionHost.createUiServices();
 		}
@@ -2824,6 +2885,7 @@ export class InteractiveMode {
 			this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 		}
 		this.subscribeToAgent();
+		await this.subscribeToRosterBar();
 		// A session_action_update in the unsubscribed gap above is lost; re-sync the queue post-subscription.
 		this.patchConnectionState({ sessionActions: (await this.agentConnection.getState()).sessionActions });
 		this.refreshQueueSelectionFromState();
@@ -3106,8 +3168,18 @@ export class InteractiveMode {
 
 		const localSessionHost = this.getLocalSessionHost();
 		const createContext = (): ExtensionContext => ({
-			ui: this.createExtensionUIContext(),
-			hasUI: true,
+			// The runner already holds the dialog-tracking wrapper that bindExtensions
+			// installed, and extension handlers get their UI context from it. Building a
+			// fresh one here left the shortcut path uncounted, so a dialog opened by a
+			// shortcut handler did not pause the stall watchdog.
+			//
+			// The fallback is only reached when the runner has no bound UI context at all,
+			// in which case there is no session-side wrapper either, so there is no dialog
+			// counting to lose. It depends on every host passing uiContext to
+			// bindExtensions; a host that bound an empty set while interactive mode kept
+			// this fallback would hand out a real but uncounted context.
+			ui: extensionRunner.hasUI() ? extensionRunner.getUIContext() : this.createExtensionUIContext(),
+			hasUI: extensionRunner.hasUI(),
 			cwd: this.getCurrentCwd(),
 			sessionManager: localSessionHost.getSessionManager(),
 			modelRegistry: this.modelRegistry,
@@ -5105,6 +5177,19 @@ export class InteractiveMode {
 		};
 	}
 
+	private async subscribeToRosterBar(): Promise<void> {
+		if (!this.agentConnection.subscribeAgentRoster) return;
+		try {
+			this.rosterBar = await this.agentConnection.subscribeAgentRoster(() => {
+				this.updateSubagentSummaryLine();
+				this.ui.requestRender();
+			});
+		} catch {
+			this.rosterBar = undefined;
+		}
+		this.updateSubagentSummaryLine();
+	}
+
 	private subscribeToAgent(): void {
 		this.unsubscribe = this.agentConnection.subscribe(async (event) => {
 			try {
@@ -5532,7 +5617,7 @@ export class InteractiveMode {
 			case "message_update":
 				if (event.message.role === "assistant") {
 					this.streamingMessage = event.message;
-					this.ensureAssistantStreamingComponent(event.message).updateContent(this.streamingMessage);
+					this.ensureAssistantStreamingComponent(event.message).updateContent(this.streamingMessage, true);
 
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
@@ -5560,7 +5645,7 @@ export class InteractiveMode {
 								: `Operation aborted${elapsedSuffix}`;
 						this.streamingMessage.errorMessage = errorMessage;
 					}
-					this.ensureAssistantStreamingComponent(event.message).updateContent(this.streamingMessage);
+					this.ensureAssistantStreamingComponent(event.message).updateContent(this.streamingMessage, false);
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
 						if (!errorMessage) {
@@ -5647,7 +5732,7 @@ export class InteractiveMode {
 				this.syncWorkingLoader();
 				if (this.streamingComponent) {
 					if (this.streamingMessage) {
-						this.streamingComponent.updateContent(this.streamingMessage);
+						this.streamingComponent.updateContent(this.streamingMessage, false);
 					} else {
 						this.chatContainer.removeChild(this.streamingComponent);
 					}
@@ -5794,6 +5879,15 @@ export class InteractiveMode {
 	}
 
 	private startAssistantStreamingMessage(message: AssistantMessage): void {
+		// An empty-turn retry emits a fresh message_start per attempt and no message_end
+		// for the dropped one. Both message_end and agent_end clear streamingComponent,
+		// so a live component here is always an unmatched start for a message that was
+		// popped and never persisted: drop it instead of settling it into a bubble that
+		// /resume would not show. Both fields are reassigned below, so there is nothing
+		// to clear here.
+		if (this.streamingComponent) {
+			this.chatContainer.removeChild(this.streamingComponent);
+		}
 		this.streamingComponent = new AssistantMessageComponent(
 			undefined,
 			this.hideThinkingBlock,
@@ -5804,11 +5898,12 @@ export class InteractiveMode {
 				precededByToolActivity:
 					this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
 					this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
+				mermaidTransform: this.mermaidMarkdownTransform,
 			},
 		);
 		this.streamingMessage = message;
 		this.chatContainer.addChild(this.streamingComponent);
-		this.streamingComponent.updateContent(this.streamingMessage);
+		this.streamingComponent.updateContent(this.streamingMessage, true);
 	}
 
 	private ensureAssistantStreamingComponent(message: AssistantMessage): AssistantMessageComponent {
@@ -5974,6 +6069,7 @@ export class InteractiveMode {
 	}
 
 	private updateSubagentSummary(child: AgentConnectionRlmChildAgentSnapshot): void {
+		// "cancelled" also covers never-bound terminal runs; AgentSession owns that rule.
 		if (child.status === "cancelled") {
 			this.removeSubagentSnapshot(child.id);
 		} else {
@@ -5993,13 +6089,19 @@ export class InteractiveMode {
 	}
 
 	private updateSubagentSummaryLine(): void {
-		const activeHeartbeatSessionIds = new Set(
-			this.heartbeatCatalog
-				.filter((heartbeat) => heartbeat.job.status === "active")
-				.map((heartbeat) => heartbeat.job.activeSessionId),
-		);
+		const rosterSummaries = this.rosterBar?.summaries();
+		// A client-owned session has no row on the public roster; only then do the
+		// snapshots carry the bar. A public parent with zero roster children shows zero.
+		const sessionOnRoster =
+			rosterSummaries?.some((row) => row.sessionId === this.connectionState?.sessionId) === true;
 		this.subagentSummaryLine.setSubagentCounts(
-			countDirectSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId, activeHeartbeatSessionIds),
+			rosterSummaries && sessionOnRoster
+				? countRosterSubagentStatuses(rosterSummaries, {
+						activeSessionId: this.connectionState?.activeSessionId,
+						sessionId: this.connectionState?.sessionId,
+						sessionFile: this.connectionState?.sessionFile,
+					})
+				: countDirectSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId),
 		);
 		if (!this.subagentSummaryLine.isSelectable() && this.subagentSummaryLine.focused) this.focusEditor();
 	}
@@ -6444,6 +6546,7 @@ export class InteractiveMode {
 						precededByToolActivity:
 							this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
 							this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
+						mermaidTransform: this.mermaidMarkdownTransform,
 					},
 				);
 				this.chatContainer.addChild(assistantComponent);
@@ -7607,6 +7710,7 @@ export class InteractiveMode {
 					currentTheme: this.settingsManager.getTheme() || "prime",
 					availableThemes: getAvailableThemes(),
 					hideThinkingBlock: this.hideThinkingBlock,
+					mermaidRenderingMode: this.settingsManager.getMermaidRenderingMode(),
 					treeFilterMode: this.settingsManager.getTreeFilterMode(),
 					showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
 					editorPaddingX: this.settingsManager.getEditorPaddingX(),
@@ -7705,6 +7809,11 @@ export class InteractiveMode {
 						void this.rebuildChatFromMessages().catch((error) => {
 							this.showError(error instanceof Error ? error.message : String(error));
 						});
+					},
+					onMermaidRenderingModeChange: (mode) => {
+						this.settingsManager.setMermaidRenderingMode(mode);
+						this.chatContainer.invalidate();
+						this.ui.requestRender();
 					},
 					onQuietStartupChange: (enabled) => {
 						this.settingsManager.setQuietStartup(enabled);
@@ -8875,7 +8984,28 @@ export class InteractiveMode {
 					);
 				}
 			}
-			const relaunchResult = spawnSync(process.execPath, [...process.execArgv, entrypoint, ...relaunchArgs], {
+			const relaunch = createCliSubprocessLaunchSpec(relaunchArgs);
+			const updateProcess = process as NodeJS.Process & { execve?: UpdateRelaunchExecve };
+			try {
+				if (
+					tryExecUpdateRelaunch(relaunch, {
+						platform: process.platform,
+						nodeVersion: process.versions.node,
+						cwd: updateCwd,
+						previousCwd: process.cwd(),
+						environment: process.env,
+						chdir: (directory) => process.chdir(directory),
+						execve: updateProcess.execve,
+					})
+				) {
+					return;
+				}
+			} catch (error: unknown) {
+				console.error(
+					`Could not replace the current ${APP_NAME} process (${error instanceof Error ? error.message : String(error)}). Falling back to a child relaunch.`,
+				);
+			}
+			const relaunchResult = spawnSync(relaunch.command, relaunch.args, {
 				stdio: "inherit",
 				cwd: updateCwd,
 				env: process.env,
@@ -9104,18 +9234,6 @@ export class InteractiveMode {
 			return;
 		}
 
-		const [messages, systemPrompt] = await Promise.all([
-			this.agentConnection.getMessages(),
-			this.agentConnection.getSystemPrompt(),
-		]);
-		const confirmed = await confirmShareIfSecrets(JSON.stringify({ messages, systemPrompt }), (title, message) =>
-			this.showExtensionConfirm(title, message),
-		);
-		if (!confirmed) {
-			this.showStatus("Share cancelled");
-			return;
-		}
-
 		const temp = createShareTempHtmlFile();
 		const tmpFile = temp.path;
 		try {
@@ -9126,12 +9244,66 @@ export class InteractiveMode {
 			return;
 		}
 
-		// Show cancellable loader, replacing the editor
-		const loader = new BorderedLoader(this.ui, theme, "Creating gist...");
-		this.editorContainer.clear();
-		this.editorContainer.addChild(loader);
-		this.ui.setFocus(loader);
-		this.ui.requestRender();
+		// Scan the bytes that are actually uploaded. The HTML export also carries the
+		// tool definitions and the working-directory context the exporter adds, so
+		// scanning the raw messages instead would pass secrets it never looks at.
+		let exportedHtml: string;
+		try {
+			exportedHtml = readPrivateFile(tmpFile, "utf-8");
+		} catch (error: unknown) {
+			fs.rmSync(temp.directory, { recursive: true, force: true });
+			this.showError(
+				`Failed to read the session export: ${error instanceof Error ? error.message : "Unknown error"}`,
+			);
+			return;
+		}
+		let confirmed: boolean;
+		try {
+			confirmed = await confirmShareIfSecrets(exportedHtml, (title, message) =>
+				this.showExtensionConfirm(title, message),
+			);
+		} catch (error: unknown) {
+			// Building the confirm dialog can throw; without this the export would be
+			// left on disk, since every other exit in this method removes it.
+			fs.rmSync(temp.directory, { recursive: true, force: true });
+			this.showError(
+				`Failed to check the session export for secrets: ${error instanceof Error ? error.message : "Unknown error"}`,
+			);
+			return;
+		}
+		if (!confirmed) {
+			// The export already exists at this point, so cancelling must remove it.
+			fs.rmSync(temp.directory, { recursive: true, force: true });
+			this.showStatus("Share cancelled");
+			return;
+		}
+
+		// Show cancellable loader, replacing the editor. Constructing and mounting it can
+		// throw, and restoreEditor - the method's other cleanup path - is not defined yet,
+		// so a throw here would leave the 0700 directory and the 0600 export on disk.
+		let loader: BorderedLoader;
+		try {
+			loader = new BorderedLoader(this.ui, theme, "Creating gist...");
+			this.editorContainer.clear();
+			this.editorContainer.addChild(loader);
+			this.ui.setFocus(loader);
+			this.ui.requestRender();
+		} catch (error: unknown) {
+			fs.rmSync(temp.directory, { recursive: true, force: true });
+			// clear() may already have run, so put the editor back; a failure while doing
+			// that must not mask the original error.
+			try {
+				this.editorContainer.clear();
+				this.editorContainer.addChild(this.editor);
+				this.ui.setFocus(this.editor);
+			} catch {
+				// Ignore restore errors
+			}
+			this.showError(
+				`Failed to start the share upload: ${error instanceof Error ? error.message : "Unknown error"}`,
+			);
+			return;
+		}
 
 		const restoreEditor = () => {
 			loader.dispose();
@@ -9357,6 +9529,8 @@ export class InteractiveMode {
 				return `Trace uploaded (${result.bytesStored.toLocaleString()} bytes).`;
 			case "disabled":
 				return "Trace sharing is disabled.";
+			case "unchanged":
+				return "Trace is already uploaded; no new content since the last upload.";
 			case "missing_credentials":
 				return "Trace sharing needs a Prime API key. Run /traces login.";
 			case "no_session_file":
@@ -10139,6 +10313,8 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 		if (this.unsubscribe) {
 			this.unsubscribe();
 		}
+		void this.rosterBar?.dispose();
+		this.rosterBar = undefined;
 		if (this.isInitialized) {
 			this.ui.stop({
 				preserveAltScreen: options.preserveAltScreen,

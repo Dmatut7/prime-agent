@@ -12,6 +12,7 @@ import {
 	type AgentState,
 	type AgentTool,
 	type GetContinuationMessagesContext,
+	isEmptyTurnRetryExhausted,
 	type ShouldStopAfterTurnContext,
 	type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
@@ -75,7 +76,6 @@ import {
 	normalizeObserveMaxChars,
 	ORCHESTRATION_HEARTBEAT_SKILL_NAME,
 } from "./agent-observe.js";
-import { flushAgentTraceUpload } from "./agent-traces.js";
 import {
 	addLoginGuidanceToAuthError,
 	formatAuthenticationFailedMessage,
@@ -241,6 +241,12 @@ import {
 	type SubagentRuntimeHost,
 } from "./rlm-runtime.js";
 import {
+	modelRequestHeaders,
+	SemanticEdgeRecorder,
+	semanticEdgeLedgerPath,
+	wrapStreamFnWithSemanticEdges,
+} from "./semantic-edges.js";
+import {
 	ActionStore,
 	type ActionTicket,
 	canSelectSessionAction,
@@ -280,11 +286,12 @@ import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { StallWatchdog, type StallWatchdogOptions, type StallWatchdogStageInfo } from "./stall-watchdog.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
+import { acpMcpToolNames, createAcpMcpToolDefinitions } from "./tools/acp-mcp.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
 import { createAllToolDefinitions } from "./tools/index.js";
 import { IpythonKernelProvisioner } from "./tools/ipython.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
-import { addAssistantUsage, emptyUsage } from "./usage.js";
+import { addAssistantUsage, emptyUsage, type SessionUsageSummary, sessionUsageSummaryFrom } from "./usage.js";
 import { SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME } from "./websearch-credential.js";
 
 export type { GoalState, GoalStatus } from "./goals.js";
@@ -480,6 +487,8 @@ export interface AgentSessionConfig {
 	rlmSessionDir?: string;
 	rlmParentNodeId?: string;
 	rlmParentAgent?: string;
+	semanticParentSessionId?: string;
+	semanticSpawnedByRequestId?: string;
 	subagentRuntimeHost?: SubagentRuntimeHost;
 	autonomous?: AgentAutonomousConfig;
 	prewarmIpythonKernel?: boolean;
@@ -961,6 +970,7 @@ interface RlmChildRun {
 	completeDeletion?: () => Promise<void>;
 	reportDeletionCleanupFailure?: (error: unknown) => Promise<void>;
 	emitUpdate?: () => void;
+	lastEmittedUpdate?: string;
 	unsubscribe?: () => void;
 }
 
@@ -979,6 +989,13 @@ const SESSION_PERSIST_FAILURE_REPORT_MAX_MS = 300_000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
 /** How long a deferred RLM terminal notice may wait for delivery before it is abandoned. */
 const RLM_TERMINAL_NOTICE_ABANDON_AFTER_MS = 5 * 60_000;
+/**
+ * How long a writability probe stays valid. Writability rarely flips mid-session,
+ * and refine() re-checks it before writing, so a stale "allowed" cannot turn into
+ * a silent write failure - it only avoids re-reading the whole harness state on
+ * every turn boundary.
+ */
+const AUTO_REFINE_WRITABLE_PROBE_TTL_MS = 60_000;
 
 function noopRlmChildAbort(): void {}
 function noopRlmChildEventUnsubscribe(): void {}
@@ -1124,6 +1141,7 @@ export class AgentSession {
 	private readonly _durableRlmTerminalNoticeActionIds = new Set<string>();
 	private _rlmTerminalNoticeDeferredSince: number | undefined;
 	private _rlmTerminalNoticeAbandonment: { abandonedAt: number; count: number } | undefined;
+	private _rlmTerminalNoticeAbandonTimer: ReturnType<typeof setTimeout> | undefined;
 	private _sessionActionCommitTail: Promise<void> = Promise.resolve();
 	private _sessionActionCommitOwner: symbol | undefined;
 	private _pendingSessionActionFenceWaiters = 0;
@@ -1186,6 +1204,7 @@ export class AgentSession {
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
+	private _acpMcpTools: ToolDefinition[] = [];
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
 	private _agentDir?: string;
@@ -1201,6 +1220,12 @@ export class AgentSession {
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
+	/**
+	 * Open extension dialogs. A turn blocked on one is waiting for the user, not stalled.
+	 * A dialog that never settles keeps this above zero; the watchdog's pause budget
+	 * (maxPausedMs) bounds how long that can silence escalation.
+	 */
+	private _pendingUiDialogs = 0;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
 	private _extensionShutdownHandler?: ShutdownHandler;
 	private _extensionErrorListener?: ExtensionErrorListener;
@@ -1223,6 +1248,7 @@ export class AgentSession {
 	private _rlmMaxDepth: number;
 	private _rlmMaxDepthSource: RlmMaxDepthSource;
 	private _rlmSessionDir?: string;
+	private readonly _semanticEdges: SemanticEdgeRecorder;
 	private _rlmParentNodeId?: string;
 	private _rlmParentAgent?: string;
 	private _repliedToParentSinceTask: boolean | undefined;
@@ -1290,6 +1316,7 @@ export class AgentSession {
 	private _pendingAutoRefineReview: { reason: AutoRefineReason; review: AutoRefineReview } | undefined;
 	private _autoRefineBranchVersion = 0;
 	private _autoRefineReviewAbort?: AbortController;
+	private _autoRefineWritableProbe?: { at: number; allowed: boolean };
 	private _refineAbortController?: AbortController;
 	private readonly _autoRefineReviewer?: AutoRefineReviewer;
 	private readonly _serializedRefine: boolean;
@@ -1347,6 +1374,20 @@ export class AgentSession {
 		this._rlmSessionDir = config.rlmSessionDir;
 		this._rlmParentNodeId = config.rlmParentNodeId;
 		this._rlmParentAgent = config.rlmParentAgent;
+		this._semanticEdges = new SemanticEdgeRecorder({
+			// A non-persisted session (an in-memory root and its RLM descendants) must leave
+			// nothing on disk, so the ledger is only wired up when persistence is allowed.
+			ledgerPath: this.sessionManager.allowsPersistence()
+				? semanticEdgeLedgerPath({
+						rlmSessionDir: this._rlmSessionDir,
+						sessionArtifactDir: this.sessionManager.getSessionArtifactDir(),
+					})
+				: undefined,
+			sessionId: this.sessionManager.getSessionId(),
+			parentSessionId: config.semanticParentSessionId,
+			spawnedByRequestId: config.semanticSpawnedByRequestId,
+		});
+		this.agent.streamFn = wrapStreamFnWithSemanticEdges(this.agent.streamFn, this._semanticEdges);
 		// A resumed child may have replied before this process started; false would
 		// claim knowledge that is not present in the session transcript.
 		this._repliedToParentSinceTask =
@@ -1424,6 +1465,10 @@ export class AgentSession {
 			if (servers.length > 0) throw new Error("MCP is unavailable in this session");
 			return;
 		}
+		if (servers.length > 0 && !this._ipythonKernelProvisioner) {
+			throw new Error("ACP MCP servers require the built-in cpython tool");
+		}
+		this._assertAcpMcpToolNamesAvailable(acpMcpToolNames(servers));
 		if (!this._mcpManager.replaceAcpServers(servers, ownerId)) return;
 		this._rebuildRuntimeForAcpMcpServers();
 	}
@@ -1431,8 +1476,11 @@ export class AgentSession {
 	async releaseAcpMcpServers(ownerId: string, serverNames: readonly string[]): Promise<void> {
 		if (!this._mcpManager?.canReleaseAcpServers(ownerId)) return;
 		if (this._mcpManager.replaceAcpServers([], ownerId)) {
-			// Host MCP handlers read this manager dynamically, so credentials disappear
-			// before the kernel-side transport is closed.
+			const removedToolNames = new Set(this._acpMcpTools.map((tool) => tool.name));
+			const activeToolNames = this.getActiveToolNames().filter((name) => !removedToolNames.has(name));
+			for (const name of removedToolNames) this._allowedToolNames?.delete(name);
+			this._acpMcpTools = [];
+			this._refreshToolRegistry({ activeToolNames, includeAllExtensionTools: true });
 			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 			this.agent.state.systemPrompt = this._baseSystemPrompt;
 		}
@@ -1476,9 +1524,27 @@ export class AgentSession {
 		}
 	}
 
+	private _assertAcpMcpToolNamesAvailable(names: readonly string[]): void {
+		const occupiedNames = new Set([
+			...this._baseToolDefinitions.keys(),
+			...this._customTools.map((tool) => tool.name),
+			...this._extensionRunner.getAllRegisteredTools().map((tool) => tool.definition.name),
+		]);
+		for (const name of names) {
+			if (occupiedNames.has(name)) {
+				throw new Error(`ACP MCP tool name conflicts with an existing tool: ${name}`);
+			}
+		}
+	}
+
 	private _rebuildRuntimeForAcpMcpServers(): void {
+		const previousToolNames = new Set(this._acpMcpTools.map((tool) => tool.name));
+		const nextToolNames = acpMcpToolNames(this._mcpManager?.getAcpServers() ?? []);
+		this._assertAcpMcpToolNamesAvailable(nextToolNames);
+		const activeToolNames = this.getActiveToolNames().filter((name) => !previousToolNames.has(name));
+		activeToolNames.push(...nextToolNames);
 		this._buildRuntime({
-			activeToolNames: this.getActiveToolNames(),
+			activeToolNames,
 			includeAllExtensionTools: true,
 		});
 		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
@@ -1892,7 +1958,7 @@ export class AgentSession {
 				this._actionStore.releaseTerminal(action);
 			}
 		}
-		this._pendingNextTurnMessages.unshift(...restorableMessages);
+		this._unshiftPendingNextTurnMessages(...restorableMessages);
 		if (actions.length > 0) this._notifySessionInputCheckpointChange();
 		return actions;
 	}
@@ -2873,6 +2939,13 @@ export class AgentSession {
 			return false;
 		}
 
+		// Mirror _checkCompaction: a cooling-down threshold must not stop the loop or
+		// queue continuations for a compaction that will not run. Without this the hook
+		// ends the turn and burns a continuation while agent_end's cooldown check skips
+		// the compaction, so nothing is compacted, nothing is disclosed, and
+		// _continueAfterThresholdCompaction leaks into the next compaction.
+		if (this._isThresholdCompactionCoolingDown(contextWindow)) return false;
+
 		// Goal continuation takes exclusive priority over autonomous continuation, matching _getContinuationMessages.
 		if (this._queueGoalContinuationForThresholdCompaction(context.message)) {
 			this._continueAfterThresholdCompaction = true;
@@ -3637,7 +3710,8 @@ export class AgentSession {
 				this._disposing ||
 				this.isCompacting ||
 				this._branchSummaryOperation !== undefined ||
-				this._autoRefineInProgress,
+				this._autoRefineInProgress ||
+				this._pendingUiDialogs > 0,
 			onStage: (info) => this._handleStallWatchdogStage(info),
 		};
 		return new StallWatchdog(options);
@@ -3700,6 +3774,10 @@ export class AgentSession {
 
 	private _handleStallWatchdogStage(info: StallWatchdogStageInfo): void {
 		const settings = this.settingsManager.getStallWatchdogSettings();
+		// The watchdog re-checks its own live flag before firing, but a stage can be in
+		// flight when the user disables it. Never warn about, or abort, a live turn the
+		// user just put back under their own control.
+		if (!settings.enabled) return;
 		const diagnostics = this._collectStallDiagnostics(info.silentMs);
 		const silentSeconds = Math.max(1, Math.round(info.silentMs / 1000));
 		const logFields = {
@@ -3958,7 +4036,18 @@ export class AgentSession {
 				// never retryable. A subagent must tell its parent instead of parking
 				// silently in needs_input (the synthesized completed_without_reply
 				// notice carries no error context and reads like a normal completion).
-				await this._notifyParentOfTerminalError(msg);
+				try {
+					await this._notifyParentOfTerminalError(msg);
+				} catch (error) {
+					// The parent notice is best-effort; the retry resolution and goal
+					// finalization below are not. A throw here would reject
+					// _processAgentEvent, which is swallowed, leaving _retryPromise
+					// unresolved and the session wedged in isRetrying.
+					sessionLog.warn("subagent terminal-error notice failed", {
+						sessionId: this.sessionManager.getSessionId(),
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
 			}
 			this._resolveRetry();
 			if (!compactionWillRetry) {
@@ -3976,6 +4065,7 @@ export class AgentSession {
 	}
 
 	private _resolveRetry(): void {
+		this._semanticEdges.clearTurnRetry();
 		if (this._retryResolve) {
 			this._retryResolve();
 			this._retryResolve = undefined;
@@ -4137,7 +4227,7 @@ export class AgentSession {
 	 * (which flushes a final namespace snapshot) before the synchronous dispose, so
 	 * the latest state reaches disk instead of racing process exit.
 	 */
-	async disposeAsync(): Promise<void> {
+	async disposeAsync(options?: { kernelSnapshot?: boolean }): Promise<void> {
 		if (this._disposed) {
 			return this._disposeCallbacksPromise;
 		}
@@ -4146,6 +4236,7 @@ export class AgentSession {
 		if (this._disposeAsyncPromise) {
 			return this._disposeAsyncPromise;
 		}
+		const kernelSnapshot = options?.kernelSnapshot ?? true;
 		this._disposeAsyncPromise = (async () => {
 			// Drain before marking _disposing so a refine triggered at the final
 			// agent_end completes instead of being aborted by dispose().
@@ -4155,7 +4246,7 @@ export class AgentSession {
 			}
 			this._disposing = true;
 			this._sessionActionCommitDisposeAbortController.abort();
-			await this._disposeAsyncOnce();
+			await this._disposeAsyncOnce(kernelSnapshot);
 		})();
 		return this._disposeAsyncPromise;
 	}
@@ -4292,7 +4383,7 @@ export class AgentSession {
 		}
 	}
 
-	private async _disposeAsyncOnce(): Promise<void> {
+	private async _disposeAsyncOnce(kernelSnapshot: boolean): Promise<void> {
 		// Flush kernels/traces for both still-running and retained children; the sync
 		// dispose() below only tears them down synchronously.
 		for (const run of [...this._activeRlmChildRuns.values()]) {
@@ -4324,7 +4415,7 @@ export class AgentSession {
 		this._rlmChildCleanupFailures.clear();
 		this._deletedRlmChildIds.clear();
 		try {
-			await this._ipythonKernelProvisioner?.dispose();
+			await this._ipythonKernelProvisioner?.dispose({ snapshot: kernelSnapshot });
 		} catch {
 			// a failed kernel startup already cleaned up after itself
 		}
@@ -4358,6 +4449,7 @@ export class AgentSession {
 		}
 		this._disposed = true;
 		this._stallWatchdog?.dispose();
+		this._clearRlmTerminalNoticeAbandonTimer();
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._sessionActionCommitDisposeAbortController.abort();
@@ -4366,6 +4458,7 @@ export class AgentSession {
 			// resolution cannot write harness state or re-subscribe handlers.
 			this._autoRefineReviewAbort?.abort();
 			this._refineAbortController?.abort();
+			this._autoRefineWritableProbe = undefined;
 			for (const timer of this._scheduledAutoRefineTimers) {
 				clearTimeout(timer);
 			}
@@ -4537,6 +4630,10 @@ export class AgentSession {
 		return this._rlmDepth;
 	}
 
+	get semanticEdges(): SemanticEdgeRecorder {
+		return this._semanticEdges;
+	}
+
 	get rlmMaxDepth(): number {
 		return this._rlmMaxDepth;
 	}
@@ -4652,7 +4749,7 @@ export class AgentSession {
 			rlmDepth: this._rlmDepth,
 			rlmParentAgent: this._rlmParentAgent,
 			harnessState: this._loadMergedHarnessState(),
-			genericMcpServers: this._mcpManager?.getEnabledGenericServers(),
+			genericMcpServers: this._mcpManager?.getEnabledPersistentGenericServers(),
 		};
 		return buildSystemPrompt(this._baseSystemPromptOptions);
 	}
@@ -4961,14 +5058,14 @@ export class AgentSession {
 	 */
 	maybeAbandonStaleDeferredRlmTerminalNotices(now = Date.now()): void {
 		if (!this._hasDeferredRlmTerminalNotices()) {
-			this._rlmTerminalNoticeDeferredSince = undefined;
+			this._clearRlmTerminalNoticeDeferred();
 			return;
 		}
 		const deferredSince = this._rlmTerminalNoticeDeferredSince;
 		if (deferredSince === undefined || now - deferredSince < RLM_TERMINAL_NOTICE_ABANDON_AFTER_MS) return;
 		this._flushDeferredRlmTerminalNotices();
 		if (!this._hasDeferredRlmTerminalNotices()) {
-			this._rlmTerminalNoticeDeferredSince = undefined;
+			this._clearRlmTerminalNoticeDeferred();
 			return;
 		}
 		let count = 0;
@@ -4977,15 +5074,92 @@ export class AgentSession {
 			count++;
 			return false;
 		});
-		this._rlmTerminalNoticeDeferredSince = undefined;
+		this._clearRlmTerminalNoticeDeferred();
 		this._rlmTerminalNoticeAbandonment = { abandonedAt: now, count };
 	}
 
-	/** Deferred terminal notices still inside their delivery window. */
+	/**
+	 * Deferred terminal notices still inside their delivery window.
+	 *
+	 * Pure on purpose: `isSessionActive` is read by session-list and roster polling,
+	 * and a read path must not flush notices, admit a turn action, or discard a
+	 * child's terminal report. Equivalent to the old flush-then-recheck shape, which
+	 * always ended up false once the threshold had passed. The abandonment itself is
+	 * driven by its own timer (see _armRlmTerminalNoticeAbandonTimer), not by whoever
+	 * happens to read activity.
+	 */
 	private _hasActionableDeferredRlmTerminalNotices(): boolean {
-		if (!this._hasDeferredRlmTerminalNotices()) return false;
-		this.maybeAbandonStaleDeferredRlmTerminalNotices();
-		return this._hasDeferredRlmTerminalNotices();
+		return this._hasDeferredRlmTerminalNotices() && !this._isDeferredRlmTerminalNoticeStale();
+	}
+
+	/** Whether the deferred notices have waited past the abandonment threshold. */
+	private _isDeferredRlmTerminalNoticeStale(now = Date.now()): boolean {
+		const deferredSince = this._rlmTerminalNoticeDeferredSince;
+		return deferredSince !== undefined && now - deferredSince >= RLM_TERMINAL_NOTICE_ABANDON_AFTER_MS;
+	}
+
+	/**
+	 * The only way messages enter the next-turn queue. Stamping the deferral here makes
+	 * "a queued terminal notice always has a timestamp" structural rather than something
+	 * each re-injection path has to remember: without a timestamp no abandonment timer is
+	 * armed and the staleness predicate never fires, so the session stays pinned forever.
+	 *
+	 * The guard lives in this one core, not in each directional shell, so it cannot be
+	 * half-present: dropping it breaks both the push and the unshift routes at once.
+	 */
+	private _enqueuePendingNextTurnMessages(messages: readonly CustomMessage[], atFront: boolean): void {
+		if (atFront) this._pendingNextTurnMessages.unshift(...messages);
+		else this._pendingNextTurnMessages.push(...messages);
+		if (messages.some((message) => this._isRlmTerminalNotice(message))) {
+			this._markRlmTerminalNoticeDeferred();
+		}
+	}
+
+	private _pushPendingNextTurnMessages(...messages: CustomMessage[]): void {
+		this._enqueuePendingNextTurnMessages(messages, false);
+	}
+
+	private _unshiftPendingNextTurnMessages(...messages: CustomMessage[]): void {
+		this._enqueuePendingNextTurnMessages(messages, true);
+	}
+
+	/** Record that terminal notices are deferred, and arm the abandonment driver. */
+	private _markRlmTerminalNoticeDeferred(): void {
+		this._rlmTerminalNoticeDeferredSince ??= Date.now();
+		this._armRlmTerminalNoticeAbandonTimer();
+	}
+
+	private _clearRlmTerminalNoticeDeferred(): void {
+		this._rlmTerminalNoticeDeferredSince = undefined;
+		this._clearRlmTerminalNoticeAbandonTimer();
+	}
+
+	/**
+	 * Abandonment used to happen only when something read `isSessionActive`, so a
+	 * session nobody polled kept its stale notices - and stayed resident - forever.
+	 * The timer is unref'd: it must never by itself hold the process open.
+	 */
+	private _armRlmTerminalNoticeAbandonTimer(): void {
+		if (this._rlmTerminalNoticeAbandonTimer !== undefined) return;
+		const deferredSince = this._rlmTerminalNoticeDeferredSince;
+		const elapsed = deferredSince === undefined ? 0 : Date.now() - deferredSince;
+		const waitMs = Math.max(0, RLM_TERMINAL_NOTICE_ABANDON_AFTER_MS - elapsed);
+		const timer = setTimeout(() => {
+			this._rlmTerminalNoticeAbandonTimer = undefined;
+			this.maybeAbandonStaleDeferredRlmTerminalNotices();
+			// Still deferred and not yet abandoned (the flush could not deliver and the
+			// threshold was not reached): keep driving instead of going quiet.
+			if (this._rlmTerminalNoticeDeferredSince !== undefined) this._armRlmTerminalNoticeAbandonTimer();
+		}, waitMs);
+		timer.unref?.();
+		this._rlmTerminalNoticeAbandonTimer = timer;
+	}
+
+	private _clearRlmTerminalNoticeAbandonTimer(): void {
+		if (this._rlmTerminalNoticeAbandonTimer !== undefined) {
+			clearTimeout(this._rlmTerminalNoticeAbandonTimer);
+			this._rlmTerminalNoticeAbandonTimer = undefined;
+		}
 	}
 
 	private _enqueueRlmTerminalNoticeAction(message: CustomMessage): void {
@@ -5030,7 +5204,7 @@ export class AgentSession {
 			this._pendingNextTurnMessages.splice(index, 1);
 		}
 		if (!this._hasDeferredRlmTerminalNotices()) {
-			this._rlmTerminalNoticeDeferredSince = undefined;
+			this._clearRlmTerminalNoticeDeferred();
 		}
 		this._scheduleSessionInputPump();
 	}
@@ -5071,8 +5245,7 @@ export class AgentSession {
 		if (!fence) return;
 		try {
 			if (this._disposed || this._disposing) return;
-			this._pendingNextTurnMessages.push(cloneCustomMessage(message));
-			this._rlmTerminalNoticeDeferredSince ??= Date.now();
+			this._pushPendingNextTurnMessages(cloneCustomMessage(message));
 			this._flushDeferredRlmTerminalNotices();
 		} finally {
 			fence.release();
@@ -5087,9 +5260,8 @@ export class AgentSession {
 		for (const action of actions) {
 			if (!this._isRlmTerminalNoticeAction(action)) continue;
 			const message = primaryDeliveryRecord(action).message;
-			if (message.role === "custom") this._pendingNextTurnMessages.push(cloneCustomMessage(message));
+			if (message.role === "custom") this._pushPendingNextTurnMessages(cloneCustomMessage(message));
 		}
-		if (this._hasDeferredRlmTerminalNotices()) this._rlmTerminalNoticeDeferredSince ??= Date.now();
 		const ids = new Set(actions.map((action) => action.id));
 		this._cancelSessionActions(
 			(action) => ids.has(action.id),
@@ -5153,7 +5325,7 @@ export class AgentSession {
 			});
 			admissionFence.release();
 			if (!result.accepted || !result.ticket) {
-				if (prefixMessages) this._pendingNextTurnMessages.unshift(...prefixMessages);
+				if (prefixMessages) this._unshiftPendingNextTurnMessages(...prefixMessages);
 				reportPreflight(false, false);
 				return;
 			}
@@ -5318,7 +5490,7 @@ export class AgentSession {
 				});
 				commitFence?.release();
 				if (!result.accepted || !result.ticket) {
-					if (prefixMessages) this._pendingNextTurnMessages.unshift(...prefixMessages);
+					if (prefixMessages) this._unshiftPendingNextTurnMessages(...prefixMessages);
 					reportPreflight(false, false);
 					return;
 				}
@@ -6308,7 +6480,7 @@ export class AgentSession {
 		if (!firstTurn) return;
 		const executionPolicy = firstTurn.payload.executionPolicy;
 		const restoreNextTurnContext = () => {
-			this._pendingNextTurnMessages.unshift(...nextTurnMessages);
+			this._unshiftPendingNextTurnMessages(...nextTurnMessages);
 			nextTurnMessages = [];
 		};
 		try {
@@ -6419,7 +6591,7 @@ export class AgentSession {
 			this._forgetConsumedPostCompactionContinuations(turns.map((action) => primaryDeliveryRecord(action).message));
 		} catch (error) {
 			const delivered = new Set(this.agent.state.messages);
-			this._pendingNextTurnMessages.unshift(...nextTurnMessages.filter((message) => !delivered.has(message)));
+			this._unshiftPendingNextTurnMessages(...nextTurnMessages.filter((message) => !delivered.has(message)));
 			for (const action of actions) {
 				if (action.payload.kind === "turn") {
 					action.payload.records = action.payload.records.filter((record) => record.role !== "next_turn");
@@ -6566,7 +6738,7 @@ export class AgentSession {
 			timestamp: Date.now(),
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
-			this._pendingNextTurnMessages.push(appMessage);
+			this._pushPendingNextTurnMessages(appMessage);
 		} else if (this.isStreaming) {
 			const normalized = normalizeMessageContent(message.content);
 			if (options?.deliverAs === "followUp") {
@@ -7314,10 +7486,7 @@ export class AgentSession {
 	}
 
 	restorePendingNextTurnMessages(messages: readonly CustomMessage[]): void {
-		this._pendingNextTurnMessages.push(...messages.map((message) => cloneCustomMessage(message)));
-		if (messages.some((message) => this._isRlmTerminalNotice(message))) {
-			this._rlmTerminalNoticeDeferredSince ??= Date.now();
-		}
+		this._pushPendingNextTurnMessages(...messages.map((message) => cloneCustomMessage(message)));
 		this._flushDeferredRlmTerminalNotices();
 	}
 
@@ -7943,42 +8112,111 @@ export class AgentSession {
 		let extensionCompaction: CompactionResult | undefined;
 		let fromExtension = false;
 
-		if (this._extensionRunner.hasHandlers("session_before_compact")) {
-			const result = (await this._extensionRunner.emit({
-				type: "session_before_compact",
-				preparation,
-				branchEntries: pathEntries,
-				customInstructions,
-				signal,
-			})) as SessionBeforeCompactResult | undefined;
+		const semanticCompaction = this._semanticEdges.beginCompaction();
+		let compactionRecorded = false;
+		const uncommittedSlices: string[] = [];
+		let compactionSettled = false;
+		let summary: string;
+		let firstKeptEntryId: string;
+		let tokensBefore: number;
+		let details: CompactionResult["details"];
+		let usage: CompactionResult["usage"];
+		try {
+			if (this._extensionRunner.hasHandlers("session_before_compact")) {
+				const result = (await this._extensionRunner.emit({
+					type: "session_before_compact",
+					preparation,
+					branchEntries: pathEntries,
+					customInstructions,
+					signal,
+				})) as SessionBeforeCompactResult | undefined;
 
-			if (result?.cancel) {
+				if (result?.cancel) {
+					throw new Error("Compaction cancelled");
+				}
+
+				if (result?.compaction) {
+					extensionCompaction = result.compaction;
+					fromExtension = true;
+				}
+			}
+
+			if (extensionCompaction) {
+				({ summary, firstKeptEntryId, tokensBefore, details, usage } = extensionCompaction);
+			} else {
+				// Each summary wire call gets its own request ID: split turns send two
+				// different bodies, and one Idempotency-Key must never cover both. A slice
+				// that succeeds on the wire stays uncommitted until the compaction itself
+				// commits: a racing sibling's failure (or an abort) must leave no committed
+				// summary request for the next turn's continuation edge to attach to.
+				const summaryCall = async <T>(
+					call: (callHeaders: Record<string, string> | undefined) => Promise<T>,
+				): Promise<T> => {
+					const requestId = this._semanticEdges.startCompactionRequest(semanticCompaction.compactionId);
+					if (requestId === undefined) {
+						return call(headers);
+					}
+					try {
+						const result = await call({ ...headers, ...modelRequestHeaders(requestId) });
+						// A slice resolving after a sibling's rejection already settled the
+						// compaction would push into a drained list and stay in-flight forever.
+						if (compactionSettled) {
+							this._semanticEdges.failRequest(requestId);
+						} else {
+							uncommittedSlices.push(requestId);
+						}
+						return result;
+					} catch (error) {
+						this._semanticEdges.failRequest(requestId);
+						throw error;
+					}
+				};
+				({ summary, firstKeptEntryId, tokensBefore, details, usage } = await compact(
+					preparation,
+					model,
+					apiKey,
+					headers,
+					customInstructions,
+					signal,
+					this.thinkingLevel,
+					summaryCall,
+				));
+			}
+
+			if (signal.aborted) {
 				throw new Error("Compaction cancelled");
 			}
 
-			if (result?.compaction) {
-				extensionCompaction = result.compaction;
-				fromExtension = true;
+			// Ledger-before-effect: the compaction outcome is durable before the transcript
+			// commits it. Marked first: the ID is consumed even when the write throws, and a
+			// second finish attempt would mask the original I/O error.
+			compactionRecorded = true;
+			compactionSettled = true;
+			for (const requestId of uncommittedSlices.splice(0)) {
+				this._semanticEdges.finishRequest(requestId);
 			}
+			this._semanticEdges.finishCompaction(semanticCompaction.compactionId, "completed");
+			this.sessionManager.appendCompaction(
+				summary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				fromExtension,
+				customInstructions,
+				{ leafId: compactionLeafId ?? undefined, usage },
+			);
+		} catch (error) {
+			compactionSettled = true;
+			for (const requestId of uncommittedSlices.splice(0)) {
+				this._semanticEdges.failRequest(requestId);
+			}
+			if (!compactionRecorded) {
+				const cancelled =
+					error instanceof Error && (error.name === "AbortError" || error.message === "Compaction cancelled");
+				this._semanticEdges.finishCompaction(semanticCompaction.compactionId, cancelled ? "cancelled" : "failed");
+			}
+			throw error;
 		}
-
-		const { summary, firstKeptEntryId, tokensBefore, details } =
-			extensionCompaction ??
-			(await compact(preparation, model, apiKey, headers, customInstructions, signal, this.thinkingLevel));
-
-		if (signal.aborted) {
-			throw new Error("Compaction cancelled");
-		}
-
-		this.sessionManager.appendCompaction(
-			summary,
-			firstKeptEntryId,
-			tokensBefore,
-			details,
-			fromExtension,
-			customInstructions,
-			compactionLeafId ?? undefined,
-		);
 		const newEntries = this.sessionManager.getEntries();
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
 		this._mergeUnpersistedOutcomes(this.agent.state.messages);
@@ -8020,14 +8258,32 @@ export class AgentSession {
 	}
 
 	private _autoRefineAllowedForSession(): boolean {
-		if (!isPersistentHarnessStorageSupported() || this._rlmDepth !== 0 || this._localHarnessStateDir() === undefined)
-			return false;
+		if (!isPersistentHarnessStorageSupported() || this._rlmDepth !== 0) return false;
+		// The cache is consulted before anything is resolved, so a hit costs no I/O at
+		// all: _localHarnessStateDir() can mkdir the session artifact directory, and
+		// loading the harness state walks every path segment and parses the whole local
+		// store. This runs on the event queue, several times per turn.
+		const probe = this._autoRefineWritableProbe;
+		if (probe !== undefined && Date.now() - probe.at < AUTO_REFINE_WRITABLE_PROBE_TTL_MS) return probe.allowed;
+		// One call, one local: this used to call _localHarnessStateDir() twice, the
+		// second time behind a non-null assertion. A missing directory is deliberately
+		// not cached, because it can appear later.
+		//
+		// A false verdict is cached too. Re-probing at every turn boundary is what this
+		// cache exists to avoid, and the cost of a stale false is at most one TTL of
+		// skipped auto-refine; the hard preflight before an actual refine still catches a
+		// genuinely unwritable store.
+		const dir = this._localHarnessStateDir();
+		if (dir === undefined) return false;
+		let allowed = false;
 		try {
-			assertHarnessStateWritable(loadHarnessState(this._localHarnessStateDir()!, "local"));
-			return true;
+			assertHarnessStateWritable(loadHarnessState(dir, "local"));
+			allowed = true;
 		} catch {
-			return false;
+			allowed = false;
 		}
+		this._autoRefineWritableProbe = { at: Date.now(), allowed };
+		return allowed;
 	}
 
 	private _settlePostCompactionContinue(error?: Error): void {
@@ -8060,6 +8316,12 @@ export class AgentSession {
 		this._autoRefineReviewAbort?.abort();
 		this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
 		this._assistantTurnsSinceAutoRefine = 0;
+		// Drop the cached verdict so the next refine re-probes. The branch change does
+		// not move the session directory, so this is not about a new target: the probe
+		// is only advisory. What actually stops a write to an unwritable harness state
+		// is saveHarnessState re-asserting against the real target directory and
+		// letting the syscall error propagate.
+		this._autoRefineWritableProbe = undefined;
 		// Increment branch version BEFORE aborting/awaiting the serialized plan.
 		// This invalidates the plan's branchVersion check at the boundary
 		// so even if the plan completes, the boundary will reject it
@@ -9259,9 +9521,52 @@ export class AgentSession {
 		extensions.runtime.getExecEnv = provider;
 	}
 
+	/**
+	 * Count open extension dialogs so the stall watchdog can treat "waiting for the
+	 * user" as a pause. Both hosts hand their UI context over through bindExtensions,
+	 * so wrapping it here covers the interactive dialogs and the daemon-forwarded ones
+	 * (which the daemon tracks in its own extensionUiRequests map) without either host
+	 * having to report back. `notify` is not a dialog and stays untouched.
+	 */
+	private _withDialogTracking(uiContext: ExtensionUIContext): ExtensionUIContext {
+		// Typed as the original signature so a generic member (custom<T>) keeps its type
+		// parameters; Reflect.apply preserves the host's `this` binding, and the counter
+		// always decrements even when the dialog rejects.
+		const counted = <F extends (...args: never[]) => Promise<unknown>>(dialog: F): F => {
+			const wrapped = (...args: Parameters<F>): Promise<unknown> => {
+				this._pendingUiDialogs += 1;
+				return Promise.resolve()
+					.then(() => Reflect.apply(dialog, uiContext, args) as Promise<unknown>)
+					.finally(() => {
+						this._pendingUiDialogs -= 1;
+					});
+			};
+			return wrapped as F;
+		};
+		// Every member that can hang indefinitely waiting for the user has to be counted;
+		// missing one leaves the turn abortable while a dialog is open. That is
+		// select/confirm/input, plus editor (multi-line editor) and custom (a component
+		// that takes keyboard focus and settles through its done callback). notify is
+		// fire-and-forget and every other member is synchronous, so they are left alone.
+		//
+		// Members that also accept opts.timeout or opts.signal are counted too, because a
+		// caller may omit both and the daemon can cancel a session-level dialog out from
+		// under it - "settles only on user input" is not what decides this, "can hang" is.
+		// On the daemon and rpc hosts custom resolves immediately, so counting it there is
+		// a harmless no-op.
+		return {
+			...uiContext,
+			select: counted(uiContext.select),
+			confirm: counted(uiContext.confirm),
+			input: counted(uiContext.input),
+			editor: counted(uiContext.editor),
+			custom: counted(uiContext.custom),
+		};
+	}
+
 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
 		if (bindings.uiContext !== undefined) {
-			this._extensionUIContext = bindings.uiContext;
+			this._extensionUIContext = this._withDialogTracking(bindings.uiContext);
 		}
 		if (bindings.commandContextActions !== undefined) {
 			this._extensionCommandContextActions = bindings.commandContextActions;
@@ -9476,14 +9781,16 @@ export class AgentSession {
 		const previousActiveToolNames = this.getActiveToolNames();
 		const allowedToolNames = this._allowedToolNames;
 		const registeredTools = this._extensionRunner.getAllRegisteredTools();
+		const sdkToolEntry = (definition: ToolDefinition) => ({
+			definition,
+			sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, {
+				source: "sdk" as const,
+			}),
+		});
 		const allCustomTools = [
 			...registeredTools,
-			...this._customTools.map((definition) => ({
-				definition,
-				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, {
-					source: "sdk",
-				}),
-			})),
+			...this._customTools.map(sdkToolEntry),
+			...this._acpMcpTools.map(sdkToolEntry),
 		];
 		const isAllowedTool = (name: string): boolean => !allowedToolNames || allowedToolNames.has(name);
 		const allowedCustomTools = allCustomTools.filter((tool) => isAllowedTool(tool.definition.name));
@@ -9598,6 +9905,13 @@ export class AgentSession {
 				commandPrefix: this.settingsManager.getShellCommandPrefix(),
 				shellPath: this.settingsManager.getShellPath(),
 				sessionId: this.sessionId,
+				// Handler registration is a one-time snapshot taken here, while skill
+				// visibility (_modelVisibleSkills) is recomputed on every system-prompt
+				// rebuild. The writable-probe TTL therefore bounds a known
+				// eventual-consistency window to at most one TTL: the model can briefly see
+				// the refine skill before its handler is registered, or the reverse. This is
+				// fail-closed - the hard preflight before an actual refine still catches a
+				// genuinely unwritable store.
 				hostHandlers: this._createKernelHostHandlers(),
 				pythonSkills,
 				snapshotDir: this._ipythonKernelSnapshotDir,
@@ -9645,6 +9959,19 @@ export class AgentSession {
 		}
 		this._bindExtensionCore(this._extensionRunner);
 		this._applyExtensionBindings(this._extensionRunner);
+
+		const previousAcpMcpToolNames = new Set(this._acpMcpTools.map((tool) => tool.name));
+		const acpServers = this._mcpManager?.getAcpServers() ?? [];
+		if (acpServers.length > 0 && !this._ipythonKernelProvisioner) {
+			throw new Error("ACP MCP servers require the built-in cpython tool");
+		}
+		const acpMcpTools = this._ipythonKernelProvisioner
+			? createAcpMcpToolDefinitions(acpServers, this._ipythonKernelProvisioner)
+			: [];
+		this._assertAcpMcpToolNamesAvailable(acpMcpTools.map((tool) => tool.name));
+		for (const name of previousAcpMcpToolNames) this._allowedToolNames?.delete(name);
+		for (const tool of acpMcpTools) this._allowedToolNames?.add(tool.name);
+		this._acpMcpTools = acpMcpTools;
 
 		const defaultActiveToolNames = this._baseToolsOverride ? Object.keys(this._baseToolsOverride) : ["ipython"];
 		const baseActiveToolNames = [...(options.activeToolNames ?? defaultActiveToolNames)];
@@ -9952,6 +10279,7 @@ export class AgentSession {
 		sessionDir: string;
 		model: Model<any>;
 		thinkingLevel?: ThinkingLevel;
+		spawnedByRequestId?: string;
 	}): CreateRlmSubagentRuntimeOptions {
 		return {
 			parentSession: this,
@@ -9974,6 +10302,7 @@ export class AgentSession {
 			rlmDepth: this._rlmDepth + 1,
 			rlmMaxDepth: this._rlmMaxDepth,
 			rlmParentNodeId: options.id,
+			spawnedByRequestId: options.spawnedByRequestId,
 		};
 	}
 
@@ -10039,6 +10368,8 @@ export class AgentSession {
 			rlmSessionDir: options.sessionDir,
 			rlmParentNodeId: options.rlmParentNodeId,
 			rlmParentAgent: options.parentSession.sessionName ?? options.parentSession.sessionId,
+			semanticParentSessionId: options.parentSession.sessionId,
+			semanticSpawnedByRequestId: options.spawnedByRequestId,
 			sessionStartEvent: { type: "session_start", reason: "startup" },
 		});
 		if (child.sessionName !== options.sessionName) {
@@ -10222,41 +10553,31 @@ export class AgentSession {
 		childId: string,
 		isExternallyRunning: () => boolean = () => false,
 	): Promise<"deleted" | "not_found" | "running"> {
-		const isRunning = (): boolean => {
-			const status = this._activeRlmChildRuns.get(childId)?.status;
-			return status === "queued" || status === "running" || isExternallyRunning();
-		};
-		if (isRunning()) {
-			return "running";
-		}
-		const subagent = [...(await this.listRlmSubagents()).subagents, ...this._rlmChildCleanupFailures.values()].find(
-			(entry) => entry.rlm_child_id === childId,
-		);
-		if (!subagent) {
-			for (const run of this._activeRlmChildRuns.values()) {
-				const result = await run.session?.deleteInactiveRlmSubagent(childId, isExternallyRunning);
-				if (result && result !== "not_found") {
-					return result;
-				}
-			}
-			for (const { session: retained } of this._rlmChildSessions.values()) {
-				const result = await retained.deleteInactiveRlmSubagent(childId, isExternallyRunning);
-				if (result !== "not_found") {
-					return result;
-				}
-			}
-			return "not_found";
-		}
-		if (isRunning()) {
-			return "running";
-		}
-		const result = await this._trackRlmSubagentDeletion(subagent, () => {
+		for (const owner of this._rlmSubtreeSessions()) {
+			const isRunning = (): boolean => {
+				const status = owner._activeRlmChildRuns.get(childId)?.status;
+				return status === "queued" || status === "running" || isExternallyRunning();
+			};
 			if (isRunning()) {
-				return Promise.resolve({ subagent, outcome: "skipped_running" });
+				return "running";
 			}
-			return this._deleteResolvedRlmSubagent(subagent);
-		});
-		return result.outcome === "skipped_running" ? "running" : "deleted";
+			const subagent = [
+				...(await owner.listRlmSubagents()).subagents,
+				...owner._rlmChildCleanupFailures.values(),
+			].find((entry) => entry.rlm_child_id === childId);
+			if (!subagent) continue;
+			if (isRunning()) {
+				return "running";
+			}
+			const result = await owner._trackRlmSubagentDeletion(subagent, () => {
+				if (isRunning()) {
+					return Promise.resolve({ subagent, outcome: "skipped_running" });
+				}
+				return owner._deleteResolvedRlmSubagent(subagent);
+			});
+			return result.outcome === "skipped_running" ? "running" : "deleted";
+		}
+		return "not_found";
 	}
 
 	async deleteRlmSubagent(target: string): Promise<RlmDeleteSubagentResult> {
@@ -10636,6 +10957,11 @@ export class AgentSession {
 		};
 	}
 
+	private _isUnboundTerminalRlmChildRun(run: RlmChildRun): boolean {
+		if (run.session !== undefined || this._rlmChildSessions.has(run.id)) return false;
+		return run.status === "done" || run.status === "error" || run.status === "cancelled";
+	}
+
 	/** Live recursive child roster from lifecycle state, including nested work under retained parents. */
 	getRlmChildSnapshots(): RlmChildAgentSnapshot[] {
 		const snapshots: RlmChildAgentSnapshot[] = [];
@@ -10643,7 +10969,10 @@ export class AgentSession {
 		const traversed = new Set<string>();
 		for (const run of this._activeRlmChildRuns.values()) {
 			const hidden =
-				run.detachedDeletion || this._deletingRlmChildren.has(run.id) || this._deletedRlmChildIds.has(run.id);
+				run.detachedDeletion ||
+				this._deletingRlmChildren.has(run.id) ||
+				this._deletedRlmChildIds.has(run.id) ||
+				this._isUnboundTerminalRlmChildRun(run);
 			const child = run.session;
 			if (!hidden) {
 				snapshots.push(this._rlmChildSnapshotForRun(run));
@@ -10673,18 +11002,11 @@ export class AgentSession {
 
 	/** True when any direct or nested subagent is still running or queued. */
 	hasRunningRlmChildren(): boolean {
-		for (const run of this._activeRlmChildRuns.values()) {
-			if (run.status === "running" || run.status === "queued") {
-				return true;
-			}
-			if (run.session?.hasRunningRlmChildren()) {
-				return true;
-			}
-		}
-		// A finished direct child can still have a running nested subagent.
-		for (const { session } of this._rlmChildSessions.values()) {
-			if (session.hasRunningRlmChildren()) {
-				return true;
+		for (const session of this._rlmSubtreeSessions()) {
+			for (const run of session._activeRlmChildRuns.values()) {
+				if (run.status === "running" || run.status === "queued") {
+					return true;
+				}
 			}
 		}
 		return false;
@@ -10734,8 +11056,11 @@ export class AgentSession {
 				// Strong RLM quiescence also owns session-level work (bash, refine,
 				// branch mutation, and manual compaction) that interactive waitForIdle
 				// intentionally ignores. Wake on activity changes (upstream #1859), raced
-				// with a 1s tick so time-based terminal-notice abandonment (FIX-Q4) still
-				// fires while idle.
+				// with a 1s tick so this loop re-checks a deferred terminal notice whose
+				// delivery window closes while idle. The tick only observes: abandonment
+				// itself is driven by its own timer (see
+				// _armRlmTerminalNoticeAbandonTimer), because both predicates below are
+				// pure reads and must not flush or discard anything.
 				if (this.isSessionActive || this._hasActionableDeferredRlmTerminalNotices()) {
 					await wait(
 						Promise.race([
@@ -10769,20 +11094,11 @@ export class AgentSession {
 
 	// Inline (non-daemon) mode only; daemon clients attach to the child session directly.
 	getRlmChildSession(childId: string): AgentSession | undefined {
-		const direct = this._activeRlmChildRuns.get(childId)?.session ?? this._rlmChildSessions.get(childId)?.session;
-		if (direct) {
-			return direct;
-		}
-		for (const candidate of this._activeRlmChildRuns.values()) {
-			const nested = candidate.session?.getRlmChildSession(childId);
-			if (nested) {
-				return nested;
-			}
-		}
-		for (const { session: retained } of this._rlmChildSessions.values()) {
-			const nested = retained.getRlmChildSession(childId);
-			if (nested) {
-				return nested;
+		for (const session of this._rlmSubtreeSessions()) {
+			const direct =
+				session._activeRlmChildRuns.get(childId)?.session ?? session._rlmChildSessions.get(childId)?.session;
+			if (direct) {
+				return direct;
 			}
 		}
 		return undefined;
@@ -10795,26 +11111,61 @@ export class AgentSession {
 	 * was suppressed; false when the id is unknown or the run already settled.
 	 */
 	cancelRlmChildRun(childId: string, reason = "Cancelled by user"): boolean {
-		const run = this._activeRlmChildRuns.get(childId);
-		if (run) {
-			if (run.status !== "running" && run.status !== "queued" && !run.settled) {
-				if (this._sessionInputPumpSuspended) this._abandonRlmRunForQuiescence(run);
-				else run.suppressTerminalNotice = true;
-				return true;
+		for (const session of this._rlmSubtreeSessions()) {
+			const run = session._activeRlmChildRuns.get(childId);
+			if (run) {
+				if (run.status !== "running" && run.status !== "queued" && !run.settled) {
+					if (session._sessionInputPumpSuspended) session._abandonRlmRunForQuiescence(run);
+					else run.suppressTerminalNotice = true;
+					return true;
+				}
+				// The abort cascade never reaches running work retained under a settled descendant.
+				const cancelled = session._cancelRlmChildRun(run, reason);
+				const descendantsCancelled = run.session?.cancelRunningRlmDescendants(reason) ?? false;
+				if (cancelled || descendantsCancelled) {
+					return true;
+				}
 			}
-			return this._cancelRlmChildRun(run, reason);
-		}
-		for (const candidate of this._activeRlmChildRuns.values()) {
-			if (candidate.session?.cancelRlmChildRun(childId, reason)) {
-				return true;
-			}
-		}
-		for (const { session: retained } of this._rlmChildSessions.values()) {
-			if (retained.cancelRlmChildRun(childId, reason)) {
+			// A fruitless match keeps walking: child ids are only mkdir-unique among
+			// siblings, so a colliding live run elsewhere must stay reachable.
+			if (session._rlmChildSessions.get(childId)?.session.cancelRunningRlmDescendants(reason)) {
 				return true;
 			}
 		}
 		return false;
+	}
+
+	// A done child sits in BOTH maps until passivation; the visited set keeps that dual membership from doubling the walk.
+	private *_rlmSubtreeSessions(): Generator<AgentSession> {
+		const visited = new Set<AgentSession>([this]);
+		const stack: AgentSession[] = [this];
+		while (stack.length > 0) {
+			const session = stack.pop()!;
+			yield session;
+			for (const run of session._activeRlmChildRuns.values()) {
+				if (run.session && !visited.has(run.session)) {
+					visited.add(run.session);
+					stack.push(run.session);
+				}
+			}
+			for (const { session: retained } of session._rlmChildSessions.values()) {
+				if (!visited.has(retained)) {
+					visited.add(retained);
+					stack.push(retained);
+				}
+			}
+		}
+	}
+
+	/** Cancel every running or queued run in this session's subtree. */
+	cancelRunningRlmDescendants(reason = "Cancelled by user"): boolean {
+		let cancelled = false;
+		for (const session of this._rlmSubtreeSessions()) {
+			for (const run of session._activeRlmChildRuns.values()) {
+				if (session._cancelRlmChildRun(run, reason)) cancelled = true;
+			}
+		}
+		return cancelled;
 	}
 
 	private async _assertRlmSubagentSessionNameAvailable(name: string, ignorePendingReservation = false): Promise<void> {
@@ -10905,6 +11256,10 @@ export class AgentSession {
 		signal?: AbortSignal,
 	): Promise<RlmSpawnHandle> {
 		signal?.throwIfAborted();
+		// Snapshot before any await: the spawning request is the turn whose tool call is
+		// executing now. A spawn arriving outside an active run (a detached kernel task
+		// firing while the parent is idle) has no such turn; an absent edge beats a wrong one.
+		const spawnedByRequestId = this.isStreaming ? this._semanticEdges.lastTurnRequestId : undefined;
 		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
@@ -10983,7 +11338,11 @@ export class AgentSession {
 			signal?.addEventListener("abort", abortFromHost, { once: true });
 		}
 		const emitChildUpdate = () => {
-			this._emit({ type: "rlm_child_update", child: this._rlmChildSnapshotForRun(run) });
+			const child = this._rlmChildSnapshotForRun(run);
+			const serialized = JSON.stringify(child);
+			if (serialized === run.lastEmittedUpdate) return;
+			run.lastEmittedUpdate = serialized;
+			this._emit({ type: "rlm_child_update", child });
 		};
 		run.emitUpdate = emitChildUpdate;
 		emitChildUpdate();
@@ -11007,6 +11366,7 @@ export class AgentSession {
 				sessionDir: childSessionDir,
 				model: modelSelection.model,
 				thinkingLevel: requestedThinkingLevel,
+				spawnedByRequestId,
 			}),
 			onSessionPublished: publishChildSession,
 		};
@@ -11101,7 +11461,6 @@ export class AgentSession {
 						}
 						const text = compactRlmText(readAssistantText(assistant));
 						if (text) run.answerPreview = text;
-						void flushAgentTraceUpload(child.sessionManager).catch(() => undefined);
 						emitChildUpdate();
 					} else if (event.type === "message_start" || event.type === "message_update") {
 						if (event.message.role === "assistant") {
@@ -11152,6 +11511,11 @@ export class AgentSession {
 				await child.waitForRlmQuiescence();
 				if (run.error) throw new Error(run.error);
 				run.status = "done";
+				// Only successful completions return; the edge lands on the parent's next commit.
+				const childLastCommitted = child.semanticEdges.lastCommittedRequestId;
+				if (childLastCommitted !== undefined) {
+					this._semanticEdges.recordChildReturned(child.sessionId, childLastCommitted);
+				}
 				run.durationMs = Date.now() - startedAt;
 				run.activity = undefined;
 				emitChildUpdate();
@@ -11160,15 +11524,28 @@ export class AgentSession {
 					!run.suppressTerminalNotice &&
 					child._parentReplyCount === parentReplyCountBeforeRun
 				) {
-					const lastAssistantText = child.getLastAssistantText();
-					await deliverTerminalMessageToParent(
-						createRlmChildTerminalNoticeMessage({
-							kind: "completed_without_reply",
-							childId: run.id,
-							sessionName,
-							lastAssistantTextPreview: lastAssistantText ? compactRlmText(lastAssistantText) : undefined,
-						}),
-					);
+					// A turn that ends with a graceful error message resolves promptAndWait,
+					// so it must be surfaced here or the parent never learns the task failed.
+					const lastAssistant = this._findLastAssistantInMessages(child.messages);
+					if (lastAssistant?.stopReason === "error") {
+						await deliverTerminalMessageToParent(
+							createRlmChildFailureMessage({
+								childId: run.id,
+								sessionName,
+								error: lastAssistant.errorMessage ?? "Assistant turn failed",
+							}),
+						);
+					} else {
+						const lastAssistantText = child.getLastAssistantText();
+						await deliverTerminalMessageToParent(
+							createRlmChildTerminalNoticeMessage({
+								kind: "completed_without_reply",
+								childId: run.id,
+								sessionName,
+								lastAssistantTextPreview: lastAssistantText ? compactRlmText(lastAssistantText) : undefined,
+							}),
+						);
+					}
 				}
 				if (!this.registerRlmChildSession(run.id, child) && !run.detachedDeletion) {
 					if (childRuntime && this._subagentRuntimeHost?.releaseRlmSubagentRuntime) {
@@ -11186,9 +11563,24 @@ export class AgentSession {
 					run.status = "error";
 					run.error = runError.message;
 				}
+				// A failed child still returns an error outcome the parent consumes;
+				// cancelled runs and zero-commit children return nothing.
+				const failedChild = childSession ?? childRuntime?.session;
+				const failedLastCommitted = failedChild?.semanticEdges.lastCommittedRequestId;
+				if (run.status === "error" && failedChild && failedLastCommitted !== undefined) {
+					this._semanticEdges.recordChildReturned(failedChild.sessionId, failedLastCommitted);
+				}
 				run.durationMs = Date.now() - startedAt;
 				run.activity = undefined;
-				emitChildUpdate();
+				if (run.status === "error" && childSession === undefined) {
+					// A pre-bind failure leaves no row: "cancelled" is the wire's removal signal.
+					this._emit({
+						type: "rlm_child_update",
+						child: { ...this._rlmChildSnapshotForRun(run), status: "cancelled" },
+					});
+				} else {
+					emitChildUpdate();
+				}
 				if (!run.detachedDeletion && !run.suppressTerminalNotice) {
 					if (run.status === "error") {
 						await deliverTerminalMessageToParent(
@@ -11302,6 +11694,10 @@ export class AgentSession {
 
 		const contextWindow = this.model?.contextWindow ?? 0;
 		if (isContextOverflow(message, contextWindow)) return false;
+
+		// The agent loop already retried this in-place; a session-level retry would
+		// resend the whole context on every attempt without ever reaching compaction.
+		if (isEmptyTurnRetryExhausted(message)) return false;
 
 		if (this._isFauxProviderQueueExhausted(message)) {
 			return false;
@@ -11561,6 +11957,11 @@ export class AgentSession {
 		}
 
 		const delayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
+		// Park now: the retry re-issues the failed call and must reuse its Idempotency-Key.
+		// Payload hooks mutate the wire body after the hash point, so reuse is forfeited.
+		if (!this._extensionRunner.hasHandlers("before_provider_request")) {
+			this._semanticEdges.prepareTurnRetry();
+		}
 
 		this._emit({
 			type: "auto_retry_start",
@@ -12112,6 +12513,7 @@ export class AgentSession {
 
 			let summaryText: string | undefined;
 			let summaryDetails: unknown;
+			let summaryUsage: Usage | undefined;
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
 				const model = this.model!;
 				const { apiKey, headers } = await this._getRequiredRequestAuth(model);
@@ -12132,6 +12534,7 @@ export class AgentSession {
 					throw new Error(result.error);
 				}
 				summaryText = result.summary;
+				summaryUsage = result.usage;
 				summaryDetails = {
 					readFiles: result.readFiles || [],
 					modifiedFiles: result.modifiedFiles || [],
@@ -12171,6 +12574,7 @@ export class AgentSession {
 					summaryText,
 					summaryDetails,
 					fromExtension,
+					summaryUsage,
 				);
 				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
 
@@ -12339,6 +12743,22 @@ export class AgentSession {
 
 	private _contextWindowResolver(): ContextWindowResolver {
 		return (provider, modelId) => this._modelRegistry.find(provider, modelId)?.contextWindow;
+	}
+
+	private _ownUsageMemo?: { count: number; tailId: string | undefined; usage: SessionUsageSummary | undefined };
+
+	// Whole-file own spend, identical to the catalog scan so rows never shift at passivation.
+	getOwnUsageSummary(): SessionUsageSummary | undefined {
+		const entries = this.sessionManager.getEntries();
+		const tailId = entries.at(-1)?.id;
+		const memo = this._ownUsageMemo;
+		if (memo && memo.count === entries.length && memo.tailId === tailId) {
+			return memo.usage;
+		}
+		const { ownUsage } = computeOwnAndTotalUsage(entries, entries);
+		const usage = sessionUsageSummaryFrom(ownUsage);
+		this._ownUsageMemo = { count: entries.length, tailId, usage };
+		return usage;
 	}
 
 	/**

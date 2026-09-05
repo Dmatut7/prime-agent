@@ -102,6 +102,8 @@ interface InspectableRlmRun {
 	settled: boolean;
 	error?: string;
 	abandonedForQuiescence?: boolean;
+	activity?: { kind: string };
+	emitUpdate?: () => void;
 	publication?: { promise: Promise<void>; resolve(): void; reject(error: Error): void };
 	settlement?: { promise: Promise<void>; resolve(): void; reject(error: Error): void };
 	detachedDeletion?: Awaited<ReturnType<AgentSession["listRlmSubagents"]>>["subagents"][number];
@@ -1273,6 +1275,12 @@ describe("AgentSession rlm recursion", () => {
 				deleteRlmSubagentRuntime: async () => {},
 			},
 		});
+		const childUpdates: Array<{ status: string; error?: string }> = [];
+		root.subscribe((event) => {
+			if (event.type === "rlm_child_update") {
+				childUpdates.push({ status: event.child.status, error: event.child.error });
+			}
+		});
 
 		const spawned = await root.runRlmChild("start failing child", { name: "failing-worker" });
 		await vi.waitFor(async () => {
@@ -1292,6 +1300,10 @@ describe("AgentSession rlm recursion", () => {
 				expect.objectContaining({ content: expect.stringContaining("kernel startup failed") }),
 			);
 		});
+		// A terminal run that never bound a session leaves no row anywhere: the
+		// terminal update is the cancelled removal signal and snapshots skip the run.
+		expect(childUpdates.at(-1)).toEqual({ status: "cancelled", error: "kernel startup failed" });
+		expect(root.getRlmChildSnapshots()).toEqual([]);
 	});
 
 	it("injects exactly one cancellation notice when a child run is cancelled", async () => {
@@ -1348,6 +1360,49 @@ describe("AgentSession rlm recursion", () => {
 				},
 			});
 		});
+	});
+
+	it("surfaces a child turn that exhausts empty-response retries as a failure to the parent", async () => {
+		const emptyAssistantMessage = (): AssistantMessage => ({
+			role: "assistant",
+			content: [{ type: "thinking", thinking: "pondering" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: usage(),
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		const root = createSession({
+			// The child task prompt streams empty turns; the parent's reaction to the failure notice answers normally.
+			streamFn: (_model, context) => {
+				if (!userText(context).includes("empty child")) {
+					return streamAnswer("acknowledged");
+				}
+				const stream = createAssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: emptyAssistantMessage() });
+				});
+				return stream;
+			},
+		});
+		// Session-level auto-retry also retries error turns; disable it so the
+		// child's turn error surfaces immediately instead of after backoff.
+		root.settingsManager.setRetryEnabled(false);
+
+		await root.runRlmChild("empty child", { name: "empty-worker" });
+		await vi.waitFor(() => {
+			const failures = root.messages.filter(
+				(message) => message.role === "custom" && message.customType === "rlm_child_failure",
+			);
+			expect(failures).toHaveLength(1);
+			expect((failures[0] as { content: string }).content).toMatch(/empty response/i);
+		});
+		expect(
+			root.messages.filter(
+				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
+			),
+		).toHaveLength(0);
 	});
 
 	it("suppresses a done child's unsettled fallback notice at the cancellation cut", async () => {
@@ -2382,6 +2437,44 @@ describe("AgentSession rlm recursion", () => {
 		await waitFor(() => rootRun.status === "done");
 	});
 
+	it("suppresses repeated child updates whose snapshot did not change", async () => {
+		let releaseChild: () => void = () => {};
+		const release = new Promise<void>((resolve) => {
+			releaseChild = resolve;
+		});
+		let childStarted = false;
+		const root = createSession({
+			streamFn: (_model, context) => {
+				const text = userText(context);
+				const stream = createAssistantMessageEventStream();
+				childStarted = true;
+				void release.then(() => {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage(`child answer: ${text}`) });
+				});
+				return stream;
+			},
+		});
+		let updates = 0;
+		root.subscribe((event) => {
+			if (event.type === "rlm_child_update") updates += 1;
+		});
+
+		await root.runRlmChild("slow shard");
+		await waitFor(() => childStarted);
+		const run = [...(root as unknown as InspectableRlmSession)._activeRlmChildRuns.values()][0];
+		if (!run?.emitUpdate || !run.session) throw new Error("Missing child run emit");
+		await waitFor(() => run.activity?.kind === "waiting");
+		const before = updates;
+		run.emitUpdate();
+		run.emitUpdate();
+		expect(updates).toBe(before);
+		run.session.setCurrentRecap("changed recap");
+		await waitFor(() => updates === before + 1);
+
+		releaseChild();
+		await waitFor(() => run.status === "done");
+	});
+
 	it("runs a child agent without requiring ripgrep", async () => {
 		const streamFn = vi.fn((_model, context: Context) => streamAnswer(`child answer: ${userText(context)}`));
 		const root = createSession({ streamFn });
@@ -3073,9 +3166,33 @@ describe("AgentSession rlm recursion", () => {
 		expect(root.cancelRlmChildRun("unknown-child")).toBe(false);
 		expect(run?.status).toBe("running");
 
+		// Running work retained under the LIVE child: the abort cascade only
+		// reaches active runs, so the cancel walk must descend here itself.
+		await waitFor(() => run?.session !== undefined);
+		const deepHost = createSession({ rlmSessionDir: join(tempDir, "deep-host") });
+		const deepAbort = vi.fn();
+		const deepRun = {
+			id: "deep-1",
+			status: "running",
+			settled: false,
+			abort: deepAbort,
+			publication: { reject: vi.fn() },
+			emitUpdate: vi.fn(),
+		};
+		(deepHost as unknown as { _activeRlmChildRuns: Map<string, typeof deepRun> })._activeRlmChildRuns.set(
+			"deep-1",
+			deepRun,
+		);
+		(run?.session as unknown as { _rlmChildSessions: Map<string, { session: AgentSession }> })._rlmChildSessions.set(
+			"deep-host",
+			{ session: deepHost },
+		);
+
 		expect(root.cancelRlmChildRun(childId)).toBe(true);
 		expect(run?.status).toBe("cancelled");
 		expect(run?.error).toBe("Cancelled by user");
+		expect(deepRun.status).toBe("cancelled");
+		expect(deepAbort).toHaveBeenCalled();
 		// A second caller racing detached teardown observes the already-accepted
 		// cancellation rather than treating the child as complete.
 		expect(root.cancelRlmChildRun(childId)).toBe(true);
@@ -3089,6 +3206,98 @@ describe("AgentSession rlm recursion", () => {
 
 		// The run has finished; a second cancel finds nothing to stop.
 		expect(root.cancelRlmChildRun(childId)).toBe(false);
+	});
+
+	it("keeps a colliding child id reachable past a finished retained match", async () => {
+		const root = createSession({ rlmSessionDir: join(tempDir, "collide-root") });
+		const finished = createSession({ rlmSessionDir: join(tempDir, "collide-finished") });
+		const otherParent = createSession({ rlmSessionDir: join(tempDir, "collide-other") });
+		const rootMaps = root as unknown as { _rlmChildSessions: Map<string, { session: AgentSession }> };
+		// Child ids are only mkdir-unique among siblings: "sub-dup" exists twice.
+		rootMaps._rlmChildSessions.set("sub-dup", { session: finished });
+		rootMaps._rlmChildSessions.set("other-parent", { session: otherParent });
+		const abort = vi.fn();
+		const collidingRun = {
+			id: "sub-dup",
+			status: "running",
+			settled: false,
+			abort,
+			publication: { reject: vi.fn() },
+			emitUpdate: vi.fn(),
+		};
+		(otherParent as unknown as { _activeRlmChildRuns: Map<string, typeof collidingRun> })._activeRlmChildRuns.set(
+			"sub-dup",
+			collidingRun,
+		);
+
+		expect(root.cancelRlmChildRun("sub-dup")).toBe(true);
+		expect(collidingRun.status).toBe("cancelled");
+		expect(abort).toHaveBeenCalled();
+	});
+
+	it("cancels a deep dual-membership chain in one visit per session", async () => {
+		const levels = 20;
+		const sessions = Array.from({ length: levels + 1 }, (_, level) =>
+			createSession({ rlmSessionDir: join(tempDir, `chain-${level}`) }),
+		);
+		let cancelPrimitiveCalls = 0;
+		let runMapIterations = 0;
+		for (const [level, session] of sessions.entries()) {
+			const target = session as unknown as {
+				_activeRlmChildRuns: Map<string, unknown>;
+				_rlmChildSessions: Map<string, { session: AgentSession }>;
+				_cancelRlmChildRun(run: unknown, reason: string): boolean;
+			};
+			const original = target._cancelRlmChildRun.bind(session);
+			target._cancelRlmChildRun = (run, reason) => {
+				cancelPrimitiveCalls++;
+				return original(run, reason);
+			};
+			const originalValues = target._activeRlmChildRuns.values.bind(target._activeRlmChildRuns);
+			target._activeRlmChildRuns.values = () => {
+				runMapIterations++;
+				return originalValues();
+			};
+			if (level === 0) continue;
+			// A finished intermediate lives in BOTH parent maps until passivation.
+			const parent = sessions[level - 1] as unknown as {
+				_activeRlmChildRuns: Map<string, unknown>;
+				_rlmChildSessions: Map<string, { session: AgentSession }>;
+			};
+			parent._activeRlmChildRuns.set(`chain-${level}`, {
+				id: `chain-${level}`,
+				status: "done",
+				settled: true,
+				session,
+				abort: vi.fn(),
+				publication: { reject: vi.fn() },
+				emitUpdate: vi.fn(),
+			});
+			parent._rlmChildSessions.set(`chain-${level}`, { session });
+		}
+		const leafAbort = vi.fn();
+		const leafRun = {
+			id: "leaf-run",
+			status: "running",
+			settled: false,
+			abort: leafAbort,
+			publication: { reject: vi.fn() },
+			emitUpdate: vi.fn(),
+		};
+		(sessions[levels] as unknown as { _activeRlmChildRuns: Map<string, typeof leafRun> })._activeRlmChildRuns.set(
+			"leaf-run",
+			leafRun,
+		);
+
+		expect(sessions[0]!.hasRunningRlmChildren()).toBe(true);
+		expect(runMapIterations).toBeLessThanOrEqual(3 * (levels + 1));
+
+		expect(sessions[0]!.cancelRunningRlmDescendants()).toBe(true);
+		expect(leafRun.status).toBe("cancelled");
+		expect(leafAbort).toHaveBeenCalled();
+		// One visit per session, not 2^depth.
+		expect(cancelPrimitiveCalls).toBeLessThanOrEqual(levels + 1);
+		expect(sessions[0]!.hasRunningRlmChildren()).toBe(false);
 	});
 
 	it("cancels an admitted rlm.run child when its kernel host shuts down", async () => {
@@ -3151,6 +3360,45 @@ describe("AgentSession rlm recursion", () => {
 			"IPython kernel shut down",
 		);
 		expect((root as unknown as InspectableRlmSession)._activeRlmChildRuns.size).toBe(0);
+	});
+
+	it("stops live descendants when the targeted child run already settled", async () => {
+		const root = createSession({
+			streamFn: (_model, context) => {
+				const stream = createAssistantMessageEventStream();
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage(`child answer: ${userText(context)}`),
+				});
+				return stream;
+			},
+		});
+
+		await root.runRlmChild("quick shard");
+		const runs = (root as unknown as InspectableRlmSession)._activeRlmChildRuns;
+		await waitFor(() => runs.size === 0);
+		const retained = (root as unknown as { _rlmChildSessions: Map<string, { session: AgentSession }> })
+			._rlmChildSessions;
+		expect(retained.size).toBe(1);
+		const [childId, { session: childSession }] = [...retained.entries()][0]!;
+		const abort = vi.fn();
+		const grandchild = {
+			id: "grandchild-1",
+			status: "running",
+			settled: false,
+			abort,
+			publication: { reject: vi.fn() },
+			emitUpdate: vi.fn(),
+		};
+		(childSession as unknown as { _activeRlmChildRuns: Map<string, typeof grandchild> })._activeRlmChildRuns.set(
+			"grandchild-1",
+			grandchild,
+		);
+
+		expect(root.cancelRlmChildRun(childId)).toBe(true);
+		expect(grandchild.status).toBe("cancelled");
+		expect(abort).toHaveBeenCalled();
 	});
 
 	it("reports a shared running outcome to concurrent inactive-delete callers", async () => {

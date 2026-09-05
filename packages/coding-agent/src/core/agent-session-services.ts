@@ -16,6 +16,7 @@ import { ModelRegistry } from "./model-registry.js";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.js";
 import type { SubagentRuntimeHost } from "./rlm-runtime.js";
 import { type CreateAgentSessionResult, createAgentSession } from "./sdk.js";
+import { semanticEdgeLedgerPath } from "./semantic-edges.js";
 import type { SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
 import { installAgentTelemetry, isTelemetryEnabled } from "./telemetry.js";
@@ -62,6 +63,8 @@ export interface AgentSessionCreationOptions {
 	rlmSessionDir?: string;
 	rlmParentNodeId?: string;
 	rlmParentAgent?: string;
+	semanticParentSessionId?: string;
+	semanticSpawnedByRequestId?: string;
 	subagentRuntimeHost?: SubagentRuntimeHost;
 	rlmHeartbeatController?: AgentRlmHeartbeatController;
 	prewarmIpythonKernel?: boolean;
@@ -223,6 +226,14 @@ export async function createAgentSessionFromServices(
 	installAgentTraceUpload(options.sessionManager, {
 		authStorage: options.services.authStorage,
 		settingsManager: options.services.settingsManager,
+		// A non-persisted session (an in-memory root and its RLM descendants) must leave
+		// nothing on disk, so the ledger is only wired up when persistence is allowed.
+		semanticEdgesLedgerPath: options.sessionManager.allowsPersistence()
+			? semanticEdgeLedgerPath({
+					rlmSessionDir: options.rlmSessionDir,
+					sessionArtifactDir: options.sessionManager.getSessionArtifactDir(),
+				})
+			: undefined,
 	});
 	const result = await createAgentSession({
 		cwd: options.services.cwd,
@@ -251,6 +262,8 @@ export async function createAgentSessionFromServices(
 		rlmSessionDir: options.rlmSessionDir,
 		rlmParentNodeId: options.rlmParentNodeId,
 		rlmParentAgent: options.rlmParentAgent,
+		semanticParentSessionId: options.semanticParentSessionId,
+		semanticSpawnedByRequestId: options.semanticSpawnedByRequestId,
 		subagentRuntimeHost: options.subagentRuntimeHost,
 		rlmHeartbeatController: options.rlmHeartbeatController,
 		sessionStartEvent: options.sessionStartEvent,

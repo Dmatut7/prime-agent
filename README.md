@@ -46,17 +46,32 @@ Prime Agent is an open-source coding and research agent for general and long-run
 
 ## 这个 fork 改了什么
 
-基于官方 v0.8.0 之后的 main。针对两件实测过的事：**子代理一开 worker 打满**，**中文会话一长就卡输入**。
+基于官方 main，R3 已同步到 0.9.x 线（upstream `d74a75fea`，40 个上游提交）。针对两件实测过的事：**子代理一开 worker 打满**，**中文会话一长就卡输入**。
 
 | 问题 | 改动 | 实测 |
 | --- | --- | --- |
-| 子代理每个 token 都触发全量会话列表重扫 | 活着的子代理先跳过；display 文件按 stat 缓存；每个 worker 同时只跑一轮刷新 | worker 从 **228% CPU / 2GB** 下来；一个 732KB 子会话文件不再被同时打开 780 次 |
+| 子代理每个 token 都触发全量会话列表重扫，活着的子代理被整份重扫一遍后当场丢掉 | 扫描**之前**先跳过活着的（resident）子代理 | worker 从 **228% CPU / 2GB** 下来；一个 732KB 子会话文件不再被同时打开 780 次 |
+| 每个子代理的 display 文件毫无缓存，每条 ledger edge、每次遍历都重读一遍 | display 文件按 stat（size + mtime）缓存 | 同上（同一次 profile） |
 | 中文宽度缓存只有 512 条，超过就每帧重新切字 | 按总字符数封顶（400 万字），不再按条数 | 中文过 512 条慢约 **950 倍**（0.01µs → 9.6µs/行）；ASCII 不受影响 |
-| 每帧重拼整份 transcript、输入框每行重排 | 没变的组件不拼接；打字只重排当前行 | 12 行输入框 60fps 仅切字就要 1.1–2.5ms |
-| 正在跑的会话每次整文件重读（可到几十 MB） | 只扫新增字节；文件被整份改写才全量重读 | 活会话不再每次从文件头扫到尾 |
-| 刷新压住并发后，仍按 token 往 socket 推全量摘要 | 流式刷新加间隔；名单没变不重发；ledger 没变不重放；工具参数没变不拆面板 | supervisor 不再按 token 做 GC 和拷缓冲 |
-| 流式刷新仍把每个会话正在生成的整段助手消息塞进 list | 协商能力后，流式刷新和 agents 列表轮询不再带这条消息；已缓存的不丢 | supervisor 不再为每个 token 序列化数 MB 的 JSON |
+| 每帧重拼整份 transcript | 没变的渲染工作不重做 | 12 行输入框 60fps 仅切字就要 1.1–2.5ms |
+| 输入框每敲一个字就重排所有行 | 打字只重排当前行；wrap 结果跨帧复用，只有内容宽度或粘贴标记变了才整体失效 | 同上 |
+| 正在跑的会话每次整文件重读（可到几十 MB） | 只扫新增字节；文件被整份改写（换 inode）才全量重读 | 活会话不再每次从文件头扫到尾 |
+| RLM spawn ledger 每次读都重放整份文件 | `(size, mtime)` 没变就不重放；命中也交出一份克隆，调用方改不动缓存 | supervisor 不再按 token 做 GC 和拷缓冲 |
+| 工具面板每个 token 都按“新”参数重建一次 | 工具参数签名没变就不拆面板 | 同上 |
 | 同一事件游标上两次快照共用一个 id，字节不同被当成损坏 | 每次传输单独编号，不再用游标当身份 | worker 不再因此进入 recovering；Token/上下文栏能读到状态（[#1229](https://github.com/PrimeIntellect-ai/prime-agent/issues/1229)） |
+| list 响应把每个会话正在生成的整段助手消息带上（一个 token 一次） | 协商 `list_without_streaming_messages` 能力后剥掉这条消息；已缓存的不丢 | supervisor 不再为每个 token 序列化数 MB 的 JSON |
+| 自己泄漏的 session lease（release 失败、start-id 检测不可用）会把自己锁死 | 上游的 fail-closed 骨架 + 本地一条窄回收：同 pid、同 owner、且本进程没有活 lease 持有该目录才回收；进程内活着的 lease 仍然冲突 | 与上游 R3 的 lease 改写手工融合，三条本地符号的引用计数不变 |
+
+每条改动的落点（文件:行号）、唯一读者或唯一正控、以及「什么动作会静默弄死它」记在 [`docs/fork/local-axes.md`](docs/fork/local-axes.md)。
+
+**R3 上游同步后已消失的本地改动**（表格里的对应行已删）：
+
+- 会话列表的**每 worker 一次 list 往返**，以及**按 token 的刷新节流与合并**（`scheduleWorkerSummaryRefresh` / `CoalescedSummaryRefresh` / `SUMMARY_REFRESH_MIN_INTERVAL_MS`）—— 上游 #1897 + #1900 改成 roster 事件驱动 + delta 推送，这条路径本身没了；`handleList` 现在零 worker 往返，客户端拿到的是 roster 快照，新鲜度靠 `roster_update` 推送与 repair pull 兜。
+- **名单没变不重发**（`syncAgentPeers`）—— 早在 R1 的上游合并（`bf542ce7e`）就已消失，表格里的这行是过期项。
+- **祖先行 running 提升**（`propagateHeartbeatStateToAncestors`）—— 随上游 #1967（心跳会话按普通会话处理）有意删除。
+- `omitStreamingMessages` 只被**部分**吸收：协议字段、supervisor 侧剥离、客户端命令仍活着（客户端只剩一个调用点），supervisor↔worker 那一跳成了休眠接缝（尾参恒 `false`，唯一读者是一个本地测试）。
+
+本轮同步的取舍、schema 23-26 四层撞号与升 27 的由来、已知红清单与待办见 [`FORK_NOTES.md`](FORK_NOTES.md) 的 R3 节；缺陷台账见 [`docs/fork/audit-findings.md`](docs/fork/audit-findings.md)。
 
 官方 `install.sh` 装的还是没有这些改动的发布版。要跑本 fork：
 

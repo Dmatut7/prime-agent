@@ -8,7 +8,13 @@ import {
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
-import { agentLoop, agentLoopContinue, runAgentLoop } from "../src/agent-loop.js";
+import {
+	agentLoop,
+	agentLoopContinue,
+	EMPTY_TURN_RETRY_EXHAUSTED_STOP_REASON_RAW,
+	isEmptyTurnRetryExhausted,
+	runAgentLoop,
+} from "../src/agent-loop.js";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.js";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -1962,5 +1968,262 @@ describe("agentLoopContinue with AgentMessage", () => {
 		const messages = await stream.result();
 		expect(messages.length).toBe(1);
 		expect(messages[0].role).toBe("assistant");
+	});
+});
+
+describe("empty assistant turn retry", () => {
+	function emptyTurnConfig(): AgentLoopConfig {
+		return {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+	}
+
+	function streamFnReturning(messages: AssistantMessage[]) {
+		const requests: Message[][] = [];
+		let call = 0;
+		const streamFn = ((_model: unknown, llmContext: { messages: Message[] }) => {
+			requests.push(llmContext.messages.slice());
+			const message = messages[Math.min(call, messages.length - 1)];
+			call += 1;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		}) as unknown as Parameters<typeof runAgentLoop>[5];
+		return { streamFn, requests };
+	}
+
+	async function runOnce(message: AssistantMessage) {
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const { streamFn, requests } = streamFnReturning([message]);
+		const events: AgentEvent[] = [];
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			(event) => {
+				events.push(event);
+			},
+			undefined,
+			streamFn,
+		);
+		return { requests, events, assistant: messages.find((m) => m.role === "assistant") as AssistantMessage };
+	}
+
+	it("silently retries empty turns and keeps the transcript clean", async () => {
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const thinkingOnly = createAssistantMessage([{ type: "thinking", thinking: "pondering..." }]);
+		const whitespaceOnly = createAssistantMessage([{ type: "text", text: "  \n" }]);
+		const goodMessage = createAssistantMessage([{ type: "text", text: "done" }]);
+		const { streamFn, requests } = streamFnReturning([thinkingOnly, whitespaceOnly, goodMessage]);
+		const events: AgentEvent[] = [];
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			(event) => {
+				events.push(event);
+			},
+			undefined,
+			streamFn,
+		);
+
+		expect(requests.length).toBe(3);
+		// Discarded attempts are neither resent to the provider nor kept as transcript turns.
+		expect(requests[1].filter((message) => message.role === "assistant")).toEqual([]);
+		expect(requests[2].filter((message) => message.role === "assistant")).toEqual([]);
+		expect(messages.filter((message) => message.role === "assistant")).toEqual([goodMessage]);
+		const assistantEnds = events.filter(
+			(event) => event.type === "message_end" && event.message.role === "assistant",
+		);
+		expect(assistantEnds.length).toBe(1);
+	});
+
+	it("surfaces an error after three consecutive empty turns", async () => {
+		const { requests, assistant } = await runOnce(createAssistantMessage([{ type: "thinking", thinking: "..." }]));
+
+		expect(requests.length).toBe(3);
+		expect(assistant.stopReason).toBe("error");
+		expect(assistant.errorMessage).toMatch(/empty response/i);
+		// The terminal case carries a machine-readable marker so a caller can tell it
+		// apart from a provider error that is still worth retrying.
+		expect(assistant.stopReasonRaw).toBe(EMPTY_TURN_RETRY_EXHAUSTED_STOP_REASON_RAW);
+		expect(isEmptyTurnRetryExhausted(assistant)).toBe(true);
+	});
+
+	it("accounts for discarded empty turns without inflating input tokens", async () => {
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const attempts = [1, 2, 3].map((n) => {
+			const message = createAssistantMessage([{ type: "thinking", thinking: `attempt ${n}` }]);
+			message.usage = {
+				...message.usage,
+				input: 1000 * n,
+				output: 10 * n,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1010 * n,
+				cost: { input: 0.001 * n, output: 0.0001 * n, cacheRead: 0, cacheWrite: 0, total: 0.0011 * n },
+			};
+			return message;
+		});
+		const { streamFn, requests } = streamFnReturning(attempts);
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			() => {},
+			undefined,
+			streamFn,
+		);
+		const assistant = messages.find((message) => message.role === "assistant") as AssistantMessage;
+
+		expect(requests.length).toBe(3);
+		expect(assistant.stopReason).toBe("error");
+		// All three attempts were really billed, so the spend must not be lost.
+		expect(assistant.usage.output).toBe(10 * (1 + 2 + 3));
+		expect(assistant.usage.cost.total).toBeCloseTo(0.0011 * (1 + 2 + 3), 12);
+		// Input, cacheRead, cacheWrite and totalTokens stay at the final attempt's
+		// values: they describe the context that attempt actually occupied, and summing
+		// them would report a context size no single request ever had.
+		expect(assistant.usage.input).toBe(3000);
+		expect(assistant.usage.cacheRead).toBe(0);
+		expect(assistant.usage.totalTokens).toBe(3030);
+	});
+
+	it("carries discarded empty turns onto a later attempt that succeeds", async () => {
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const withUsage = (message: AssistantMessage, n: number): AssistantMessage => {
+			message.usage = {
+				...message.usage,
+				input: 1000 * n,
+				output: 10 * n,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1010 * n,
+				cost: { input: 0.001 * n, output: 0.0001 * n, cacheRead: 0, cacheWrite: 0, total: 0.0011 * n },
+			};
+			return message;
+		};
+		const attempts = [
+			withUsage(createAssistantMessage([{ type: "thinking", thinking: "attempt 1" }]), 1),
+			withUsage(createAssistantMessage([{ type: "thinking", thinking: "attempt 2" }]), 2),
+			withUsage(createAssistantMessage([{ type: "text", text: "done" }]), 3),
+		];
+		const { streamFn, requests } = streamFnReturning(attempts);
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			() => {},
+			undefined,
+			streamFn,
+		);
+		const assistant = messages.find((message) => message.role === "assistant") as AssistantMessage;
+
+		expect(requests.length).toBe(3);
+		// The successful turn terminates the loop, so it is the only message that reaches
+		// message_end: without the carry, attempts 1 and 2 vanish from every accounting
+		// that reads usage off the transcript.
+		expect(assistant.stopReason).not.toBe("error");
+		expect(assistant.usage.output).toBe(10 * (1 + 2 + 3));
+		expect(assistant.usage.cost.total).toBeCloseTo(0.0011 * (1 + 2 + 3), 12);
+		// Same rule as the exhausted case: context-occupancy fields stay at the terminal
+		// attempt's own values.
+		expect(assistant.usage.input).toBe(3000);
+		expect(assistant.usage.cacheRead).toBe(0);
+		expect(assistant.usage.totalTokens).toBe(3030);
+	});
+
+	it("keeps a passing-through overflow turn recognizable after discards", async () => {
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const discardedAttempt = createAssistantMessage([{ type: "thinking", thinking: "attempt 1" }]);
+		discardedAttempt.usage = {
+			...discardedAttempt.usage,
+			input: 100,
+			output: 10,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 110,
+			cost: { input: 0.001, output: 0.0001, cacheRead: 0, cacheWrite: 0, total: 0.0011 },
+		};
+		// A length turn is never an empty turn - isEmptyAssistantTurn excludes error, aborted
+		// and length up front - so this one passes through the retry loop on its stopReason,
+		// not through the overflow gate (that gate exists for silent overflows that arrive
+		// with a normal stop reason). contextWindow is 8192, so input alone clears the 99%
+		// threshold the overflow check requires, and output is 0, which is what its case 3
+		// keys on.
+		const overflowAttempt = createAssistantMessage([{ type: "thinking", thinking: "attempt 2" }]);
+		overflowAttempt.stopReason = "length";
+		overflowAttempt.usage = {
+			...overflowAttempt.usage,
+			input: 8200,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 8200,
+			cost: { input: 0.0082, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.0082 },
+		};
+		const { streamFn, requests } = streamFnReturning([discardedAttempt, overflowAttempt]);
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			() => {},
+			undefined,
+			streamFn,
+		);
+		const assistant = messages.find((message) => message.role === "assistant") as AssistantMessage;
+
+		expect(requests.length).toBe(2);
+		expect(assistant.stopReason).toBe("length");
+		// The spend of the discarded attempt is still carried, but as cost only: adding its
+		// output tokens would lift usage.output off zero, which is the very signal the
+		// overflow check keys on, and callers downstream re-run that check on this message.
+		expect(assistant.usage.output).toBe(0);
+		expect(assistant.usage.input).toBe(8200);
+		expect(assistant.usage.cost.total).toBeCloseTo(0.0082 + 0.0011, 12);
+		expect(assistant.usage.cost.output).toBeCloseTo(0.0001, 12);
+	});
+
+	it("does not mark other turns as empty-turn exhaustion", async () => {
+		const { assistant } = await runOnce(createAssistantMessage([{ type: "text", text: "done" }]));
+		expect(assistant.stopReasonRaw).toBeUndefined();
+		expect(isEmptyTurnRetryExhausted(assistant)).toBe(false);
+		expect(isEmptyTurnRetryExhausted(createAssistantMessage([], "error"))).toBe(false);
+	});
+
+	it("does not retry turns with visible content, a length stop, or a silent overflow", async () => {
+		const visible = await runOnce(
+			createAssistantMessage([
+				{ type: "thinking", thinking: "..." },
+				{ type: "text", text: "partial but visible" },
+			]),
+		);
+		expect(visible.requests.length).toBe(1);
+		expect(visible.assistant.stopReason).toBe("stop");
+
+		const lengthStop = await runOnce(createAssistantMessage([{ type: "thinking", thinking: "..." }], "length"));
+		expect(lengthStop.requests.length).toBe(1);
+		expect(lengthStop.assistant.stopReason).toBe("length");
+		expect(lengthStop.assistant.errorMessage).toBeUndefined();
+
+		// z.ai-style silent overflow: normal stop, empty content, input past the window.
+		// It must reach message_end untouched so compaction recovery can see it.
+		const overflowMessage = createAssistantMessage([{ type: "text", text: "" }]);
+		overflowMessage.usage.input = createModel().contextWindow + 1;
+		const overflow = await runOnce(overflowMessage);
+		expect(overflow.requests.length).toBe(1);
+		expect(overflow.assistant).toBe(overflowMessage);
+		expect(overflow.assistant.stopReason).toBe("stop");
+		expect(overflow.assistant.errorMessage).toBeUndefined();
+		expect(overflow.events.some((event) => event.type === "message_end" && event.message === overflowMessage)).toBe(
+			true,
+		);
 	});
 });

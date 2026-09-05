@@ -8,6 +8,7 @@ import {
 	type AssistantMessageEvent,
 	type Context,
 	EventStream,
+	isContextOverflow,
 	streamSimple,
 	type ToolResultMessage,
 	validateToolArguments,
@@ -490,7 +491,115 @@ async function runLoop(
 	await emit({ type: "agent_end", messages: newMessages });
 }
 
+const MAX_EMPTY_TURN_ATTEMPTS = 3;
+
+/**
+ * Synthetic `stopReasonRaw` for a turn that exhausted the empty-response retries.
+ * This is not a provider value: callers use it to tell this terminal case apart
+ * from a provider error that is worth retrying.
+ */
+export const EMPTY_TURN_RETRY_EXHAUSTED_STOP_REASON_RAW = "empty_response_retry_exhausted";
+
+/** Whether a message is the terminal empty-turn-retry failure. */
+export function isEmptyTurnRetryExhausted(message: AssistantMessage): boolean {
+	return message.stopReason === "error" && message.stopReasonRaw === EMPTY_TURN_RETRY_EXHAUSTED_STOP_REASON_RAW;
+}
+
+/**
+ * A final turn with no tool calls and no non-thinking content. Providers occasionally
+ * end a stream like this with a normal stop reason; treating it as completion would
+ * silently abandon the task, so it is retried instead. Error, abort, and length turns
+ * are excluded: they are signals of their own, and an identical resend cannot help.
+ */
+function isEmptyAssistantTurn(message: AssistantMessage): boolean {
+	if (message.stopReason === "error" || message.stopReason === "aborted" || message.stopReason === "length") {
+		return false;
+	}
+	return !message.content.some(
+		(part) => part.type === "toolCall" || (part.type === "text" && part.text.trim().length > 0),
+	);
+}
+
 async function streamAssistantResponse(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	streamFn?: StreamFn,
+): Promise<AssistantMessage> {
+	// A discarded attempt emits no message_end, so its spend would vanish from any
+	// accounting that reads usage off the transcript. Carry cost and output tokens
+	// forward onto the terminal message. Input tokens, cacheRead, cacheWrite and
+	// totalTokens are deliberately left at the final attempt's values: they describe
+	// the context that attempt actually occupied, and summing attempts would report a
+	// context size no single request ever had.
+	//
+	// That is a data-semantics rule, and it is the only reason that holds on every
+	// terminal shape. The carry below runs for whichever message ends the loop, so the
+	// terminal may be the synthesized error, a successful stop turn, or a length turn
+	// passing through - and on the latter two the overflow check is live: its case 2
+	// reads input + cacheRead on stop turns and its case 3 reads output on length
+	// turns. Inflating the context fields would therefore misclassify a real stop turn
+	// as an overflow, which is why they are never summed on any path.
+	const discarded = { cost: { ...EMPTY_USAGE.cost }, output: 0, attempts: 0 };
+	for (let attempt = 1; ; attempt++) {
+		const message = await streamAssistantResponseAttempt(context, config, signal, emit, streamFn);
+		// Overflow turns are never discarded, so compaction recovery can still see them.
+		// "Untouched" covers the retry decision and the token fields; when earlier attempts
+		// were discarded, their cost is still carried onto this message below.
+		const overflow = isContextOverflow(message, config.model.contextWindow);
+		if (isEmptyAssistantTurn(message) && !overflow) {
+			if (attempt < MAX_EMPTY_TURN_ATTEMPTS) {
+				discarded.attempts += 1;
+				discarded.output += message.usage.output;
+				discarded.cost.input += message.usage.cost.input;
+				discarded.cost.output += message.usage.cost.output;
+				discarded.cost.cacheRead += message.usage.cost.cacheRead;
+				discarded.cost.cacheWrite += message.usage.cost.cacheWrite;
+				discarded.cost.total += message.usage.cost.total;
+				// Drop the empty attempt so it is neither resent to the provider nor
+				// finalized as a transcript turn (message_end is what makes it durable).
+				context.messages.pop();
+				continue;
+			}
+			message.stopReason = "error";
+			message.stopReasonRaw = EMPTY_TURN_RETRY_EXHAUSTED_STOP_REASON_RAW;
+			message.errorMessage = `Model returned an empty response (no output content or tool calls) ${MAX_EMPTY_TURN_ATTEMPTS} times in a row`;
+		}
+		if (discarded.attempts > 0) {
+			// Carry the discarded spend onto whichever message ends the loop: the synthesized
+			// error, or a later attempt that succeeded. Without this the successful case loses
+			// every discarded attempt, because only the terminal message reaches message_end.
+			//
+			// Output tokens are added only when the terminal is not an overflow turn. Case 3 of
+			// isContextOverflow keys on usage.output === 0, and callers downstream re-run that
+			// check on this same message, so inflating it here would hide an overflow from
+			// compaction recovery. Cost has no such reader and is always carried.
+			//
+			// The guard is deliberately wider than the harm: only case 3 reads output, so a
+			// stop-turn overflow terminal also forgoes the discarded output tokens. That
+			// under-reports tokens on a path where the money is still carried in full, which
+			// is the conservative direction; narrowing it to stopReason === "length" would buy
+			// minor precision at the cost of tracking the check's internals here.
+			message.usage = {
+				...message.usage,
+				output: overflow ? message.usage.output : message.usage.output + discarded.output,
+				cost: {
+					input: message.usage.cost.input + discarded.cost.input,
+					output: message.usage.cost.output + discarded.cost.output,
+					cacheRead: message.usage.cost.cacheRead + discarded.cost.cacheRead,
+					cacheWrite: message.usage.cost.cacheWrite + discarded.cost.cacheWrite,
+					total: message.usage.cost.total + discarded.cost.total,
+				},
+			};
+		}
+		await emit({ type: "message_end", message });
+		return message;
+	}
+}
+
+/** Runs one assistant stream and places the final message in context, without emitting message_end. */
+async function streamAssistantResponseAttempt(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
@@ -507,7 +616,6 @@ async function streamAssistantResponse(
 			context.messages.push(finalMessage);
 			await emit({ type: "message_start", message: { ...finalMessage } });
 		}
-		await emit({ type: "message_end", message: finalMessage });
 		return finalMessage;
 	};
 
@@ -550,7 +658,9 @@ async function streamAssistantResponse(
 			context.messages.push(finalMessage);
 			await emit({ type: "message_start", message: { ...finalMessage } });
 		}
-		await emit({ type: "message_end", message: finalMessage });
+		// The empty-turn retry wrapper owns message_end for every attempt path; this
+		// fork-local stall return kept its own emit, which persisted the stalled turn
+		// twice (appendMessage has no dedupe) and double-fired extension handlers.
 		return finalMessage;
 	};
 
@@ -656,7 +766,6 @@ async function streamAssistantResponse(
 					if (!addedPartial) {
 						await emit({ type: "message_start", message: { ...finalMessage } });
 					}
-					await emit({ type: "message_end", message: finalMessage });
 					return finalMessage;
 				}
 			}
@@ -669,7 +778,6 @@ async function streamAssistantResponse(
 			context.messages.push(finalMessage);
 			await emit({ type: "message_start", message: { ...finalMessage } });
 		}
-		await emit({ type: "message_end", message: finalMessage });
 		return finalMessage;
 	} catch (error) {
 		clearStallTimer();

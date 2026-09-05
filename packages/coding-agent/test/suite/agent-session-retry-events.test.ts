@@ -1,4 +1,5 @@
 import type { AgentEvent, AgentTool } from "@earendil-works/pi-agent-core";
+import { EMPTY_TURN_RETRY_EXHAUSTED_STOP_REASON_RAW } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
@@ -248,6 +249,29 @@ describe("AgentSession retry and event characterization", () => {
 			expect(harness.session.isRetrying).toBe(false);
 		});
 	}
+
+	it("does not retry the terminal empty-turn failure", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
+		harnesses.push(harness);
+		harness.setResponses([
+			{
+				...fauxAssistantMessage("", {
+					stopReason: "error",
+					errorMessage: "Model returned an empty response (no output content or tool calls) 3 times in a row",
+				}),
+				stopReasonRaw: EMPTY_TURN_RETRY_EXHAUSTED_STOP_REASON_RAW,
+			},
+			fauxAssistantMessage("retry should not happen"),
+		]);
+
+		await harness.session.prompt("test");
+
+		// The agent loop already retried this three times in place; a session-level
+		// retry would resend the whole context without ever reaching compaction.
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.eventsOfType("auto_retry_start")).toEqual([]);
+		expect(harness.session.isRetrying).toBe(false);
+	});
 
 	it("retries generic provider errors", async () => {
 		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });

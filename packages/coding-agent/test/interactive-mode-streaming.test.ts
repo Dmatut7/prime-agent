@@ -6,6 +6,7 @@ import type { AgentConnectionSessionEvent } from "../src/modes/agent-connection/
 import { AgentActivityTracker } from "../src/modes/interactive/agent-activity.js";
 import type { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
 import type { FileChangeSummary } from "../src/modes/interactive/components/edit-summary.js";
+import { createMermaidMarkdownTransform } from "../src/modes/interactive/components/mermaid.js";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -158,6 +159,30 @@ describe("InteractiveMode streaming events", () => {
 		expect(fakeThis.streamingMessage).toBeUndefined();
 	});
 
+	test("drops the unmatched streaming bubble when the next message_start arrives", async () => {
+		const fakeThis = createFakeInteractiveModeThis();
+		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+		const droppedAttempt: AssistantMessage = {
+			...createAssistantMessage(""),
+			content: [{ type: "thinking", thinking: "pondering the discarded turn" }],
+		};
+
+		// An empty-turn retry emits a fresh message_start per attempt and no message_end
+		// for the dropped one. That message was popped and never persisted, so settling
+		// it here would leave a bubble that /resume does not show.
+		await handleEvent.call(fakeThis, { type: "message_start", message: droppedAttempt });
+		expect(fakeThis.chatContainer.children).toHaveLength(1);
+		expect(renderChat(fakeThis.chatContainer)).toContain("pondering the discarded turn");
+
+		await handleEvent.call(fakeThis, {
+			type: "message_start",
+			message: createAssistantMessage("second attempt"),
+		});
+
+		expect(fakeThis.chatContainer.children).toHaveLength(1);
+		expect(renderChat(fakeThis.chatContainer)).not.toContain("pondering the discarded turn");
+	});
+
 	test("renders assistant end events when attaching after all updates", async () => {
 		const fakeThis = createFakeInteractiveModeThis();
 		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
@@ -207,6 +232,35 @@ describe("InteractiveMode streaming events", () => {
 		expect(renderChat(fakeThis.chatContainer)).toContain("partial response");
 		expect(fakeThis.streamingComponent).toBeUndefined();
 		expect(fakeThis.streamingMessage).toBeUndefined();
+	});
+
+	test("defers mermaid rendering to message_end in final mode", async () => {
+		const fakeThis = createFakeInteractiveModeThis() as HandleEventThis & {
+			mermaidMarkdownTransform?: ReturnType<typeof createMermaidMarkdownTransform>;
+		};
+		fakeThis.mermaidMarkdownTransform = createMermaidMarkdownTransform({ getMode: () => "final" });
+		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+		const mermaidText = "```mermaid\nflowchart LR\n  A[Start] --> B[Done]\n```";
+
+		await handleEvent.call(fakeThis, {
+			type: "message_update",
+			message: createAssistantMessage(mermaidText),
+			assistantMessageEvent: {
+				type: "text_delta",
+				contentIndex: 0,
+				delta: mermaidText,
+				partial: createAssistantMessage(mermaidText),
+			},
+		});
+
+		expect(renderChat(fakeThis.chatContainer)).not.toContain("───▶");
+
+		await handleEvent.call(fakeThis, {
+			type: "message_end",
+			message: createAssistantMessage(mermaidText),
+		});
+
+		expect(renderChat(fakeThis.chatContainer)).toContain("───▶");
 	});
 
 	test("renders one agent-run edit total only when files changed", async () => {

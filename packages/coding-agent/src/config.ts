@@ -575,7 +575,11 @@ const MAX_LOG_BYTES = 5 * 1024 * 1024;
  */
 export function appendRotatingLog(logPath: string, message: string, maxBytes: number = MAX_LOG_BYTES): void {
 	try {
-		ensurePrivateFile(logPath);
+		// Only the first append has anything to create; ensuring the file again on
+		// every call re-walks the whole private directory tree. The append below
+		// still validates the target itself, so a symlinked log path is refused
+		// either way.
+		if (!existsSync(logPath)) ensurePrivateFile(logPath);
 		try {
 			if (statSync(logPath).size > maxBytes) {
 				// Drop any prior .old first: renameSync fails on Windows if it exists.

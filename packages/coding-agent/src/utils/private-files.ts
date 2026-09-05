@@ -36,6 +36,29 @@ export function requireNoFollow(flag: number | undefined): number {
 const NONBLOCK_FLAG = constants.O_NONBLOCK ?? 0;
 const DIRECTORY_FLAG = constants.O_DIRECTORY ?? 0;
 
+const VALIDATED_DIRECTORY_LIMIT = 256;
+/** Approximates a 64KiB write batch; log lines are close enough to ASCII that chars do. */
+const WRITE_BATCH_CHARS = 64 * 1024;
+/**
+ * Private directories already validated in this process. Re-walking every
+ * ancestor on each append costs dozens of syscalls on paths that run per log
+ * line and per session entry. A hit still lstat's the directory, so a deleted
+ * one is recreated, a swap for a symlink or a non-directory is refused, and a
+ * loosened mode is re-tightened; the checks on the file being written stay per
+ * call. What a hit skips is the ancestor walk only.
+ */
+const validatedDirectories = new Set<string>();
+
+function rememberValidatedDirectory(resolvedPath: string): void {
+	if (validatedDirectories.size >= VALIDATED_DIRECTORY_LIMIT) {
+		// FIFO, not LRU: insertion order is cheap to evict and this is a bound, not a
+		// cache-hit optimisation.
+		const oldest = validatedDirectories.values().next().value;
+		if (oldest !== undefined) validatedDirectories.delete(oldest);
+	}
+	validatedDirectories.add(resolvedPath);
+}
+
 function pathExistsLexical(path: string): boolean {
 	try {
 		lstatSync(path);
@@ -109,6 +132,46 @@ export function assertRegularFileNoSymlink(path: string): void {
 }
 
 export function ensurePrivateDirectory(path: string): void {
+	const resolved = resolve(path);
+	// Check the resolved path, not the caller's spelling: a trailing slash or "/."
+	// makes POSIX lstat follow a symlinked final component, so an unnormalized check
+	// would see the link's 0700 target and accept the link.
+	if (validatedDirectories.has(resolved) && stillUsablePrivateDirectory(resolved)) return;
+	validatedDirectories.delete(resolved);
+	// Validate the resolved spelling too, so the key and the checked object are the
+	// same string everywhere in this function. resolve() is idempotent, so this does
+	// not change behaviour.
+	validatePrivateDirectory(resolved);
+	rememberValidatedDirectory(resolved);
+}
+
+/**
+ * One lstat on the memo fast path. It keeps the properties a hit must not lose:
+ * a directory that disappeared is recreated by the full validation, a directory
+ * swapped for a symlink or a non-directory is refused by it, and a directory
+ * whose mode was loosened externally is re-tightened by it. The mode comes from
+ * the same lstat, so re-checking it costs nothing. Only the ancestor walk is
+ * skipped, which needs write access to an ancestor to subvert.
+ *
+ * On win32 a directory's mode bits do not report 0700, so the hit condition
+ * `(stats.mode & 0o777) === PRIVATE_DIRECTORY_MODE` is not satisfied and every call
+ * takes the full path: same behaviour as before the memo, at the cost of one extra
+ * lstat. Nothing here depends on a platform this test suite cannot observe.
+ */
+function stillUsablePrivateDirectory(resolvedPath: string): boolean {
+	try {
+		const stats = lstatSync(resolvedPath);
+		// !isSymbolicLink() is redundant under lstat semantics (a link to a directory
+		// reports isDirectory() false), and is kept as explicit defence in depth rather
+		// than nailed by its own test. The other two conditions each have one.
+		return !stats.isSymbolicLink() && stats.isDirectory() && (stats.mode & 0o777) === PRIVATE_DIRECTORY_MODE;
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+		throw error;
+	}
+}
+
+function validatePrivateDirectory(path: string): void {
 	ensureNoSymlinkPath(path, PRIVATE_DIRECTORY_MODE);
 	const stats = lstatSync(path);
 	if (stats.isSymbolicLink() || !stats.isDirectory()) {
@@ -238,7 +301,19 @@ export function writePrivateFileAtomicLines(
 			constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | requireNoFollow(constants.O_NOFOLLOW),
 			PRIVATE_FILE_MODE,
 		);
-		for (const line of lines) writeFileSync(fd, line);
+		// Batch the writes: callers pass a per-entry generator, so one syscall per
+		// line turns a 5000-entry session into 5000 syscalls. Atomicity is unchanged
+		// - the temp file is still fsynced and renamed, and a failure mid-batch leaves
+		// the finally block to remove the temp without renaming.
+		let batch = "";
+		for (const line of lines) {
+			batch += line;
+			if (batch.length >= WRITE_BATCH_CHARS) {
+				writeFileSync(fd, batch);
+				batch = "";
+			}
+		}
+		if (batch.length > 0) writeFileSync(fd, batch);
 		fsyncSync(fd);
 		if (metadata && process.platform !== "win32") fchownSync(fd, metadata.uid, metadata.gid);
 		closeSync(fd);
@@ -267,8 +342,13 @@ export function appendPrivateFile(path: string, content: string, options: { priv
 		fd = openRegularFileNoSymlink(path, constants.O_WRONLY | constants.O_APPEND);
 	}
 	try {
-		if (!fstatSync(fd).isFile()) throw new Error(`Refusing to use non-regular private file: ${path}`);
-		setPrivateFileMode(fd, path, PRIVATE_FILE_MODE);
+		const stats = fstatSync(fd);
+		if (!stats.isFile()) throw new Error(`Refusing to use non-regular private file: ${path}`);
+		// The fstat is already paid for, so only chmod when the mode actually drifted.
+		// win32 keeps the unconditional chmod: its mode bits do not report 0600.
+		if (process.platform === "win32" || (stats.mode & 0o777) !== PRIVATE_FILE_MODE) {
+			setPrivateFileMode(fd, path, PRIVATE_FILE_MODE);
+		}
 		writeFileSync(fd, content);
 	} finally {
 		closeSync(fd);

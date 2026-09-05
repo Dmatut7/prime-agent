@@ -2,12 +2,14 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { isDaemonSessionSummary } from "../src/cli/daemon-launch.js";
 import {
 	createDaemonCommandEnvelope,
 	createDaemonEventEnvelope,
 	createDaemonEventMeta,
 	createDaemonReplayInfo,
 	DAEMON_COMMAND_COMPATIBILITY,
+	DAEMON_COMMAND_PLANE,
 	DAEMON_CONTROL_PLANE_COMMANDS,
 	DAEMON_DEFAULT_SERVER_CAPABILITIES,
 	DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES,
@@ -18,10 +20,13 @@ import {
 	DAEMON_SCHEMA_ID,
 	DAEMON_SCHEMA_REVISION,
 	type DaemonCommand,
+	type DaemonCommandCompatibility,
+	type DaemonDeclaredCapability,
 	type DaemonOutbound,
 	getDaemonCommandCompatibilities,
 	isDaemonCommandEnvelope,
 	isDaemonMutatingCommand,
+	isSessionPlaneDaemonCommand,
 	missingDeclaredCommandCapability,
 	normalizeDeclaredCapabilities,
 	salvageDaemonCommandId,
@@ -43,6 +48,7 @@ describe("daemon protocol helpers", () => {
 			orphanProcessJournalPath: "/state/orphans.jsonl",
 			supervisorSocketPath: "/tmp/supervisor.sock",
 			authenticationToken: "local-worker-token",
+			workerInstanceId: "instance-1",
 			rootActiveSessionId: "active",
 			sessionFile: "/sessions/root.jsonl",
 			createdAt: "2026-01-01T00:00:00.000Z",
@@ -72,6 +78,7 @@ describe("daemon protocol helpers", () => {
 		expect(durable.createCommand).toEqual({ type: "create", sessionPath: "/sessions/root.jsonl" });
 		expect(durable).toMatchObject({
 			workerId: "worker",
+			workerInstanceId: "instance-1",
 			sessionFile: "/sessions/root.jsonl",
 			sessionDir: "/legacy/sessions",
 			telemetryDisabled: true,
@@ -404,11 +411,71 @@ describe("daemon protocol helpers", () => {
 		expect(isDaemonMutatingCommand({ type: "attach" })).toBe(false);
 		expect(isDaemonMutatingCommand({ type: "reattach" })).toBe(false);
 		expect(isDaemonMutatingCommand({ type: "wait_for_idle" })).toBe(false);
+		// Journal replays after a reconnect would skip re-subscribing the new socket.
+		expect(isDaemonMutatingCommand({ type: "roster_subscribe" })).toBe(false);
+		expect(isDaemonMutatingCommand({ type: "roster_unsubscribe" })).toBe(false);
 		// A pure wait must not hold the drain latch: a long headless-completion
 		// barrier (RLM quiescence) would otherwise block update-restart and
 		// idle eviction until it resolves.
 		expect(isDaemonMutatingCommand({ type: "wait_for_headless_completion" })).toBe(false);
 		expect(isDaemonMutatingCommand({ type: "switch_session" })).toBe(true);
+	});
+
+	it("keeps the roster push additive for pre-roster clients", () => {
+		// Subscription commands and the push are capability-gated; a client that
+		// never sends roster_subscribe is never written a roster_update.
+		expect(DAEMON_COMMAND_COMPATIBILITY.roster_subscribe).toEqual({ minProtocol: 7, capability: "agent_roster" });
+		expect(DAEMON_COMMAND_COMPATIBILITY.roster_unsubscribe).toEqual({ minProtocol: 7, capability: "agent_roster" });
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.roster_update).toEqual({ minProtocol: 7, capability: "agent_roster" });
+		// list responses now carry rosterStatus/statusLabel/lastHeardFromAt; the
+		// summary validator pre-roster clients shipped stays open to additive fields.
+		expect(
+			isDaemonSessionSummary({
+				id: "session-1",
+				activeSessionId: "active-1",
+				rosterStatus: "running",
+				statusLabel: "queued",
+				lastHeardFromAt: "2026-08-01T12:00:00.000Z",
+			}),
+		).toBe(true);
+	});
+
+	it("capability-gates direct worker transport discovery as a supervisor-only surface", () => {
+		expect(DAEMON_COMMAND_COMPATIBILITY.get_direct_worker_transport).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 25,
+			capability: "direct_peer_transport",
+		});
+		// Only the supervisor issues tickets; workers and standalone daemons must not advertise it.
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).not.toContain("direct_peer_transport");
+		expect(isDaemonMutatingCommand({ type: "get_direct_worker_transport" })).toBe(false);
+	});
+
+	it("keeps every command capability declarable by a first-party client", () => {
+		const session = new Set<DaemonDeclaredCapability>(DAEMON_FIRST_PARTY_SESSION_CAPABILITIES);
+		const control = new Set<DaemonDeclaredCapability>(DAEMON_FIRST_PARTY_CONTROL_CAPABILITIES);
+		for (const [command, compatibility] of Object.entries(DAEMON_COMMAND_COMPATIBILITY) as [
+			string,
+			DaemonCommandCompatibility,
+		][]) {
+			if (compatibility.capability === undefined) continue;
+			const set = DAEMON_CONTROL_PLANE_COMMANDS.has(command) ? control : session;
+			expect(set.has(compatibility.capability), `${command} requires ${compatibility.capability}`).toBe(true);
+		}
+		// getDaemonCommandCompatibilities() adds this one conditionally (list + omitStreamingMessages),
+		// so the loop above cannot see it. Drop this line only together with the wire field.
+		expect(session.has("list_without_streaming_messages")).toBe(true);
+		// A capability outside the known set is silently stripped before the gate ever sees it.
+		expect(normalizeDeclaredCapabilities([...session])).toEqual([...session]);
+		expect(normalizeDeclaredCapabilities([...control])).toEqual([...control]);
+	});
+
+	it("classifies every command plane and never defaults unknown commands to the session plane", () => {
+		// A worker "list" means only that worker's sessions; the supervisor list is authoritative.
+		expect(DAEMON_COMMAND_PLANE.list).toBe("control");
+		expect(DAEMON_COMMAND_PLANE.prompt).toBe("session");
+		expect(DAEMON_COMMAND_PLANE.declare_client_capabilities).toBe("control");
+		expect(isSessionPlaneDaemonCommand("no_such_command")).toBe(false);
 	});
 
 	it("reports replay availability from resume cursors", () => {

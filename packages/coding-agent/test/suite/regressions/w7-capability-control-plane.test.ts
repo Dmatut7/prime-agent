@@ -215,6 +215,16 @@ describe("W7 capability gating and control-plane auth", () => {
 		try {
 			const heartbeats = await client.request({ type: "heartbeats_list" }, 5000);
 			expect(heartbeats.success).toBe(true);
+			// Positive control for the omit leg: the same first-party set carries
+			// list_without_streaming_messages, so the gate must admit the command
+			// instead of naming the capability. This supervisor has no resident
+			// session, so the strip itself is pinned in
+			// test/daemon-supervisor-streaming-list.test.ts.
+			const omitted = await client.request({ type: "list", omitStreamingMessages: true }, 5000);
+			expect(omitted.success).toBe(true);
+			// DaemonResponse discriminates on success; data only exists on the true arm.
+			if (!omitted.success) throw new Error(omitted.error);
+			expect(Array.isArray((omitted.data as { sessions: unknown[] }).sessions)).toBe(true);
 			const shutdown = await client.request({ type: "shutdown" }, 5000);
 			expect(shutdown).toMatchObject({
 				success: false,
