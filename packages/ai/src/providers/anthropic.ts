@@ -1124,18 +1124,25 @@ function convertMessages(
 						continue;
 					}
 					if (block.thinking.trim().length === 0) continue;
+					const sanitizedThinking = sanitizeSurrogates(block.thinking);
 					// If thinking signature is missing/empty (e.g., from aborted stream),
 					// convert to plain text block without <thinking> tags to avoid API rejection
-					// and prevent Claude from mimicking the tags in responses
-					if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
+					// and prevent Claude from mimicking the tags in responses. Also degrade when
+					// sanitization modified the text: the signature is bound to the original
+					// text, and replaying it with modified text fails signature validation.
+					if (
+						!block.thinkingSignature ||
+						block.thinkingSignature.trim().length === 0 ||
+						sanitizedThinking !== block.thinking
+					) {
 						blocks.push({
 							type: "text",
-							text: sanitizeSurrogates(block.thinking),
+							text: sanitizedThinking,
 						});
 					} else {
 						blocks.push({
 							type: "thinking",
-							thinking: sanitizeSurrogates(block.thinking),
+							thinking: sanitizedThinking,
 							signature: block.thinkingSignature,
 						});
 					}

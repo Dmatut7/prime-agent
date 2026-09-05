@@ -693,13 +693,20 @@ function convertMessages(
 								// Signatures arrive after thinking deltas. If a partial or externally
 								// persisted message lacks a signature, Bedrock rejects the replayed
 								// reasoning block. Fall back to plain text, matching Anthropic.
-								if (!c.thinkingSignature || c.thinkingSignature.trim().length === 0) {
-									contentBlocks.push({ text: sanitizeSurrogates(c.thinking) });
+								// Also fall back when sanitization modified the text: the signature is
+								// bound to the original text and would fail validation on replay.
+								const sanitizedThinking = sanitizeSurrogates(c.thinking);
+								if (
+									!c.thinkingSignature ||
+									c.thinkingSignature.trim().length === 0 ||
+									sanitizedThinking !== c.thinking
+								) {
+									contentBlocks.push({ text: sanitizedThinking });
 								} else {
 									contentBlocks.push({
 										reasoningContent: {
 											reasoningText: {
-												text: sanitizeSurrogates(c.thinking),
+												text: sanitizedThinking,
 												signature: c.thinkingSignature,
 											},
 										},
