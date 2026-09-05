@@ -42,9 +42,28 @@ Prime Agent is an open-source coding and research agent for general and long-run
 - The **[Continual Harness](https://arxiv.org/abs/2605.09998)** stores supplemental prompts, memories, skill descriptions, and reusable subagent specifications as durable state that Prime Agent can refine through small, evidence-backed updates, local to the session by default.
 
 > [!NOTE]
-> 这是 [Dmatut7/prime-agent](https://github.com/Dmatut7/prime-agent) 的 fork，不是官方仓库。官方 [PrimeIntellect-ai/prime-agent](https://github.com/PrimeIntellect-ai/prime-agent) 不接受未邀请的 PR。下面这些改动只在本仓库的 `fix/subagent-storm-and-cjk-lag` 分支。
+> 本仓库是 Prime Agent 的**非官方独立维护版本**，不是官方仓库。官方仓库是 [PrimeIntellect-ai/prime-agent](https://github.com/PrimeIntellect-ai/prime-agent)。
 
-## 这个 fork 改了什么
+## 项目介绍
+
+[Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) 是 Prime Intellect 开源的终端 coding / research agent，面向通用与长时自治任务，核心是两个抽象：把上下文当变量、把递归子代理当函数调用的 [Recursive Language Model（RLM）](https://www.primeintellect.ai/blog/rlm)，以及把补充提示、记忆、技能与子代理规格作为可自我精炼持久状态的 Continual Harness。
+
+本仓库是它的**非官方独立维护版本**（unofficial / independent），与官方平行演进：定期从官方 main `git merge` 同步（当前已跟进 0.9.x 线），在其上维护一条自己的开发线。所有改动都标注来源与依据，不冒充官方、不歪曲上游。
+
+本线当前重点：**本地 REPL kernel**（以极简 CPython REPL 承载 RLM 循环）、**daemon 协议演进**、**性能与正确性迭代**（由多模型交叉复审驱动的缺陷修复），以及 **upstream 同步策略**。只想要官方支持体验的，请用[官方仓库](https://github.com/PrimeIntellect-ai/prime-agent)；想跟进这条线的 REPL kernel / 协议 / 性能改动、或在其上二次开发的，本仓更合适。
+
+与 upstream 的协作以**单向同步**为主：定期 merge 官方 main（保留本地独有实现、逐块解冲突并记录取舍），把上游更新跟进到本线，而不向官方推送。欢迎向本仓提 PR（见 [`CONTRIBUTING.md`](CONTRIBUTING.md)）；希望回馈官方的改动，建议先在本仓验证、整理成可独立 cherry-pick 的提交，再走官方贡献流程。同步历史与取舍记录见 [`FORK_NOTES.md`](FORK_NOTES.md) 与 [`docs/fork/`](docs/fork/)。
+
+## 仓库迁移说明（fork → 独立仓）
+
+本仓 `Dmatut7/prime-agent` 是这条开发线的**唯一主仓**，正脱离官方 fork 网络转为独立仓库（detach）：新提交、issue、release 只进这里。此前两种旧形态都不再作为主开发入口：
+
+- **fork 形式的 `Dmatut7/prime-agent`**：detach 后 URL 不变（仍是 `github.com/Dmatut7/prime-agent`），只是不再显示为官方 fork、也不再被 GitHub 默认搜索当作 fork 过滤掉。bookmark 过这个地址的，照旧有效。
+- **`Dmatut7/prime-agent-x`**（“performance-optimized iteration”）：内容已并入本仓，作历史 / 镜像保留，不再单独开发。bookmark 过它的，请改到 `github.com/Dmatut7/prime-agent`。
+
+找不到新仓时：在 GitHub 搜索 `prime-agent`（不勾 Include forks 也能命中本独立仓），或直接访问 `github.com/Dmatut7/prime-agent`。
+
+## 本仓改了什么（相对官方 main）
 
 基于官方 main，R3 已同步到 0.9.x 线（upstream `d74a75fea`，40 个上游提交）。针对两件实测过的事：**子代理一开 worker 打满**，**中文会话一长就卡输入**。
 
@@ -76,7 +95,7 @@ Prime Agent is an open-source coding and research agent for general and long-run
 官方 `install.sh` 装的还是没有这些改动的发布版。要跑本 fork：
 
 ```bash
-git clone -b fix/subagent-storm-and-cjk-lag https://github.com/Dmatut7/prime-agent.git
+git clone https://github.com/Dmatut7/prime-agent.git   # 默认分支 merge/repl-kernel(含本线全部改动)
 cd prime-agent
 ./prime-agent.sh --daemon-socket /tmp/prime-agent-test/daemon.sock
 ```
