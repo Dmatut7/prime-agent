@@ -226,7 +226,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 
 				if (candidate?.finishReason) {
 					output.stopReason = mapStopReason(candidate.finishReason);
-					if (output.content.some((b) => b.type === "toolCall")) {
+					if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
 						output.stopReason = "toolUse";
 					}
 					if (output.stopReason === "error") {
