@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
 import { stream } from "../src/stream.js";
@@ -77,6 +79,18 @@ async function testTokensOnAbort<TApi extends Api>(llm: Model<TApi>, options: St
 			expect(msg.usage.cost.total).toBeGreaterThan(0);
 		}
 	}
+}
+
+/**
+ * Whether a provider still reports token usage when the stream is aborted mid-way.
+ *
+ * Xiaomi MiMo only reports streaming usage in the final `message_stop` chunk, so an aborted stream
+ * never carries token stats and the four Xiaomi describes below skip. Keeping that in one predicate
+ * makes the skip conditional and documented instead of an unexplained unconditional `it.skip`, and
+ * the offline describe at the bottom of this file pins the predicate down.
+ */
+function reportsUsageAfterAbort<TApi extends Api>(llm: Model<TApi>): boolean {
+	return !llm.provider.startsWith("xiaomi");
 }
 
 describe("Token Statistics on Abort", () => {
@@ -210,34 +224,49 @@ describe("Token Statistics on Abort", () => {
 	describe.skipIf(!process.env.XIAOMI_API_KEY)("Xiaomi MiMo (API billing) Provider", () => {
 		const llm = getModel("xiaomi", "mimo-v2.5-pro");
 
-		// Xiaomi only reports this streaming usage at message_stop, after an abort.
-		it.skip("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
-			await testTokensOnAbort(llm);
-		});
+		it.skipIf(!reportsUsageAfterAbort(llm))(
+			"should include token stats when aborted mid-stream",
+			{ retry: 3, timeout: 30000 },
+			async () => {
+				await testTokensOnAbort(llm);
+			},
+		);
 	});
 
 	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_CN_API_KEY)("Xiaomi MiMo Token Plan (CN) Provider", () => {
 		const llm = getModel("xiaomi-token-plan-cn", "mimo-v2.5-pro");
 
-		it.skip("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
-			await testTokensOnAbort(llm);
-		});
+		it.skipIf(!reportsUsageAfterAbort(llm))(
+			"should include token stats when aborted mid-stream",
+			{ retry: 3, timeout: 30000 },
+			async () => {
+				await testTokensOnAbort(llm);
+			},
+		);
 	});
 
 	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_AMS_API_KEY)("Xiaomi MiMo Token Plan (AMS) Provider", () => {
 		const llm = getModel("xiaomi-token-plan-ams", "mimo-v2.5-pro");
 
-		it.skip("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
-			await testTokensOnAbort(llm);
-		});
+		it.skipIf(!reportsUsageAfterAbort(llm))(
+			"should include token stats when aborted mid-stream",
+			{ retry: 3, timeout: 30000 },
+			async () => {
+				await testTokensOnAbort(llm);
+			},
+		);
 	});
 
 	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_SGP_API_KEY)("Xiaomi MiMo Token Plan (SGP) Provider", () => {
 		const llm = getModel("xiaomi-token-plan-sgp", "mimo-v2.5-pro");
 
-		it.skip("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
-			await testTokensOnAbort(llm);
-		});
+		it.skipIf(!reportsUsageAfterAbort(llm))(
+			"should include token stats when aborted mid-stream",
+			{ retry: 3, timeout: 30000 },
+			async () => {
+				await testTokensOnAbort(llm);
+			},
+		);
 	});
 
 	describe("Anthropic OAuth Provider", () => {
@@ -289,5 +318,28 @@ describe("Token Statistics on Abort", () => {
 		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
 			await testTokensOnAbort(llm);
 		});
+	});
+});
+
+describe("abort usage reporting (offline, no API key)", () => {
+	it("skips the Xiaomi MiMo providers, which only report usage in the final message_stop chunk", () => {
+		expect(reportsUsageAfterAbort(getModel("xiaomi", "mimo-v2.5-pro"))).toBe(false);
+		expect(reportsUsageAfterAbort(getModel("xiaomi-token-plan-cn", "mimo-v2.5-pro"))).toBe(false);
+		expect(reportsUsageAfterAbort(getModel("xiaomi-token-plan-ams", "mimo-v2.5-pro"))).toBe(false);
+		expect(reportsUsageAfterAbort(getModel("xiaomi-token-plan-sgp", "mimo-v2.5-pro"))).toBe(false);
+	});
+
+	it("keeps mid-stream abort coverage on for providers that do report usage while streaming", () => {
+		expect(reportsUsageAfterAbort(getModel("anthropic", "claude-sonnet-4-6"))).toBe(true);
+		expect(reportsUsageAfterAbort(getModel("google", "gemini-2.5-flash"))).toBe(true);
+		expect(reportsUsageAfterAbort(getModel("minimax", "MiniMax-M2.7"))).toBe(true);
+		expect(reportsUsageAfterAbort(getModel("openai", "gpt-4o-mini"))).toBe(true);
+		expect(reportsUsageAfterAbort(getKimiCodingTestModel())).toBe(true);
+	});
+
+	it("keeps every skip in this file conditional", () => {
+		const source = readFileSync(fileURLToPath(import.meta.url), "utf-8");
+		expect(source).not.toMatch(/(?<![\w.])it\.skip\(/);
+		expect((source.match(/it\.skipIf\(/g) ?? []).length).toBeGreaterThanOrEqual(8);
 	});
 });

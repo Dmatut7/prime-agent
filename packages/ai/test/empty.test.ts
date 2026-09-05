@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
+import { fauxAssistantMessage, fauxText, registerFauxProvider } from "../src/providers/faux.js";
 import { complete } from "../src/stream.js";
 import type { Api, AssistantMessage, Context, Model, StreamOptions, UserMessage } from "../src/types.js";
 import { getKimiCodingTestModel } from "./kimi-test-model.js";
@@ -19,6 +20,48 @@ const oauthTokens = await Promise.all([
 ]);
 const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken] = oauthTokens;
 
+/**
+ * Assert the proposition this file covers: an empty / whitespace-only user message is handled
+ * deliberately, meaning the provider either rejects it with a diagnosable error or answers with
+ * real content.
+ *
+ * The previous shape of this check only asserted facts that hold by construction - an error
+ * response always carries `errorMessage`, and `content` is always an array - so a hollow success
+ * (`content: []` with `stopReason: "stop"`), a stringified-`undefined` error, and an aborted
+ * response nobody asked for all counted as passes. The offline describe at the bottom of this file
+ * pins each of those cases down with the faux provider.
+ */
+function expectEmptyInputHandled(response: AssistantMessage): void {
+	expect(response.role).toBe("assistant");
+	// No abort signal is passed anywhere in this file, so an aborted response is a fault.
+	expect(response.stopReason).not.toBe("aborted");
+
+	if (response.stopReason === "error") {
+		// Rejecting an empty message is a legitimate outcome, but only if the rejection says why.
+		const trimmed = (response.errorMessage ?? "").trim();
+		expect(typeof response.errorMessage).toBe("string");
+		expect(trimmed.length).toBeGreaterThan(0);
+		expect(trimmed).not.toMatch(/^(undefined|null|NaN|\[object Object\])$/i);
+		return;
+	}
+
+	// The provider tolerated the empty input, so it has to have produced something real.
+	expect(response.content.length).toBeGreaterThan(0);
+	expect(hasSubstantiveContent(response.content)).toBe(true);
+}
+
+function hasSubstantiveContent(content: AssistantMessage["content"]): boolean {
+	return content.some((block) => {
+		if (block.type === "text") {
+			return block.text.trim().length > 0;
+		}
+		if (block.type === "thinking") {
+			return block.thinking.trim().length > 0 || block.redacted === true;
+		}
+		return block.name.length > 0;
+	});
+}
+
 async function testEmptyMessage<TApi extends Api>(llm: Model<TApi>, options: StreamOptionsWithExtras = {}) {
 	const emptyMessage: UserMessage = {
 		role: "user",
@@ -32,13 +75,7 @@ async function testEmptyMessage<TApi extends Api>(llm: Model<TApi>, options: Str
 
 	const response = await complete(llm, context, options);
 
-	expect(response).toBeDefined();
-	expect(response.role).toBe("assistant");
-	if (response.stopReason === "error") {
-		expect(response.errorMessage).toBeDefined();
-	} else {
-		expect(response.content).toBeDefined();
-	}
+	expectEmptyInputHandled(response);
 }
 
 async function testEmptyStringMessage<TApi extends Api>(llm: Model<TApi>, options: StreamOptionsWithExtras = {}) {
@@ -54,14 +91,7 @@ async function testEmptyStringMessage<TApi extends Api>(llm: Model<TApi>, option
 
 	const response = await complete(llm, context, options);
 
-	expect(response).toBeDefined();
-	expect(response.role).toBe("assistant");
-
-	if (response.stopReason === "error") {
-		expect(response.errorMessage).toBeDefined();
-	} else {
-		expect(response.content).toBeDefined();
-	}
+	expectEmptyInputHandled(response);
 }
 
 async function testWhitespaceOnlyMessage<TApi extends Api>(llm: Model<TApi>, options: StreamOptionsWithExtras = {}) {
@@ -77,14 +107,7 @@ async function testWhitespaceOnlyMessage<TApi extends Api>(llm: Model<TApi>, opt
 
 	const response = await complete(llm, context, options);
 
-	expect(response).toBeDefined();
-	expect(response.role).toBe("assistant");
-
-	if (response.stopReason === "error") {
-		expect(response.errorMessage).toBeDefined();
-	} else {
-		expect(response.content).toBeDefined();
-	}
+	expectEmptyInputHandled(response);
 }
 
 async function testEmptyAssistantMessage<TApi extends Api>(llm: Model<TApi>, options: StreamOptionsWithExtras = {}) {
@@ -124,15 +147,7 @@ async function testEmptyAssistantMessage<TApi extends Api>(llm: Model<TApi>, opt
 
 	const response = await complete(llm, context, options);
 
-	expect(response).toBeDefined();
-	expect(response.role).toBe("assistant");
-
-	if (response.stopReason === "error") {
-		expect(response.errorMessage).toBeDefined();
-	} else {
-		expect(response.content).toBeDefined();
-		expect(response.content.length).toBeGreaterThan(0);
-	}
+	expectEmptyInputHandled(response);
 }
 
 describe("AI Providers Empty Message Tests", () => {
@@ -685,5 +700,110 @@ describe("AI Providers Empty Message Tests", () => {
 				await testEmptyAssistantMessage(llm, { apiKey: openaiCodexToken });
 			},
 		);
+	});
+
+	describe("empty-input contract (offline, faux provider, no API key)", () => {
+		const registrations: Array<{ unregister: () => void }> = [];
+
+		afterEach(() => {
+			for (const registration of registrations.splice(0)) {
+				registration.unregister();
+			}
+		});
+
+		function fauxModel(response: AssistantMessage): Model<Api> {
+			const registration = registerFauxProvider();
+			registrations.push(registration);
+			registration.setResponses([response]);
+			return registration.getModel();
+		}
+
+		// The check this file used before: every branch asserts something that is true by
+		// construction, so it accepted all of the malformed responses below. It is kept only as the
+		// contrast half of the lock - if the live assertions ever weaken back to this shape, the
+		// two halves stop disagreeing and the test fails.
+		function previousShapeCheck(response: AssistantMessage): void {
+			expect(response).toBeDefined();
+			expect(response.role).toBe("assistant");
+			if (response.stopReason === "error") {
+				expect(response.errorMessage).toBeDefined();
+			} else {
+				expect(response.content).toBeDefined();
+			}
+		}
+
+		const malformed: Array<[string, AssistantMessage]> = [
+			["a hollow success with no content", fauxAssistantMessage([], { stopReason: "stop" })],
+			["an error without a diagnostic message", fauxAssistantMessage([], { stopReason: "error", errorMessage: "" })],
+			[
+				"an aborted response although nothing was aborted",
+				fauxAssistantMessage("partial", { stopReason: "aborted", errorMessage: "Request was aborted" }),
+			],
+			["content blocks that are all whitespace", fauxAssistantMessage([fauxText("  \n\t ")])],
+		];
+
+		it.each(malformed)("rejects %s, which the previous shape accepted", (_label, response) => {
+			expect(() => previousShapeCheck(response)).not.toThrow();
+			expect(() => expectEmptyInputHandled(response)).toThrow();
+		});
+
+		it("accepts a substantive reply", () => {
+			expect(() => expectEmptyInputHandled(fauxAssistantMessage("How can I help you?"))).not.toThrow();
+		});
+
+		it("accepts a rejection that says why the empty message was refused", () => {
+			const rejection = fauxAssistantMessage([], {
+				stopReason: "error",
+				errorMessage: "all messages must have non-empty content except for the final assistant message",
+			});
+			expect(() => expectEmptyInputHandled(rejection)).not.toThrow();
+		});
+
+		it("accepts a redacted thinking block as a substantive reply", () => {
+			const redacted: AssistantMessage = {
+				...fauxAssistantMessage([]),
+				content: [{ type: "thinking", thinking: "", thinkingSignature: "opaque", redacted: true }],
+			};
+			expect(() => expectEmptyInputHandled(redacted)).not.toThrow();
+		});
+
+		it("fails end to end when the provider returns a hollow success for an empty message", async () => {
+			const llm = fauxModel(fauxAssistantMessage([], { stopReason: "stop" }));
+			await expect(testEmptyMessage(llm)).rejects.toThrow();
+		});
+
+		it("fails end to end when the provider returns an undiagnosed error for an empty message", async () => {
+			const llm = fauxModel(fauxAssistantMessage([], { stopReason: "error", errorMessage: "" }));
+			await expect(testEmptyStringMessage(llm)).rejects.toThrow();
+		});
+
+		it("fails end to end when the provider aborts although nothing was aborted", async () => {
+			const llm = fauxModel(
+				fauxAssistantMessage("partial", { stopReason: "aborted", errorMessage: "Request was aborted" }),
+			);
+			await expect(testWhitespaceOnlyMessage(llm)).rejects.toThrow();
+		});
+
+		it("passes end to end when the provider answers an empty message with real content", async () => {
+			const llm = fauxModel(fauxAssistantMessage("You sent an empty message. What would you like to do?"));
+			await testEmptyMessage(llm);
+		});
+
+		it("passes end to end when the provider rejects an empty message with a reason", async () => {
+			const llm = fauxModel(
+				fauxAssistantMessage([], { stopReason: "error", errorMessage: "messages.0.content: empty is not allowed" }),
+			);
+			await testEmptyMessage(llm);
+		});
+
+		it("passes end to end for an empty assistant message followed by a real reply", async () => {
+			const llm = fauxModel(fauxAssistantMessage("Responding after the empty assistant turn."));
+			await testEmptyAssistantMessage(llm);
+		});
+
+		it("fails end to end when the conversation with an empty assistant message yields no content", async () => {
+			const llm = fauxModel(fauxAssistantMessage([], { stopReason: "stop" }));
+			await expect(testEmptyAssistantMessage(llm)).rejects.toThrow();
+		});
 	});
 });

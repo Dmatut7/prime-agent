@@ -19,6 +19,7 @@
 - Do not preserve backward compatibility unless the user explicitly asks for it
 - Never hardcode key checks with, eg. `matchesKey(keyData, "ctrl+x")`. All keybindings must be configurable. Add default to matching object (`DEFAULT_EDITOR_KEYBINDINGS` or `DEFAULT_APP_KEYBINDINGS`)
 - NEVER modify `packages/ai/src/models.generated.ts` directly. Update `packages/ai/scripts/generate-models.ts` instead.
+- Never probe private members from tests: no `as unknown as { _foo: ... }` casts, no same-file shadow types (`type XInternals = { _foo: ... }`) cast to with `as unknown as`, no `vi.spyOn(target, "_foo")`. Renaming a private member must not be able to break a test silently. Drive the public entry point and assert on observable output. `npm run check:test-hygiene` (CI job `test-hygiene`) fails on new probes; the frozen stock lives in `scripts/test-private-probe-baseline.json` and only shrinks.
 
 ## Commands
 
@@ -31,6 +32,9 @@
 - When writing tests, run them, identify issues in either the test or implementation, and iterate until fixed.
 - For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` plus the faux provider. Do not use real provider APIs, real API keys, or paid tokens.
 - Put issue-specific regressions under `packages/coding-agent/test/suite/regressions/` and name them `<issue-number>-<short-slug>.test.ts`.
+- Guard data-driven loops: an `expect` inside `for (const item of dataFromProduction)` needs `expect(data.length).toBeGreaterThan(0)` (or an explicit expected set) before the loop, otherwise an empty collection passes without asserting anything.
+- No unconditional `it.skip` / `describe.skip`. Use `it.skipIf(<decidable condition>)` and keep the reason in a named predicate or a comment, so a skip is a statement about a capability and not a silently dropped test.
+- Test helpers must assert the proposition under test, not shape facts that hold by construction (`errorMessage` is always set on an error response, `content` is always an array). An error outcome may count as a pass only when it carries a diagnostic and the proposition allows that outcome.
 
 ## Daemon Protocol Changes
 

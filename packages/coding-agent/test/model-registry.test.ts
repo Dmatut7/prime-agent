@@ -105,6 +105,10 @@ describe("ModelRegistry", () => {
 			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
 			const anthropicModels = getModelsForProvider(registry, "anthropic");
 
+			// Guard the loop below: over an empty collection it asserts nothing and still passes.
+			expect(anthropicModels.length).toBeGreaterThan(0);
+			expect(anthropicModels.some((model) => model.id.includes("claude"))).toBe(true);
+
 			for (const model of anthropicModels) {
 				expect(model.baseUrl).toBe("https://my-proxy.example.com/v1");
 			}
@@ -119,6 +123,10 @@ describe("ModelRegistry", () => {
 
 			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
 			const anthropicModels = getModelsForProvider(registry, "anthropic");
+
+			// Guard the loop below: over an empty collection it asserts nothing and still passes.
+			expect(anthropicModels.length).toBeGreaterThan(0);
+			expect(anthropicModels.some((model) => model.id.includes("claude"))).toBe(true);
 
 			for (const model of anthropicModels) {
 				const auth = await registry.getApiKeyAndHeaders(model);
@@ -312,6 +320,11 @@ describe("ModelRegistry", () => {
 
 			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
 			const anthropicModels = getModelsForProvider(registry, "anthropic");
+
+			// Guard the loop below, and pin the "both" this test is named after: the merged
+			// provider config must keep the built-in models alongside the custom one.
+			expect(anthropicModels.some((model) => model.id === "claude-custom")).toBe(true);
+			expect(anthropicModels.some((model) => model.id !== "claude-custom")).toBe(true);
 
 			for (const model of anthropicModels) {
 				expect(model.baseUrl).toBe("https://merged-proxy.example.com/v1");
