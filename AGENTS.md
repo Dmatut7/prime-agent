@@ -1,5 +1,14 @@
 # Development Rules
 
+> **本仓 = 独立 fork（`Dmatut7/prime-agent`，REPL kernel 线），不是官方仓库。** 下面绝大多数规则是从官方 `PrimeIntellect-ai/prime-agent` 的 AGENTS.md 逐字继承的（实测：本文件相对官方仅 +4 行测试卫生规则）。凡官方规则假设「官方发布流程」、与本 fork 本地流程冲突的，以下面「Fork 覆盖」一节为准。
+
+## Fork 覆盖（优先于继承的官方规则）
+
+- **本仓允许并需要 `npm run build`。** 官方那条「NEVER run `npm run build`」是因为官方跑发布版二进制；但本 fork 的本地 `prime-agent` 命令是符号链接 → `packages/coding-agent/dist/bundle/cli.js`，所以根目录 `npm run build` 正是把已安装命令刷新到最新源码的唯一方式。用户要装 / 更新到最新版时就 build。免构建替代：`./prime-agent.sh`（tsx 现场跑最新源码，启动稍慢）。
+- **build 后必须重启才生效：** `prime-agent shutdown`（停旧 daemon + 所有 worker）→ 重开 `prime-agent`；旧会话用 `prime-agent --resume` 或 `prime-agent attach <agent>` 恢复。daemon 不重启就还是旧 bundle。
+- **`install.sh` / `curl … install.sh | sh` 装的是官方发布版，不含本 fork 改动**——要本 fork 最新版只能 build 或 `prime-agent.sh`，别用官方安装器。
+- 其余继承规则（git 并行安全、changelog fragment、代码质量、daemon 协议、依赖 7 天龄、禁 inline import 等）在本 fork 仍适用。
+
 ## Conversational Style
 
 - No fluff or cheerful filler text
