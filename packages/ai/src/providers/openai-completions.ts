@@ -112,8 +112,12 @@ interface OpenAICompatCacheControl {
 	ttl?: string;
 }
 
-type ResolvedOpenAICompletionsCompat = Omit<Required<OpenAICompletionsCompat>, "cacheControlFormat"> & {
+type ResolvedOpenAICompletionsCompat = Omit<
+	Required<OpenAICompletionsCompat>,
+	"cacheControlFormat" | "searchStrategy"
+> & {
 	cacheControlFormat?: OpenAICompletionsCompat["cacheControlFormat"];
+	searchStrategy?: OpenAICompletionsCompat["searchStrategy"];
 };
 
 type ChatCompletionInstructionMessageParam = ChatCompletionDeveloperMessageParam | ChatCompletionSystemMessageParam;
@@ -667,6 +671,25 @@ function buildParams(
 		}
 	}
 
+	// Bailian/DashScope Qwen ignores reasoning_content replayed in `messages` unless
+	// preserve_thinking is set. Opt-in per model via compat.preserveThinking.
+	if (compat.preserveThinking && model.reasoning && options?.reasoningEnabled !== false) {
+		(params as any).preserve_thinking = true;
+	}
+
+	// Bailian/DashScope built-in web search. Note: over the OpenAI-compatible
+	// Chat Completions protocol the server does not return search_info, so the
+	// answer carries citation markers without resolvable source URLs.
+	if (compat.enableSearch) {
+		(params as any).enable_search = true;
+		const searchOptions: Record<string, unknown> = {};
+		if (compat.searchStrategy) searchOptions.search_strategy = compat.searchStrategy;
+		if (compat.forcedSearch) searchOptions.forced_search = true;
+		if (Object.keys(searchOptions).length > 0) {
+			(params as any).search_options = searchOptions;
+		}
+	}
+
 	if (model.baseUrl.includes("openrouter.ai") && model.compat?.openRouterRouting) {
 		(params as any).provider = model.compat.openRouterRouting;
 	}
@@ -1191,6 +1214,10 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		requiresAssistantAfterToolResult: false,
 		requiresThinkingAsText: false,
 		requiresReasoningContentOnAssistantMessages: isDeepSeek,
+		preserveThinking: false,
+		enableSearch: false,
+		searchStrategy: undefined,
+		forcedSearch: false,
 		thinkingFormat: isDeepSeek
 			? "deepseek"
 			: isZai
@@ -1230,6 +1257,10 @@ function getCompat(model: Model<"openai-completions">): ResolvedOpenAICompletion
 			model.compat.requiresReasoningContentOnAssistantMessages ??
 			detected.requiresReasoningContentOnAssistantMessages,
 		thinkingFormat: model.compat.thinkingFormat ?? detected.thinkingFormat,
+		preserveThinking: model.compat.preserveThinking ?? detected.preserveThinking,
+		enableSearch: model.compat.enableSearch ?? detected.enableSearch,
+		searchStrategy: model.compat.searchStrategy ?? detected.searchStrategy,
+		forcedSearch: model.compat.forcedSearch ?? detected.forcedSearch,
 		openRouterRouting: model.compat.openRouterRouting ?? {},
 		vercelGatewayRouting: model.compat.vercelGatewayRouting ?? detected.vercelGatewayRouting,
 		zaiToolStream: model.compat.zaiToolStream ?? detected.zaiToolStream,

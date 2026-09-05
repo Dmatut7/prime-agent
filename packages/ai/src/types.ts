@@ -314,6 +314,14 @@ export interface OpenAICompletionsCompat {
 	requiresReasoningContentOnAssistantMessages?: boolean;
 	/** Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "openrouter" uses reasoning: { effort }, "deepseek" uses thinking: { type } plus reasoning_effort, "zai" uses top-level enable_thinking: boolean, "qwen" uses top-level enable_thinking: boolean, and "qwen-chat-template" uses chat_template_kwargs.enable_thinking. Default: "openai". */
 	thinkingFormat?: "openai" | "openrouter" | "deepseek" | "zai" | "qwen" | "qwen-chat-template";
+	/** Whether to send `preserve_thinking: true` so the provider feeds prior assistant `reasoning_content` back into the model input (Bailian/DashScope Qwen3.7+; without it the server ignores replayed reasoning). Default: false. */
+	preserveThinking?: boolean;
+	/** Whether to send `enable_search: true` so the provider runs its built-in web search (Bailian/DashScope). Default: false. */
+	enableSearch?: boolean;
+	/** Bailian web search strategy: "turbo" (default, faster) or "max" (multi-source, slower). Qwen3.8 does not support "agent". */
+	searchStrategy?: "turbo" | "max";
+	/** Whether Bailian web search must run on every request instead of letting the model decide. Default: false. */
+	forcedSearch?: boolean;
 	/** OpenRouter-specific routing preferences. Only used when baseUrl points to OpenRouter. */
 	openRouterRouting?: OpenRouterRouting;
 	/** Vercel AI Gateway routing preferences. Only used when baseUrl points to Vercel AI Gateway. */

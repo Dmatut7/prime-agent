@@ -29,8 +29,13 @@ const compat = {
 	cacheControlFormat: undefined,
 	sendSessionAffinityHeaders: false,
 	supportsLongCacheRetention: true,
-} satisfies Required<Omit<OpenAICompletionsCompat, "cacheControlFormat">> & {
+	preserveThinking: false,
+	enableSearch: false,
+	searchStrategy: undefined,
+	forcedSearch: false,
+} satisfies Required<Omit<OpenAICompletionsCompat, "cacheControlFormat" | "searchStrategy">> & {
 	cacheControlFormat?: OpenAICompletionsCompat["cacheControlFormat"];
+	searchStrategy?: OpenAICompletionsCompat["searchStrategy"];
 };
 
 function buildModel(): Model<"openai-completions"> {

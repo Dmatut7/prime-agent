@@ -107,6 +107,10 @@ const OpenAICompletionsCompatSchema = Type.Object({
 	requiresAssistantAfterToolResult: Type.Optional(Type.Boolean()),
 	requiresThinkingAsText: Type.Optional(Type.Boolean()),
 	requiresReasoningContentOnAssistantMessages: Type.Optional(Type.Boolean()),
+	preserveThinking: Type.Optional(Type.Boolean()),
+	enableSearch: Type.Optional(Type.Boolean()),
+	searchStrategy: Type.Optional(Type.Union([Type.Literal("turbo"), Type.Literal("max")])),
+	forcedSearch: Type.Optional(Type.Boolean()),
 	thinkingFormat: Type.Optional(
 		Type.Union([
 			Type.Literal("openai"),
