@@ -59,7 +59,7 @@ Prime Agent is an open-source coding and research agent for general and long-run
 本仓 `Dmatut7/prime-agent` 是这条开发线的**唯一主仓**，正脱离官方 fork 网络转为独立仓库（detach）：新提交、issue、release 只进这里。此前两种旧形态都不再作为主开发入口：
 
 - **fork 形式的 `Dmatut7/prime-agent`**：detach 后 URL 不变（仍是 `github.com/Dmatut7/prime-agent`），只是不再显示为官方 fork、也不再被 GitHub 默认搜索当作 fork 过滤掉。bookmark 过这个地址的，照旧有效。
-- **`Dmatut7/prime-agent-x`**（“performance-optimized iteration”）：内容已并入本仓，作历史 / 镜像保留，不再单独开发。bookmark 过它的，请改到 `github.com/Dmatut7/prime-agent`。
+- **`Dmatut7/prime-agent-x`**（早期的 “performance-optimized iteration” 实验线，停在官方较早版本）：不再作为主开发入口、不再单独维护，本仓（已跟进官方 0.9.x 线）是这条线的唯一主仓。bookmark 过它的，请改到 `github.com/Dmatut7/prime-agent`。
 
 找不到新仓时：在 GitHub 搜索 `prime-agent`（不勾 Include forks 也能命中本独立仓），或直接访问 `github.com/Dmatut7/prime-agent`。
 
